@@ -8,6 +8,7 @@ import {
 	cacheSpaceRecordSoon,
 	getCachedSpaceRecord,
 } from "$lib/stores/space-record-cache";
+import { resolveWorkspaceRouteContext } from "$lib/workspace-route";
 
 const MAX_VISIBLE = 3;
 const MAX_SEEN = 240;
@@ -112,24 +113,13 @@ function isTurnNotifyEvent(event: ChannelEnvelope): event is ChannelEnvelope & {
 }
 
 function currentRouteTarget() {
-	const data = page.data as { spaceId?: unknown; sessionId?: unknown };
-	const spaceId =
-		typeof data.spaceId === "string"
-			? data.spaceId
-			: typeof page.params.id === "string"
-				? page.params.id
-				: null;
-	const querySessionId = page.url.searchParams.get("session");
-	const routeSessionId = page.url.pathname.match(
-		/\/spaces\/[^/]+\/sessions\/([^/?#]+)/,
-	)?.[1];
-	const sessionId =
-		typeof data.sessionId === "string"
-			? data.sessionId
-			: routeSessionId
-				? decodeURIComponent(routeSessionId)
-				: querySessionId;
-	return { spaceId, sessionId };
+	const ctx = resolveWorkspaceRouteContext({
+		pathname: page.url.pathname,
+		searchParams: page.url.searchParams,
+		pageData: page.data as { spaceId?: unknown; sessionId?: unknown },
+		params: { id: page.params.id },
+	});
+	return { spaceId: ctx.spaceId, sessionId: ctx.sessionId };
 }
 
 function spaceTitle(space: SpaceRecord | null, fallback: string) {

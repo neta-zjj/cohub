@@ -39,7 +39,6 @@ type ExploreSpaceItem = {
   category: string | null;
   tags: string[];
   saveCount: number;
-  pinCount: number;
   forkCount: number;
   updatedAt: string | null;
   accessLabel: "public" | "sign-in-required" | "unknown";
@@ -222,7 +221,7 @@ router.get("/spaces", async (c) => {
           policy?.signedInUserRole === "builder";
       });
 
-    const [checkpointRows, checkpointStats, pinCounts] = await Promise.all([
+    const [checkpointRows, checkpointStats] = await Promise.all([
       visibleIds.length > 0
         ? db.execute(sql`
           select *
@@ -248,28 +247,9 @@ router.get("/spaces", async (c) => {
             .where(inArray(checkpoints.spaceId, visibleIds))
             .groupBy(checkpoints.spaceId)
         : Promise.resolve([] as Array<{ spaceId: string; checkpointCount: number; forkCount: number }>),
-      visibleIds.length > 0
-        ? db.execute(sql`
-          select m.space_id as "spaceId", count(*)::int as count
-          from v2.space_marks m
-          where m.kind = 'pin'
-            and m.space_id in (${sql.join(visibleIds, sql`, `)})
-            and (
-              (m.resource_type = 'file')
-              or (m.resource_type = 'session' and exists (
-                select 1 from v2.space_sessions s where s.space_id = m.space_id and s.id::text = m.resource_ref
-              ))
-              or (m.resource_type = 'checkpoint' and exists (
-                select 1 from v2.checkpoints c where c.space_id = m.space_id and c.id::text = m.resource_ref
-              ))
-            )
-          group by m.space_id
-        `) as Promise<Array<{ spaceId: string; count: number }>>
-        : Promise.resolve([]),
     ]);
 
     const checkpointStatsBySpaceId = new Map(checkpointStats.map((row) => [row.spaceId, row]));
-    const pinCountBySpaceId = new Map(pinCounts.map((row) => [row.spaceId, Number(row.count)]));
     const checkpointsBySpaceId = new Map<string, Array<typeof checkpoints.$inferSelect>>();
     for (const checkpoint of checkpointRows) {
       const list = checkpointsBySpaceId.get(checkpoint.spaceId) ?? [];
@@ -302,7 +282,6 @@ router.get("/spaces", async (c) => {
         category: entry.label ?? entry.category ?? null,
         tags: [entry.category, entry.label].filter((v): v is string => Boolean(v)),
         saveCount: stats?.checkpointCount ?? 0,
-        pinCount: pinCountBySpaceId.get(space.id) ?? 0,
         forkCount: stats?.forkCount ?? 0,
         updatedAt: space.updatedAt ? new Date(space.updatedAt).toISOString() : null,
         accessLabel: policy.anonymousUserRole === "guest" ? "public" : "sign-in-required",

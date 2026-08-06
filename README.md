@@ -2,6 +2,8 @@
 
 *Your own space to create, play, and build with people and agents.*
 
+We burn 10 billion tokens per week inside our company within Cohub Spaces.
+
 Cohub is a living Space for people and agents. Start anywhere, make in any medium, share as Works.
 
 It combines:
@@ -40,11 +42,6 @@ A Checkpoint is an immutable snapshot saved from a Space.
 
 It preserves a meaningful moment, and can be shared, forked, restored, or used as a stable base for new work.
 
-### Proposal
-A Proposal is a collaboration flow for bringing work from one checkpoint back into another Space.
-
-It keeps review, discussion, and integration close to the work itself.
-
 ### Agent
 An Agent is the active collaborator operating inside a Space.
 
@@ -69,7 +66,6 @@ The platform is for:
 - creating with people and agents in live Spaces
 - saving milestones as Checkpoints
 - forking from Checkpoints into new Spaces
-- proposing changes back into another Space
 - publishing Works from files, directories, or ports
 - using CLI and APIs to automate the same product surface
 
@@ -87,10 +83,18 @@ cohub/
 │   ├── web/          # SvelteKit web app
 │   └── worker/       # Task scheduler — cron jobs and async task processing
 ├── deploy/           # Deployment configs (per environment)
-├── docs/             # Architecture and product model docs
+├── docs/             # Architecture, guides, and examples
 ├── packages/
-│   ├── protocol/     # Shared types and protocols across apps
-│   └── sdk/          # Client SDK for Spaces, Sessions, Checkpoints, and more
+│   ├── billing/              # Billing provider abstraction
+│   ├── cli/                  # @neta-art/cohub-cli
+│   ├── core/                 # Shared server-side domain logic
+│   ├── db/                   # Drizzle schema and DB helpers
+│   ├── identity/             # Auth / identity helpers
+│   ├── infra/                # Infra helpers (Redis, storage, telemetry)
+│   ├── protocol/             # Shared types and protocols (private)
+│   ├── sandbox-client/       # Agent-side sandbox WS client
+│   ├── sandbox-controller/   # Sandbox provisioning controller
+│   └── sdk/                  # @neta-art/cohub client SDK
 ├── scripts/          # Utility scripts
 └── README.md
 ```
@@ -123,13 +127,22 @@ pnpm build
 
 ## Docs
 
-Recommended starting points:
-- `docs/CO-CREATION-MODEL.md`
-- `docs/space-state-model.md`
-- `docs/generations.md`
-- `docs/works-guide.md`
+Product docs (web):
+- English: [cohub.run/docs](https://cohub.run/docs)
+- 中文: [cohub.run/docs/zh](https://cohub.run/docs/zh)
+
+Source of truth for product docs content:
+- `docs/product/en/`
+- `docs/product/zh/`
+
+Engineering notes still in the repo:
+- `docs/self-hosting.md`
 - `docs/agent-sandbox-runtime.md`
-- `docs/prod-deploy-checklist.md`
+- `docs/works-guide.md`
+- `docs/work-commerce-guide.md`
+- `docs/generations.md`
+- `docs/space-hooks.md`
+- `docs/examples/` — generation declarations, Work capability lab, and other samples
 
 ## Open Source Notes
 

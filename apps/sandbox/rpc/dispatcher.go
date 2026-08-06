@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -128,6 +129,8 @@ func (d *Dispatcher) Handle(request protocol.RPCRequest, ownerIdentity string) (
 		return accepted, d.complete(request, accepted.OpID, d.handleFSRead(request))
 	case "fs.write":
 		return accepted, d.complete(request, accepted.OpID, d.handleFSWrite(request))
+	case "fs.mkdir":
+		return accepted, d.complete(request, accepted.OpID, d.handleFSMkdir(request))
 	case "fs.stat":
 		return accepted, d.complete(request, accepted.OpID, d.handleFSStat(request))
 	case "fs.ls":
@@ -161,6 +164,11 @@ type fsWriteParams struct {
 	Content   string `json:"content"`
 	Encoding  string `json:"encoding"`
 	Exclusive bool   `json:"exclusive"`
+}
+
+type fsMkdirParams struct {
+	Path string `json:"path"`
+	CWD  string `json:"cwd"`
 }
 
 type fsLsParams struct {
@@ -306,6 +314,13 @@ func (d *Dispatcher) handleFSRead(request protocol.RPCRequest) interface{} {
 	return result
 }
 
+func (d *Dispatcher) failedFSMutation(request protocol.RPCRequest, err error) interface{} {
+	if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) {
+		return d.failed(request, "", "NOT_DIRECTORY", err.Error())
+	}
+	return d.failed(request, "", "IO_ERROR", err.Error())
+}
+
 func (d *Dispatcher) handleFSWrite(request protocol.RPCRequest) interface{} {
 	var params fsWriteParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -322,10 +337,6 @@ func (d *Dispatcher) handleFSWrite(request protocol.RPCRequest) interface{} {
 	if info, err := os.Stat(resolved.path); err == nil && info.IsDir() {
 		return d.failed(request, "", "NOT_DIRECTORY", fmt.Sprintf("cannot write to a directory: %s", resolved.path))
 	}
-
-	if err := ensureParentDir(resolved.path); err != nil {
-		return d.failed(request, "", "IO_ERROR", err.Error())
-	}
 	data := []byte(params.Content)
 	if params.Encoding == "base64" {
 		decoded, decErr := decodeBase64(params.Content)
@@ -334,6 +345,11 @@ func (d *Dispatcher) handleFSWrite(request protocol.RPCRequest) interface{} {
 		}
 		data = decoded
 	}
+	createdDirs, err := ensureParentDirs(d.cfg.WorkspaceDir, resolved.path)
+	if err != nil {
+		return d.failedFSMutation(request, err)
+	}
+	created := true
 	if params.Exclusive {
 		// Atomic create: O_EXCL fails if the path already exists, so concurrent
 		// exclusive creates cannot clobber each other.
@@ -341,20 +357,53 @@ func (d *Dispatcher) handleFSWrite(request protocol.RPCRequest) interface{} {
 			if os.IsExist(err) {
 				return d.failed(request, "", "ALREADY_EXISTS", fmt.Sprintf("path already exists: %s", resolved.path))
 			}
-			return d.failed(request, "", "IO_ERROR", err.Error())
+			return d.failedFSMutation(request, err)
 		}
-	} else if err := osWriteFile(resolved.path, data); err != nil {
-		return d.failed(request, "", "IO_ERROR", err.Error())
+	} else if created, err = writeFileWithDisposition(resolved.path, data); err != nil {
+		return d.failedFSMutation(request, err)
 	}
 
 	result := map[string]interface{}{
 		"path":         resolved.path,
 		"bytesWritten": len(data),
+		"created":      created,
+		"createdDirs":  createdDirs,
 	}
 	if info, statErr := os.Stat(resolved.path); statErr == nil {
 		result["mtimeMs"] = info.ModTime().UnixMilli()
 	}
 	return result
+}
+
+func (d *Dispatcher) handleFSMkdir(request protocol.RPCRequest) interface{} {
+	var params fsMkdirParams
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		return d.failed(request, "", "BAD_REQUEST", err.Error())
+	}
+
+	resolved, errResponse, ok := d.resolvePathForRequest(request, params.Path, params.CWD)
+	if !ok {
+		return errResponse
+	}
+	if isReadOnlyPath(d.cfg, resolved.path) {
+		return d.failed(request, "", "READ_ONLY_FILESYSTEM", fmt.Sprintf("path is read-only: %s", resolved.path))
+	}
+	createdDirs, err := ensureDirs(d.cfg.WorkspaceDir, resolved.path)
+	if err != nil {
+		return d.failedFSMutation(request, err)
+	}
+	info, err := os.Stat(resolved.path)
+	if err != nil {
+		return d.failedFSMutation(request, err)
+	}
+	if !info.IsDir() {
+		return d.failed(request, "", "NOT_DIRECTORY", fmt.Sprintf("cannot create directory over a file: %s", resolved.path))
+	}
+	return map[string]interface{}{
+		"path":        resolved.path,
+		"createdDirs": createdDirs,
+		"mtimeMs":     info.ModTime().UnixMilli(),
+	}
 }
 
 type fsStatParams struct {

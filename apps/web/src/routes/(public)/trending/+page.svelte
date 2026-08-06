@@ -2,10 +2,7 @@
 import CenteredLoading from "$lib/components/CenteredLoading.svelte";
 import SpaceAvatar from "$lib/components/SpaceAvatar.svelte";
 import UserAvatar from "$lib/components/UserAvatar.svelte";
-import {
-	buildSpaceLandingRoute,
-	buildUserProfileRoute,
-} from "$lib/space-routes";
+import { buildSpaceLandingRoute } from "$lib/space-routes";
 import type {
 	GenerationModelRow,
 	GenerationSpaceRow,
@@ -114,11 +111,6 @@ function getSpaceHref(row: AnyRow): string | null {
 function getUserProfile(row: AnyRow): UserProfile | null {
 	if (isSpaceRow(row) || isUserRow(row)) return row.userProfile;
 	return null;
-}
-
-function getUserHref(profile: UserProfile | null | undefined): string | null {
-	const username = profile?.username?.trim() || "";
-	return username ? buildUserProfileRoute(username) : null;
 }
 
 function getRowKey(row: AnyRow): string {
@@ -311,7 +303,6 @@ const boardHint = $derived(
 				{#each currentRows as row, i (getRowKey(row))}
 					{@const userProfile = getUserProfile(row)}
 					{@const spaceHref = getSpaceHref(row)}
-					{@const userHref = getUserHref(userProfile)}
 					{@const secondary = getSecondaryMetrics(row)}
 					<div
 						class="trending-table-row px-0 transition-all duration-300 ease-out"
@@ -346,14 +337,6 @@ const boardHint = $derived(
 									>
 										{getDisplayName(row)}
 									</a>
-								{:else if isUserRow(row) && userHref}
-									<a
-										href={userHref}
-										class="trending-name min-w-0 text-[14px] font-medium leading-snug text-text-primary transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/70 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-primary sm:truncate sm:text-[13px] sm:leading-normal"
-										data-sveltekit-preload-data="hover"
-									>
-										{getDisplayName(row)}
-									</a>
 								{:else}
 									<div class="trending-name min-w-0 text-[14px] font-medium leading-snug text-text-primary sm:truncate sm:text-[13px] sm:leading-normal">
 										{getDisplayName(row)}
@@ -363,15 +346,8 @@ const boardHint = $derived(
 							{#if isSpaceRow(row) && userProfile}
 								<div class="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-text-tertiary sm:mt-0.5 sm:text-[11px]">
 									<span>by</span>
-									{#if userHref}
-										<a href={userHref} class="inline-flex min-w-0 items-center gap-1.5 transition-colors hover:text-text-secondary" data-sveltekit-preload-data="hover">
-											<UserAvatar name={userProfile.displayName} avatarUrl={userProfile.avatarUrl} size="xxs" class="border-0" />
-											<span class="min-w-0 truncate">{userProfile.displayName}</span>
-										</a>
-									{:else}
-										<UserAvatar name={userProfile.displayName} avatarUrl={userProfile.avatarUrl} size="xxs" class="border-0" />
-										<span class="min-w-0 truncate">{userProfile.displayName}</span>
-									{/if}
+									<UserAvatar name={userProfile.displayName} avatarUrl={userProfile.avatarUrl} size="xxs" class="border-0" />
+									<span class="min-w-0 truncate">{userProfile.displayName}</span>
 								</div>
 							{/if}
 						</div>

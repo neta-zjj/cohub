@@ -7,17 +7,76 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cohub/apps/sandbox/env"
 )
 
-func ensureParentDir(path string) error {
-	return os.MkdirAll(filepath.Dir(path), 0o755)
+func ensureParentDirs(root, path string) ([]string, error) {
+	return ensureDirs(root, filepath.Dir(path))
 }
 
-func osWriteFile(path string, content []byte) error {
-	return os.WriteFile(path, content, 0o644)
+func ensureDirs(root, target string) ([]string, error) {
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return []string{}, os.MkdirAll(target, 0o755)
+	}
+	if rel == "." {
+		return []string{}, nil
+	}
+
+	parts := strings.Split(rel, string(filepath.Separator))
+	current := filepath.Clean(root)
+	created := make([]string, 0, len(parts))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		err := os.Mkdir(current, 0o755)
+		if err == nil {
+			created = append(created, filepath.ToSlash(filepath.Join(parts[:i+1]...)))
+			continue
+		}
+		if !os.IsExist(err) {
+			return created, err
+		}
+		info, statErr := os.Stat(current)
+		if statErr != nil {
+			return created, statErr
+		}
+		if !info.IsDir() {
+			return created, &os.PathError{Op: "mkdir", Path: current, Err: syscall.ENOTDIR}
+		}
+	}
+	return created, nil
+}
+
+func writeFileWithDisposition(path string, content []byte) (bool, error) {
+	for {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			return true, writeAndClose(file, content)
+		}
+		if !os.IsExist(err) {
+			return false, err
+		}
+
+		file, err = os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, writeAndClose(file, content)
+	}
+}
+
+func writeAndClose(file *os.File, content []byte) error {
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // osWriteFileExclusive creates path atomically, failing with os.IsExist when it
@@ -27,11 +86,7 @@ func osWriteFileExclusive(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(content); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return writeAndClose(f, content)
 }
 
 func osReadFile(path string) (string, error) {

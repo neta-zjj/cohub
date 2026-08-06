@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import type { Job } from "bullmq";
 import type { TaskPayload } from "@cohub/protocol/task";
+import { normalizeRequestSource } from "@cohub/protocol/provenance";
 import { checkpoints, spaces } from "@cohub/db";
 import { checkpointForkReference } from "@cohub/core/references";
 import { enqueueReferences } from "../reference-index-queue.js";
@@ -11,8 +12,10 @@ import { config } from "../config.js";
 import { publishUserConfigFromWorkspace, publishConfigFromWorkspace } from "../config-publish.js";
 import { getGenerationsDir, publishGenerationsCacheFromDir } from "../generations-cache.js";
 import { publishModelsCacheFromFile } from "../models-cache.js";
+import { publishImageToTextCacheFromFile } from "../image-to-text-cache.js";
 import { getPromptsDir, publishPromptsCacheFromDir } from "../prompts-cache.js";
 import { getSkillsDir, publishSkillsCacheFromDir } from "../skills-cache.js";
+import { publishSpaceEvent } from "../space-events.js";
 import { uploadAssetIfMissing } from "../checkpoint/assets.js";
 import {
   buildStagedDiffSummary,
@@ -22,7 +25,7 @@ import {
 } from "../checkpoint/diff-precompute.js";
 import { ensureGitRepo, runGit, runGitWithOutput } from "../checkpoint/git.js";
 import { collectUserGitRepos } from "../checkpoint/git-bundles.js";
-import { saveCanvasCheckpointSnapshots } from "../checkpoint/canvas.js";
+import { saveBoardCheckpointSnapshots } from "../checkpoint/board.js";
 import { materializeLatest } from "../checkpoint/materialize.js";
 import { CHECKPOINT_ASSET_MANIFEST_PATH, CHECKPOINT_META_PATH, USER_GIT_REPOS_PATH, ensureCheckpointDirs, getCheckpointLatestSubPath } from "../checkpoint/paths.js";
 import { syncSystemRepo, type CheckpointAsset } from "../checkpoint/repo-sync.js";
@@ -41,7 +44,7 @@ type SaveCheckpointTimings = Record<string, number>;
 
 type ConfigPublishWarning = {
   scope: "platform" | "user";
-  target: "models_cache" | "generations_cache" | "prompts_cache" | "skills_cache";
+  target: "models_cache" | "image_to_text_cache" | "generations_cache" | "prompts_cache" | "skills_cache";
   message: string;
 };
 
@@ -260,6 +263,7 @@ export const saveCheckpointForSpace = async (input: SaveCheckpointInput): Promis
       source: input.reason ?? "save_checkpoint",
       sourceTaskRunId: input.sourceTaskRunId ?? null,
       savedBy: input.userId ?? null,
+      ...(input.requestSource ? { requestSource: input.requestSource } : {}),
       mirror: { status: "queued" },
     },
     createdAt,
@@ -278,8 +282,8 @@ export const saveCheckpointForSpace = async (input: SaveCheckpointInput): Promis
       }),
     ]);
   }
-  const canvasSnapshots = await timeIt(timings, "saveCanvasCheckpointSnapshots", () => saveCanvasCheckpointSnapshots({ checkpointId: checkpoint.id, spaceId }));
-  await timeIt(timings, "updateCheckpointCanvasMeta", () => db.update(checkpoints).set({ meta: { ...(checkpoint.meta as Record<string, unknown> | null), timings, canvas: { snapshotCount: canvasSnapshots.count } } }).where(eq(checkpoints.id, checkpoint.id)));
+  const boardSnapshots = await timeIt(timings, "saveBoardCheckpointSnapshots", () => saveBoardCheckpointSnapshots({ checkpointId: checkpoint.id, spaceId }));
+  await timeIt(timings, "updateCheckpointBoardMeta", () => db.update(checkpoints).set({ meta: { ...(checkpoint.meta as Record<string, unknown> | null), timings, board: { snapshotCount: boardSnapshots.count } } }).where(eq(checkpoints.id, checkpoint.id)));
   await timeIt(timings, "updateSpaceHead", () => db.update(spaces).set({ headCheckpointId: checkpoint.id, updatedAt: new Date() }).where(eq(spaces.id, spaceId)));
 
   await progress("mirror_gitea");
@@ -300,6 +304,7 @@ export const saveCheckpointForSpace = async (input: SaveCheckpointInput): Promis
   if (space.name === "config") {
     publishedUserConfig = await timeIt(timings, "publishUserConfig", () => publishUserConfigFromWorkspace({ userId: space.userUuid, spaceId: space.id, checkpointId: checkpoint.id, workspaceDir: dirs.latestDir }));
     await publishModelsCacheFromFile({ modelsPath: join(publishedUserConfig.targetDir, ".cohub", "models.json"), scope: "user", userId: space.userUuid, sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "user", target: "models_cache", message: formatErrorMessage(error) }, error));
+    await publishImageToTextCacheFromFile({ configPath: join(publishedUserConfig.targetDir, ".cohub", "image-to-text.json"), scope: "user", userId: space.userUuid, sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "user", target: "image_to_text_cache", message: formatErrorMessage(error) }, error));
     await publishGenerationsCacheFromDir({ generationsDir: getGenerationsDir(publishedUserConfig.targetDir), scope: "user", userId: space.userUuid, sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "user", target: "generations_cache", message: formatErrorMessage(error) }, error));
     await publishPromptsCacheFromDir({ promptsDir: getPromptsDir(publishedUserConfig.targetDir), scope: "user", userId: space.userUuid, sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "user", target: "prompts_cache", message: formatErrorMessage(error) }, error));
     await publishSkillsCacheFromDir({ skillsDir: getSkillsDir(publishedUserConfig.targetDir), scope: "user", userId: space.userUuid, sourceCheckpointId: checkpoint.id, sandboxDir: "/configs/user/.agents/skills" }).catch((error) => recordPublishWarning({ scope: "user", target: "skills_cache", message: formatErrorMessage(error) }, error));
@@ -309,6 +314,7 @@ export const saveCheckpointForSpace = async (input: SaveCheckpointInput): Promis
   if (config.platformSpaceId && spaceId === config.platformSpaceId) {
     publishedPlatformConfig = await timeIt(timings, "publishPlatformConfig", () => publishConfigFromWorkspace({ workspaceDir: dirs.latestDir, checkpointId: checkpoint.id, targetDir: "/configs/platform", whitelist: ["AGENTS.md", "CLAUDE.md", ".agents", ".cohub"], sourceLabel: "platform" }));
     await publishModelsCacheFromFile({ modelsPath: join(publishedPlatformConfig.targetDir, ".cohub", "models.json"), scope: "platform", sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "platform", target: "models_cache", message: formatErrorMessage(error) }, error));
+    await publishImageToTextCacheFromFile({ configPath: join(publishedPlatformConfig.targetDir, ".cohub", "image-to-text.json"), scope: "platform", sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "platform", target: "image_to_text_cache", message: formatErrorMessage(error) }, error));
     await publishGenerationsCacheFromDir({ generationsDir: getGenerationsDir(publishedPlatformConfig.targetDir), scope: "platform", sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "platform", target: "generations_cache", message: formatErrorMessage(error) }, error));
     await publishPromptsCacheFromDir({ promptsDir: getPromptsDir(publishedPlatformConfig.targetDir), scope: "platform", sourceCheckpointId: checkpoint.id }).catch((error) => recordPublishWarning({ scope: "platform", target: "prompts_cache", message: formatErrorMessage(error) }, error));
     await publishSkillsCacheFromDir({ skillsDir: getSkillsDir(publishedPlatformConfig.targetDir), scope: "platform", sourceCheckpointId: checkpoint.id, sandboxDir: "/configs/platform/.agents/skills" }).catch((error) => recordPublishWarning({ scope: "platform", target: "skills_cache", message: formatErrorMessage(error) }, error));
@@ -328,6 +334,18 @@ export const saveCheckpointForSpace = async (input: SaveCheckpointInput): Promis
   }
 
   await progress("completed", { checkpointId: checkpoint.id, commitHash, ...(publishWarnings.length > 0 ? { publishWarnings } : {}) });
+  await publishSpaceEvent({
+    type: "checkpoint.created",
+    spaceId,
+    payload: {
+      checkpointId: checkpoint.id,
+      commitHash,
+      parentCheckpointId,
+      rootCheckpointId,
+      description: checkpoint.description,
+      savedBy: input.userId ?? null,
+    },
+  }).catch((error) => console.warn(`[save_checkpoint] failed to publish checkpoint.created for space=${spaceId}:`, error));
   return { checkpointId: checkpoint.id, commitHash, branch, commitMessage, changedFiles: diffStats.changedFileCount, stats, assetCount, detectedGitRepoCount, timings, spaceId, latestSubPath: getCheckpointLatestSubPath(spaceId), ...(publishedUserConfig ? { publishedUserConfig } : {}), ...(publishedPlatformConfig ? { publishedPlatformConfig } : {}), ...(publishWarnings.length > 0 ? { publishWarnings } : {}) };
 };
 
@@ -337,7 +355,16 @@ const saveCheckpointHandler = async (job: Job, context?: { taskRunId: string }) 
   if (!spaceId) throw new Error("spaceId is required for save_checkpoint task");
   const description = (payload.data?.description as string | undefined) ?? null;
   const reason = (payload.data?.reason as string | undefined) ?? "save_checkpoint";
-  return saveCheckpointWithLock({ spaceId, userId: payload.userId, description, reason, sourceTaskRunId: context?.taskRunId ?? null, onProgress: (progress) => job.updateProgress(progress) }, saveCheckpointForSpace);
+  const requestSource = normalizeRequestSource(payload.data?.requestSource);
+  return saveCheckpointWithLock({
+    spaceId,
+    userId: payload.userId,
+    description,
+    reason,
+    sourceTaskRunId: context?.taskRunId ?? null,
+    requestSource,
+    onProgress: (progress) => job.updateProgress(progress),
+  }, saveCheckpointForSpace);
 };
 
 registerTask("save_checkpoint", saveCheckpointHandler);

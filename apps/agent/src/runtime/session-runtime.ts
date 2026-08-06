@@ -1,6 +1,6 @@
 import type { Agent, AgentEvent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { Agent as PiAgent } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, createAssistantMessageEventStream, type Api, type Context, type ImageContent, type Model, type SimpleStreamOptions, isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
 import { context, trace, type Span } from "@opentelemetry/api";
 import { logger } from "../logger.js";
 import { sendOutput } from "../redis.js";
@@ -11,7 +11,11 @@ import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
 import { getCurrentToolExecutionContext, runWithToolExecutionContext, type ToolExecutionContext } from "../tool-context.js";
 import { isToolFailureDetails } from "./tools/index.js";
-
+import { applyRequestProfile } from "./request-profile.js";
+import { mergeHeaders } from "@cohub/infra/config-runtime/models";
+import type { ImageToTextConfig } from "@cohub/infra/config-runtime/image-to-text";
+import { ModelUnavailableError } from "@cohub/core/sessions";
+import { prepareAgentImagesForModel } from "./image-to-text.js";
 import type { SpaceModListItem } from "@cohub/core/space-mods";
 
 export type CohubAgentSessionEvent = AgentEvent;
@@ -31,7 +35,7 @@ export type CohubAgentSession = {
   enqueueSteer(text: string, images?: ImageContent[]): void;
   waitForIdle(): Promise<void>;
   setModel(model: Model<Api>): Promise<void>;
-  configureRuntimeIdentity(input: { userId?: string | null; spaceOwnerUserId?: string | null; modelRegistry: CohubModelRegistry; requestedModel?: { provider: string; id: string } }): Promise<void>;
+  configureRuntimeIdentity(input: { userId?: string | null; spaceOwnerUserId?: string | null; modelRegistry: CohubModelRegistry; imageToTextConfig?: ImageToTextConfig | null; requestedModel?: { provider: string; id: string }; requestedThinkingLevel?: string | null }): Promise<void>;
   configureTools(tools: ToolLike[]): Promise<void>;
   reload(): Promise<void>;
   abort(): Promise<void>;
@@ -41,7 +45,6 @@ export type CohubAgentSession = {
 
 type ToolLike = AgentTool;
 
-const AGENT_RETRY_ENABLED = true;
 const AGENT_RETRY_MAX_RETRIES = 2;
 const AGENT_RETRY_BASE_DELAY_MS = 1000;
 const LLM_REQUEST_MAX_BYTES = 30 * 1024 * 1024;
@@ -64,11 +67,45 @@ function resolveThinkingLevelForModel(model: CohubModel, requested?: string | nu
   return clampThinkingLevel(model, level) as ThinkingLevel;
 }
 
-function isRetryableAssistantError(message: AssistantMessage | undefined): boolean {
+const COHUB_RETRYABLE_ERROR_OVERRIDE_PATTERN = /\b400\b.*(?:upstream(?:_error)?:?\s*upstream request failed|upstream response failed.*(?:bad_response_status_code|stage["']?\s*[:=]\s*["']?upstream_response))/i;
+const COHUB_NON_RETRYABLE_ERROR_PATTERN = /insufficient[_ ](?:user[_ ])?quota|quota exceeded|out of budget|billing|余额不足|额度不足|invalid (?:request|url)|content[_ ]filter|request (?:is )?too large|payload too large/i;
+const COHUB_MODEL_UNAVAILABLE_PATTERN = /model (?:is )?(?:(?:not )?available|unavailable)|requested model is not available/i;
+const COHUB_RETRYABLE_ERROR_PATTERN = /responses_missing_terminal|anthropic_missing_message_stop|upstream_temporarily_unavailable|stream_read_error|stream ended before a terminal response event|upstream service temporarily unavailable|upstream request failed/i;
+
+function getHttpErrorStatus(errorMessage: string): number | null {
+  const status = errorMessage.match(/\b([45]\d{2})\b/)?.[1];
+  return status ? Number(status) : null;
+}
+
+/**
+ * Classify a raw provider error string. `null` means the string alone is
+ * inconclusive and the caller should consult pi's own classification.
+ */
+function classifyProviderErrorMessage(errorMessage: string): boolean | null {
+  if (COHUB_RETRYABLE_ERROR_OVERRIDE_PATTERN.test(errorMessage)) return true;
+  if (COHUB_NON_RETRYABLE_ERROR_PATTERN.test(errorMessage)) return false;
+
+  const status = getHttpErrorStatus(errorMessage);
+  if (status != null) return status === 408 || status === 413 || status === 429 || status >= 500;
+  if (COHUB_MODEL_UNAVAILABLE_PATTERN.test(errorMessage)) return false;
+  if (COHUB_RETRYABLE_ERROR_PATTERN.test(errorMessage)) return true;
+
+  return null;
+}
+
+/**
+ * Whether a raw provider error string is worth retrying. Shares the rules used
+ * for assistant retries so callers holding only an error message (compaction's
+ * summarize step) don't invent their own classification.
+ */
+export function isRetryableProviderErrorMessage(errorMessage: string): boolean {
+  if (!errorMessage) return false;
+  return classifyProviderErrorMessage(errorMessage) === true;
+}
+
+function isRetryableProviderError(message: AssistantMessage | undefined): boolean {
   if (message?.stopReason !== "error" || !message.errorMessage) return false;
-  return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
-    message.errorMessage,
-  );
+  return classifyProviderErrorMessage(message.errorMessage) ?? isRetryableAssistantError(message);
 }
 
 function hasAssistantContent(message: AssistantMessage): boolean {
@@ -83,16 +120,26 @@ function isEmptySuccessfulAssistantMessage(message: AssistantMessage | undefined
 }
 
 /**
+ * Supplementary overflow patterns not yet covered by upstream pi-ai.
+ * The cohub provider proxy returns Chinese error messages on context overflow.
+ */
+const LOCAL_OVERFLOW_PATTERNS = [
+  /超过系统限制/, // Cohub proxy: "输入Tokens数量(N)超过系统限制(M)"
+];
+
+/**
  * Explicit context-window overflow (provider error). Silent / length-stop overflow
  * is intentionally excluded so we never discard a successful-looking response.
  */
 export function isContextOverflowFailure(message: AssistantMessage | undefined): boolean {
   if (message?.stopReason !== "error" || !message.errorMessage) return false;
-  return isContextOverflow(message);
+  if (isContextOverflow(message)) return true;
+  const errorMessage = message.errorMessage;
+  return LOCAL_OVERFLOW_PATTERNS.some((p) => p.test(errorMessage));
 }
 
 export function isRetryableAssistantFailure(message: AssistantMessage | undefined): boolean {
-  return isRetryableAssistantError(message)
+  return isRetryableProviderError(message)
     || isEmptySuccessfulAssistantMessage(message)
     || isContextOverflowFailure(message);
 }
@@ -106,8 +153,11 @@ type AssistantRetryOutcome = {
 };
 
 function getAssistantRetryOutcome(message: AssistantMessage | undefined, retryAttempt: number): AssistantRetryOutcome {
-  if (!AGENT_RETRY_ENABLED || !isRetryableAssistantFailure(message) || retryAttempt >= AGENT_RETRY_MAX_RETRIES) {
-    return { shouldRetry: false, retryAttempt };
+  if (!isRetryableAssistantFailure(message)) {
+    return { shouldRetry: false, retryAttempt, retryReason: "not_retryable" };
+  }
+  if (retryAttempt >= AGENT_RETRY_MAX_RETRIES) {
+    return { shouldRetry: false, retryAttempt, retryReason: "retry_exhausted" };
   }
 
   const overflow = isContextOverflowFailure(message);
@@ -141,6 +191,8 @@ function logAssistantRetry(sessionId: string, turnId: string | undefined, outcom
     logger.info(
       `[Agent] assistant retry scheduled ${contextInfo} attempt=${outcome.retryAttempt} delayMs=${outcome.retryDelayMs} reason=${reason}`,
     );
+  } else if (outcome.retryReason === "retry_exhausted") {
+    logger.warn(`[Agent] assistant retry exhausted ${contextInfo} attempt=${outcome.retryAttempt}`);
   } else {
     logger.debug(`[Agent] assistant retry not scheduled ${contextInfo} attempt=${outcome.retryAttempt} reason=${reason}`);
   }
@@ -159,6 +211,7 @@ export type CreateCohubAgentSessionOptions = {
   modelRegistry: CohubModelRegistry;
   tools: ToolLike[];
   spaceMods?: SpaceModListItem[];
+  imageToTextConfig?: ImageToTextConfig | null;
   model?: Model<Api>;
 };
 
@@ -410,7 +463,7 @@ function toLlmMessages(messages: AgentMessage[]) {
       });
     }
   }
-  return applyLlmRequestSizeGuard(result) as never;
+  return result as never;
 }
 
 function normalizeUserId(userId?: string | null) {
@@ -425,7 +478,74 @@ function shouldIncludeUserSkills(userId: string | null, spaceOwnerUserId: string
   return Boolean(userId && spaceOwnerUserId && userId === spaceOwnerUserId);
 }
 
-function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; userId: string | null }): StreamFn {
+type WrapAssistantMessageStreamOptions = {
+  model: Model<Api>;
+  signal?: AbortSignal;
+  onEvent?: (event: AssistantMessageEvent) => void;
+  onFailure?: (error: unknown) => void;
+};
+
+export function wrapAssistantMessageStream(
+  stream: AsyncIterable<AssistantMessageEvent>,
+  options: WrapAssistantMessageStreamOptions,
+): AssistantMessageEventStream {
+  const wrapped = createAssistantMessageEventStream();
+  let latestPartial: AssistantMessage | undefined;
+
+  const pushFailure = (error: unknown) => {
+    options.onFailure?.(error);
+    const reason: "aborted" | "error" = options.signal?.aborted ? "aborted" : "error";
+    const fallback: AssistantMessage = {
+      role: "assistant",
+      content: [],
+      api: options.model.api,
+      provider: options.model.provider,
+      model: options.model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: reason,
+      timestamp: Date.now(),
+    };
+    const failure: AssistantMessage = {
+      ...(latestPartial ?? fallback),
+      stopReason: reason,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      timestamp: Date.now(),
+    };
+    wrapped.push({ type: "error", reason, error: failure });
+  };
+
+  void (async () => {
+    try {
+      for await (const event of stream) {
+        if ("partial" in event) latestPartial = event.partial;
+        options.onEvent?.(event);
+        wrapped.push(event);
+      }
+    } catch (error) {
+      pushFailure(error);
+    }
+  })().catch(pushFailure);
+
+  return wrapped;
+}
+
+function attachImageToTextCalls(message: AssistantMessage, calls: Awaited<ReturnType<typeof prepareAgentImagesForModel>>["calls"]) {
+  if (calls.length === 0) return;
+  const record = message as unknown as Record<string, unknown>;
+  const meta = record.meta && typeof record.meta === "object" && !Array.isArray(record.meta)
+    ? record.meta as Record<string, unknown>
+    : {};
+  record.meta = { ...meta, imageToText: { schemaVersion: 1, calls } };
+}
+
+function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; imageToTextConfig: ImageToTextConfig | null; sessionManager: SessionManager; userId: string | null; threadId: string }): StreamFn {
   const tracer = getAgentTracer();
 
   return async (model: Model<Api>, ctx: Context, options?: SimpleStreamOptions) => {
@@ -434,6 +554,7 @@ function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; u
     const round = (toolCtx?.llmRound ?? 0) + 1;
     if (toolCtx) {
       toolCtx.llmRound = round;
+      toolCtx.model = { provider: model.provider, id: model.id };
     }
     const metrics = toolCtx?.metrics;
     if (metrics) {
@@ -457,8 +578,26 @@ function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; u
         if (toolCtx?.assistantMessageTiming && !toolCtx.assistantMessageTiming.startedAt) {
           toolCtx.assistantMessageTiming.startedAt = new Date().toISOString();
         }
-        const headers = runtime.modelRegistry.getHeaders(model.provider, model.id);
-        const streamHeaders = headers ? { ...headers, ...(options?.headers ?? {}) } : options?.headers;
+        const prepared = await prepareAgentImagesForModel({
+          context: ctx,
+          targetModel: model,
+          config: runtime.imageToTextConfig,
+          sessionManager: runtime.sessionManager,
+          sessionId: toolCtx?.sessionId ?? runtime.threadId,
+          executionTurnId: toolCtx?.turnId,
+          signal: options?.signal,
+        }).catch((error) => {
+          logger.warn("[ImageToText] context preparation failed; continuing with original images", error);
+          return { context: ctx, calls: [] };
+        });
+        const requestContext: Context = {
+          ...prepared.context,
+          messages: applyLlmRequestSizeGuard(structuredClone(prepared.context.messages)) as Context["messages"],
+        };
+        const streamHeaders = mergeHeaders(
+          runtime.modelRegistry.getHeaders(model.provider, model.id),
+          options?.headers as Record<string, string> | undefined,
+        );
         if (toolCtx?.spaceId && toolCtx.sessionId) {
           const at = new Date().toISOString();
           await sendOutput({
@@ -478,66 +617,56 @@ function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; u
           });
         }
         const models = createModelsFromRegistry(runtime.modelRegistry, model);
-        const stream = streamSimpleWithModels(models, model, ctx, {
+        const requestOptions = applyRequestProfile(model as CohubModel, {
           ...options,
+          threadId: runtime.threadId,
           headers: model.provider === "cohub"
-            ? {
-                ...streamHeaders,
+            ? mergeHeaders(streamHeaders, {
                 "x-litellm-track-extra": JSON.stringify({
                   user_uuid: runtime.userId,
                   cohub_space_uuid: toolCtx?.spaceId ?? null,
                   cohub_session_uuid: toolCtx?.sessionId ?? null,
+                  cohub_turn_uuid: toolCtx?.turnId ?? null,
+                  cohub_llm_round: round,
                 }),
-              }
+              })
             : streamHeaders,
         });
+        const stream = streamSimpleWithModels(models, model, requestContext, requestOptions);
 
-        const wrapped = createAssistantMessageEventStream();
-        void context.with(llmRound.context, async () => {
-          try {
-            for await (const event of stream) {
-              if (event.type !== "start") {
-                llmRound.markFirstToken();
-              }
-
-              wrapped.push(event);
-
-              if (event.type === "done") {
-                recordLlmUsage(llmRound.span, {
-                  inputTokens: event.message.usage?.input,
-                  outputTokens: event.message.usage?.output,
-                  totalTokens: event.message.usage?.totalTokens,
-                  cacheReadTokens: event.message.usage?.cacheRead,
-                  cacheWriteTokens: event.message.usage?.cacheWrite,
-                  cost: event.message.usage?.cost?.total,
-                });
-                llmRound.finish({ finishReason: event.reason, outcome: "ok" });
-              } else if (event.type === "error") {
-                recordLlmUsage(llmRound.span, {
-                  inputTokens: event.error.usage?.input,
-                  outputTokens: event.error.usage?.output,
-                  totalTokens: event.error.usage?.totalTokens,
-                  cacheReadTokens: event.error.usage?.cacheRead,
-                  cacheWriteTokens: event.error.usage?.cacheWrite,
-                  cost: event.error.usage?.cost?.total,
-                });
-                llmRound.finish({ finishReason: event.reason, outcome: event.reason === "aborted" ? "aborted" : "error" });
-              }
+        return wrapAssistantMessageStream(stream, {
+          model,
+          signal: options?.signal,
+          onFailure: (error) => llmRound.fail(error),
+          onEvent: (event) => {
+            if (event.type !== "start") {
+              llmRound.markFirstToken();
             }
-          } catch (error) {
-            llmRound.fail(error);
-            wrapped.end();
-          } finally {
-            if (toolCtx) {
-              toolCtx.llmRound = round - 1;
+            if (event.type === "done") {
+              attachImageToTextCalls(event.message, prepared.calls);
+              recordLlmUsage(llmRound.span, {
+                inputTokens: event.message.usage?.input,
+                outputTokens: event.message.usage?.output,
+                totalTokens: event.message.usage?.totalTokens,
+                cacheReadTokens: event.message.usage?.cacheRead,
+                cacheWriteTokens: event.message.usage?.cacheWrite,
+                cost: event.message.usage?.cost?.total,
+              });
+              llmRound.finish({ finishReason: event.reason, outcome: "ok" });
+            } else if (event.type === "error") {
+              attachImageToTextCalls(event.error, prepared.calls);
+              recordLlmUsage(llmRound.span, {
+                inputTokens: event.error.usage?.input,
+                outputTokens: event.error.usage?.output,
+                totalTokens: event.error.usage?.totalTokens,
+                cacheReadTokens: event.error.usage?.cacheRead,
+                cacheWriteTokens: event.error.usage?.cacheWrite,
+                cost: event.error.usage?.cost?.total,
+              });
+              llmRound.finish({ finishReason: event.reason, outcome: event.reason === "aborted" ? "aborted" : "error" });
             }
-          }
-        }).catch((error) => {
-          llmRound.fail(error);
-          wrapped.end();
+          },
         });
-
-        return wrapped;
       } catch (error) {
         llmRound.fail(error);
         throw error;
@@ -572,9 +701,17 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
   let runtimeUserId = normalizeUserId(options.userId);
   let runtimeSpaceOwnerUserId = normalizeUserId(options.spaceOwnerUserId);
   let runtimeModelRegistry = options.modelRegistry;
+  let runtimeImageToTextConfig = options.imageToTextConfig ?? null;
   let runtimeTools = options.tools;
   let systemPromptStateKey: string | null = null;
-  const getRuntime = () => ({ modelRegistry: runtimeModelRegistry, userId: runtimeUserId });
+  const sessionAffinity = options.sessionManager.getSessionAffinity();
+  const getRuntime = () => ({
+    modelRegistry: runtimeModelRegistry,
+    imageToTextConfig: runtimeImageToTextConfig,
+    sessionManager: options.sessionManager,
+    userId: runtimeUserId,
+    threadId: sessionAffinity.threadId,
+  });
   const model = options.model ?? (sessionContext.model ? runtimeModelRegistry.find(sessionContext.model.provider, sessionContext.model.modelId) : undefined) ?? runtimeModelRegistry.getDefault();
   if (!model) {
     throw new Error("No model available. Check platform models.json");
@@ -617,6 +754,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
       messages: sessionContext.messages,
     },
     steeringMode: "all",
+    sessionId: sessionAffinity.sessionId,
     convertToLlm: toLlmMessages,
     streamFn: createStreamFn(getRuntime),
     getApiKey: (provider: string) => runtimeModelRegistry.getApiKey(provider),
@@ -786,8 +924,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
     },
     shouldDeferErrorPersistence(message) {
       const assistantMessage = message as unknown as AssistantMessage;
-      return AGENT_RETRY_ENABLED
-        && isRetryableAssistantFailure(assistantMessage)
+      return isRetryableAssistantFailure(assistantMessage)
         && retryAttempt < AGENT_RETRY_MAX_RETRIES;
     },
     consumePendingForcedCompaction() {
@@ -834,7 +971,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
         ? input.modelRegistry.find(input.requestedModel.provider, input.requestedModel.id)
         : undefined;
       if (input.requestedModel && !requested) {
-        throw new Error(`Requested model is not available: ${input.requestedModel.provider}/${input.requestedModel.id}`);
+        throw new ModelUnavailableError(input.requestedModel.provider, input.requestedModel.id);
       }
       const target = requested
         ?? input.modelRegistry.find(currentModel.provider, currentModel.id)
@@ -846,19 +983,26 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
         ? agent.state.systemPrompt
         : await buildSystemPromptForTools(runtimeTools, { userId: nextUserId, spaceOwnerUserId: nextSpaceOwnerUserId });
       const shouldChangeModel = target.provider !== currentModel.provider || target.id !== currentModel.id;
-      const nextThinkingLevel = shouldChangeModel
-        ? resolveThinkingLevelForModel(target as CohubModel, agent.state.thinkingLevel)
-        : agent.state.thinkingLevel;
+      const hasRequestedThinkingLevel = input.requestedThinkingLevel !== undefined && input.requestedThinkingLevel !== null;
+      const nextThinkingLevel = hasRequestedThinkingLevel
+        ? resolveThinkingLevelForModel(target as CohubModel, input.requestedThinkingLevel)
+        : shouldChangeModel
+          ? resolveThinkingLevelForModel(target as CohubModel, agent.state.thinkingLevel)
+          : agent.state.thinkingLevel;
 
       runtimeUserId = nextUserId;
       runtimeSpaceOwnerUserId = nextSpaceOwnerUserId;
       runtimeModelRegistry = input.modelRegistry;
+      runtimeImageToTextConfig = input.imageToTextConfig ?? null;
       agent.state.systemPrompt = nextSystemPrompt;
       systemPromptStateKey = nextKey;
+      const shouldChangeThinkingLevel = nextThinkingLevel !== agent.state.thinkingLevel;
       if (shouldChangeModel) {
         agent.state.model = target;
-        agent.state.thinkingLevel = nextThinkingLevel;
         options.sessionManager.appendModelChange(target.provider, target.id);
+      }
+      if (shouldChangeModel || shouldChangeThinkingLevel) {
+        agent.state.thinkingLevel = nextThinkingLevel;
         options.sessionManager.appendThinkingLevelChange(nextThinkingLevel);
       }
       agent.state.tools = runtimeTools as never;

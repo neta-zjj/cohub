@@ -94,13 +94,21 @@ export function userProfileKey(userKey: string, userUuid: string) {
 	return [userKey, "user-profile", userUuid].map(encodeKeyPart).join(":");
 }
 
-export function canvasPendingTransactionKey(
+export function filePendingDraftKey(
 	userKey: string,
 	spaceId: string,
-	documentId: string,
+	path: string,
+) {
+	return [userKey, spaceId, path, "file-draft"].map(encodeKeyPart).join(":");
+}
+
+export function boardPendingTransactionKey(
+	userKey: string,
+	spaceId: string,
+	boardId: string,
 	txId: string,
 ) {
-	return [userKey, spaceId, documentId, txId].map(encodeKeyPart).join(":");
+	return [userKey, spaceId, boardId, txId].map(encodeKeyPart).join(":");
 }
 
 export function taskRunKey(
@@ -137,6 +145,10 @@ export function spaceFsDirKey(
 	return [userKey, spaceId, normalizeDirPath(dirPath)]
 		.map(encodeKeyPart)
 		.join(":");
+}
+
+export function spaceFsEpochKey(userKey: string, spaceId: string) {
+	return [userKey, spaceId, "fs-epoch"].map(encodeKeyPart).join(":");
 }
 
 export function normalizeDirPath(dirPath: string) {

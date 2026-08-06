@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/cohub/apps/sandbox/env"
@@ -161,6 +162,80 @@ func writeRequest(t *testing.T, params fsWriteParams) protocol.RPCRequest {
 		RequestScopedMessage: protocol.RequestScopedMessage{RequestID: "req-w"},
 		Method:               "fs.write",
 		Params:               raw,
+	}
+}
+
+func mkdirRequest(t *testing.T, params fsMkdirParams) protocol.RPCRequest {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal mkdir params: %v", err)
+	}
+	return protocol.RPCRequest{
+		RequestScopedMessage: protocol.RequestScopedMessage{RequestID: "req-mkdir"},
+		Method:               "fs.mkdir",
+		Params:               raw,
+	}
+}
+
+func TestFSMutationsReportFileParentAsNotDirectory(t *testing.T) {
+	root := setupTree(t)
+	d := newTreeDispatcher(t, root)
+	if err := os.WriteFile(filepath.Join(root, "parent-file"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write parent file: %v", err)
+	}
+
+	results := []interface{}{
+		d.handleFSWrite(writeRequest(t, fsWriteParams{Path: "parent-file/child.txt", Content: "content"})),
+		d.handleFSMkdir(mkdirRequest(t, fsMkdirParams{Path: "parent-file/child"})),
+	}
+	for index, result := range results {
+		failed, ok := result.(protocol.RPCFailed)
+		if !ok {
+			t.Fatalf("mutation %d: expected failure, got %T (%v)", index, result, result)
+		}
+		if failed.Error.Code != "NOT_DIRECTORY" {
+			t.Fatalf("mutation %d: error code = %q, want NOT_DIRECTORY", index, failed.Error.Code)
+		}
+	}
+
+	content, err := os.ReadFile(filepath.Join(root, "parent-file"))
+	if err != nil {
+		t.Fatalf("read parent file: %v", err)
+	}
+	if string(content) != "keep" {
+		t.Fatalf("parent file content = %q, want unchanged", content)
+	}
+}
+
+func TestFSWriteReportsCreatedFileAndParentDirectories(t *testing.T) {
+	root := setupTree(t)
+	d := newTreeDispatcher(t, root)
+
+	res := d.handleFSWrite(writeRequest(t, fsWriteParams{Path: "aa/bb/c.txt", Content: "one"}))
+	result, ok := res.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected nested write to succeed, got %T (%v)", res, res)
+	}
+	if created, _ := result["created"].(bool); !created {
+		t.Fatalf("expected created=true, got %v", result["created"])
+	}
+	createdDirs, _ := result["createdDirs"].([]string)
+	if !reflect.DeepEqual(createdDirs, []string{"aa", "aa/bb"}) {
+		t.Fatalf("createdDirs = %v, want [aa aa/bb]", createdDirs)
+	}
+
+	res = d.handleFSWrite(writeRequest(t, fsWriteParams{Path: "aa/bb/c.txt", Content: "two"}))
+	result, ok = res.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected overwrite to succeed, got %T (%v)", res, res)
+	}
+	if created, _ := result["created"].(bool); created {
+		t.Fatalf("expected created=false for overwrite")
+	}
+	createdDirs, _ = result["createdDirs"].([]string)
+	if len(createdDirs) != 0 {
+		t.Fatalf("createdDirs = %v, want none", createdDirs)
 	}
 }
 

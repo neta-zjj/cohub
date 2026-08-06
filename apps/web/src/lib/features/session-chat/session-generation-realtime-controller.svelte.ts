@@ -144,6 +144,7 @@ export function createSessionGenerationRealtimeController(options: {
 					current: snapshot.current,
 					intermediateMessages: snapshot.intermediateMessages,
 					lifecycle: snapshot.lifecycle ?? null,
+					updatedAt: snapshot.updatedAt ?? null,
 				});
 				return result.applied;
 			} catch (error) {

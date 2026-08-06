@@ -1,6 +1,7 @@
 <script lang="ts">
 import { ExternalLink, X } from "lucide-svelte";
 import SpaceAvatar from "$lib/components/SpaceAvatar.svelte";
+import { swipeDismiss } from "$lib/gestures/swipe-dismiss";
 import {
 	getTurnNotificationHref,
 	getTurnNotificationMeta,
@@ -50,6 +51,12 @@ function handleCardKeydown(
 				tabindex="0"
 				class="turn-notification pointer-events-auto text-left"
 				title="Open turn"
+				data-drawer-swipe-ignore
+				use:swipeDismiss={{
+					onDismiss: () => turnNotifications.dismiss(notification.id),
+					onGestureStart: () => turnNotifications.setHovered(notification.id, true),
+					onGestureEnd: () => turnNotifications.setHovered(notification.id, false),
+				}}
 				onclick={() => openCurrent(notification)}
 				onkeydown={(event) => handleCardKeydown(event, notification)}
 				onmouseenter={() => turnNotifications.setHovered(notification.id, true)}
@@ -120,6 +127,8 @@ function handleCardKeydown(
 		background: var(--bg-surface);
 		box-shadow: 0 8px 24px rgb(0 0 0 / 0.08);
 		padding: 8px 8px 8px 10px;
+		/* Vertical scroll stays native; horizontal drags feed swipe-to-dismiss. */
+		touch-action: pan-y;
 		transition:
 			border-color 140ms ease,
 			background-color 140ms ease,

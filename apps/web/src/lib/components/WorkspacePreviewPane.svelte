@@ -1,22 +1,17 @@
 <script lang="ts">
-import { previewPanelClip } from "$lib/transitions/preview-panel-clip";
-
 const {
 	width = 480,
 	ariaLabel = "Workspace preview",
 	onResizeStart,
-	desktopOnly = false,
 	immersive = false,
-	/** When false, skip mount/unmount clip (e.g. file↔canvas tab switch). */
-	animate = true,
+	open = true,
 	children,
 }: {
 	width?: number;
 	ariaLabel?: string;
 	onResizeStart?: (event: PointerEvent) => void;
-	desktopOnly?: boolean;
 	immersive?: boolean;
-	animate?: boolean;
+	open?: boolean;
 	children: import("svelte").Snippet;
 } = $props();
 
@@ -30,30 +25,23 @@ $effect(() => {
 	el.style.setProperty("--workspace-preview-width", `${width}px`);
 	el.style.setProperty("--workspace-preview-inner-width", `${width}px`);
 });
-
-// Svelte transition params: duration 0 disables animation.
-// Pass targetWidth so intro does not race CSS-var $effect.
-const clipParams = $derived(
-	animate ? { targetWidth: width } : { duration: 0, targetWidth: width },
-);
 </script>
 
 <section
 	bind:this={paneEl}
-	class="workspace-preview-pane min-w-0 flex-col border-border-subtle bg-bg-content {desktopOnly
-		? 'hidden lg:flex'
-		: 'flex'}"
+	class="workspace-preview-pane flex min-w-0 flex-col border-border-subtle bg-bg-content"
+	class:workspace-preview-pane--closed={!open}
 	class:workspace-preview-pane--immersive={immersive}
 	aria-label={ariaLabel}
-	in:previewPanelClip={clipParams}
-	out:previewPanelClip={clipParams}
+	aria-hidden={!open}
+	inert={!open ? true : undefined}
 >
 	<div
 		class="workspace-preview-pane-inner flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
 	>
 		{@render children()}
 	</div>
-	{#if onResizeStart && !immersive}
+	{#if open && onResizeStart && !immersive}
 		<button
 			type="button"
 			class="preview-resize-handle hidden lg:block"
@@ -73,6 +61,10 @@ const clipParams = $derived(
 		height: 100%;
 	}
 
+	.workspace-preview-pane--closed {
+		display: none;
+	}
+
 	@media (min-width: 960px) {
 		.workspace-preview-pane {
 			position: relative;
@@ -81,9 +73,23 @@ const clipParams = $derived(
 			flex-shrink: 0;
 			border-left-width: 1px;
 			overflow: hidden;
-			/* Live width changes (tree toggle / focus). Mount/unmount uses
-			   previewPanelClip (inline width + transition:none). */
 			transition: width var(--motion-panel-duration) var(--motion-panel-ease);
+		}
+
+		.workspace-preview-pane--closed {
+			display: flex;
+			width: 0;
+			border-left-width: 0;
+			pointer-events: none;
+		}
+
+		@starting-style {
+			.workspace-preview-pane:not(.workspace-preview-pane--closed):not(
+				.workspace-preview-pane--immersive
+			) {
+				width: 0;
+				border-left-width: 0;
+			}
 		}
 
 		.workspace-preview-pane-inner {
@@ -106,6 +112,16 @@ const clipParams = $derived(
 			width: 100%;
 			max-width: none;
 		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.workspace-preview-pane {
+			transition: none;
+		}
+	}
+
+	:global(body.sidebar-resizing) .workspace-preview-pane {
+		transition: none;
 	}
 
 	.preview-resize-handle {

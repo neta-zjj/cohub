@@ -4,27 +4,35 @@ import type {
 	SpacePublicEndpoints,
 } from "@cohub/protocol/ports";
 import type {
-	CanvasSemanticOp,
+	BoardOperation,
 	SpacePendingDiffFileResponse,
 	SpaceRecord,
 	WorkRecord,
 } from "@neta-art/cohub";
-import { isCovasFile } from "$lib/canvas/canvas-file";
-import type { CovasDocument } from "$lib/canvas/canvas-schema";
+import type { BoardDocument } from "@neta-art/cohub/board";
+import { fade } from "svelte/transition";
+import type {
+	BoardAutomationActivity,
+	BoardCollaboratorProfile,
+} from "$lib/board/board-activity";
 import type { FileViewMode } from "$lib/components/file-diff-view";
+import PreviewExpandMenu from "$lib/components/PreviewExpandMenu.svelte";
 import WorkPublishDialog from "$lib/components/WorkPublishDialog.svelte";
-import { isTextFileResponse } from "$lib/space-file-text";
+import WorkspacePreviewPane from "$lib/components/WorkspacePreviewPane.svelte";
+import { DURATION_PANEL, svelteEaseIn } from "$lib/motion.svelte";
 import type { SpaceFsNode } from "$lib/space-fs";
 import { patchCachedSpaceList } from "$lib/stores/space-list-cache";
 import { cacheSpaceRecordSoon } from "$lib/stores/space-record-cache";
 import type { LocalUploadEntry } from "$lib/upload-entries";
 import type { WorkspaceFileLinkTarget } from "$lib/workspace-file-links";
-import CanvasPreviewPanel from "./CanvasPreviewPanel.svelte";
-import type { InlineCanvasPanelState } from "./canvas-preview-controller.svelte";
+import BoardPreviewPanel from "./BoardPreviewPanel.svelte";
+import type { InlineBoardPanelState } from "./board-preview-controller.svelte";
 import FilesSidebarPanel from "./FilesSidebarPanel.svelte";
 import type { FileWorkspaceInlineFile } from "./file-workspace-controller.svelte";
 import InlineFilePanel from "./InlineFilePanel.svelte";
 import PortPreviewPanel from "./PortPreviewPanel.svelte";
+import PreviewTabs from "./PreviewTabs.svelte";
+import { workspaceFilePreviewKind } from "./preview-tabs";
 
 type PanHandlers = {
 	start: (event: MouseEvent) => void;
@@ -60,13 +68,20 @@ export type SpaceFileDomainProps = {
 	inlineFileTabs: FileWorkspaceInlineFile[];
 	activeInlineFilePath: string | null;
 	inlineFileCanGoBack: boolean;
-	inlineCanvas: InlineCanvasPanelState | null;
-	inlineCanvasTabs: InlineCanvasPanelState[];
-	activeInlineCanvasPath: string | null;
+	inlineBoard: InlineBoardPanelState | null;
+	inlineBoardTabs: InlineBoardPanelState[];
+	activeInlineBoardPath: string | null;
+	/** Display identities for board collaborator cursors and automation markers. */
+	boardCollaborators?: Map<string, BoardCollaboratorProfile>;
+	/** Recent CLI / Agent board transactions. */
+	boardActivities?: BoardAutomationActivity[];
+	onOpenBoardActivity?: (
+		activity: BoardAutomationActivity,
+	) => void | Promise<void>;
 	inlinePortPreview: { port: string; url: string } | null;
 	inlinePortTabs: { port: string; url: string }[];
 	activeInlinePort: string | null;
-	activePreviewKind: "file" | "canvas" | "port" | null;
+	activePreviewKind: "file" | "board" | "port" | null;
 	inlinePortEndpoint: SpacePublicEndpoint | null;
 	previewEndpoints: SpacePublicEndpoints;
 	inlineFileDownloadUrl: string;
@@ -79,11 +94,12 @@ export type SpaceFileDomainProps = {
 	inlineFileDiffError: string | null;
 	inlineFileIsMarkdown: boolean;
 	inlineFileIsHtml: boolean;
-	inlineFileDirty: boolean;
 	inlineFileCopied: boolean;
 	inlineFileExt: string;
 	inlineFileIsImage: boolean;
 	inlineFileIsVideo: boolean;
+	inlineFileIsAudio: boolean;
+	inlineFileIsPdf: boolean;
 	inlineFileDataUrl: string | null;
 	inlineFileWork: WorkRecord | null;
 	fileActionMenuOpenPath: string | null;
@@ -103,7 +119,7 @@ export type SpaceFileDomainProps = {
 	onToggleDirectory: (node: SpaceFsNode) => void | Promise<void>;
 	onRefreshFileTree: () => void | Promise<void>;
 	onCreateFile: (parentPath: string) => void | Promise<void>;
-	onCreateCanvas: (parentPath: string) => void | Promise<void>;
+	onCreateBoard: (parentPath: string) => void | Promise<void>;
 	onCreateDir: (parentPath: string) => void | Promise<void>;
 	onRenameNode: (node: SpaceFsNode) => void | Promise<void>;
 	onMoveNode: (node: SpaceFsNode, targetDir: string) => void | Promise<void>;
@@ -118,26 +134,30 @@ export type SpaceFileDomainProps = {
 	onOpenLinkedInlineFile: (
 		target: string | WorkspaceFileLinkTarget,
 	) => void | Promise<void>;
-	onOpenInlineCanvas: (path: string) => void | Promise<void>;
+	onOpenInlineBoard: (path: string) => void | Promise<void>;
 	onCloseInlineFile: () => void;
 	onActivateInlineFile: (path: string) => void;
 	onCloseInlineFileTab: (path: string) => void;
-	onActivateInlineCanvas: (path: string) => void;
-	onCloseInlineCanvasTab: (path: string) => void;
+	onActivateInlineBoard: (path: string) => void;
+	onCloseInlineBoardTab: (path: string) => void;
 	onActivateInlinePort: (port: string) => void;
 	onCloseInlinePortTab: (port: string) => void;
 	onBackInlineFile: () => void | Promise<void>;
 	onDownloadInlineFile: () => void | Promise<void>;
 	onRetryInlineFile?: () => void | Promise<void>;
 	onCopyInlineFileContent: () => void | Promise<void>;
-	onSaveInlineFile: () => void | Promise<void>;
+	onUpdateInlineFileDraft: (path: string, draft: string) => void;
+	onRetryInlineFileSave: () => void | Promise<void>;
+	onOverwriteInlineFile: () => void | Promise<void>;
+	onReloadInlineFile: () => void | Promise<void>;
 	onOpenInlinePort: (port: string, url: string) => void;
-	onCloseInlinePort: () => void;
-	onCommitInlineCanvas: (
-		document: CovasDocument,
-		ops: CanvasSemanticOp[],
+	onCommitInlineBoard: (
+		boardId: string,
+		path: string,
+		document: BoardDocument,
+		ops: BoardOperation[],
 	) => void | Promise<void>;
-	onCloseInlineCanvas: () => void;
+	onRetryInlineBoardSave: (boardId: string) => void | Promise<void>;
 	onBeginPreviewPanelResize: (event: PointerEvent) => void;
 	onTogglePreviewFocusMode: () => void | Promise<void>;
 	onTogglePreviewImmersiveMode: () => void | Promise<void>;
@@ -158,9 +178,8 @@ export type SpaceFileDomainProps = {
 		path: string,
 		range: { start: number; end: number } | null,
 	) => void;
-	onCanvasViewStateChange?: (state: {
+	onBoardViewStateChange?: (state: {
 		path: string;
-		camera: CovasDocument["viewport"];
 		visibleRect: {
 			x: number;
 			y: number;
@@ -196,9 +215,12 @@ let {
 	inlineFileTabs,
 	activeInlineFilePath,
 	inlineFileCanGoBack,
-	inlineCanvas,
-	inlineCanvasTabs,
-	activeInlineCanvasPath,
+	inlineBoard,
+	inlineBoardTabs,
+	activeInlineBoardPath,
+	boardCollaborators,
+	boardActivities,
+	onOpenBoardActivity,
 	inlinePortPreview,
 	inlinePortTabs,
 	activeInlinePort,
@@ -215,11 +237,12 @@ let {
 	inlineFileDiffError,
 	inlineFileIsMarkdown,
 	inlineFileIsHtml,
-	inlineFileDirty,
 	inlineFileCopied,
 	inlineFileExt,
 	inlineFileIsImage,
 	inlineFileIsVideo,
+	inlineFileIsAudio,
+	inlineFileIsPdf,
 	inlineFileDataUrl,
 	inlineFileWork,
 	fileActionMenuOpenPath = $bindable(),
@@ -239,7 +262,7 @@ let {
 	onToggleDirectory,
 	onRefreshFileTree,
 	onCreateFile,
-	onCreateCanvas,
+	onCreateBoard,
 	onCreateDir,
 	onRenameNode,
 	onMoveNode,
@@ -249,23 +272,25 @@ let {
 	onInsertPathReference,
 	onOpenInlineFile,
 	onOpenLinkedInlineFile,
-	onOpenInlineCanvas,
+	onOpenInlineBoard,
 	onCloseInlineFile,
 	onActivateInlineFile,
 	onCloseInlineFileTab,
-	onActivateInlineCanvas,
-	onCloseInlineCanvasTab,
+	onActivateInlineBoard,
+	onCloseInlineBoardTab,
 	onActivateInlinePort,
 	onCloseInlinePortTab,
 	onBackInlineFile,
 	onDownloadInlineFile,
 	onRetryInlineFile,
 	onCopyInlineFileContent,
-	onSaveInlineFile,
+	onUpdateInlineFileDraft,
+	onRetryInlineFileSave,
+	onOverwriteInlineFile,
+	onReloadInlineFile,
 	onOpenInlinePort,
-	onCloseInlinePort,
-	onCommitInlineCanvas,
-	onCloseInlineCanvas,
+	onCommitInlineBoard,
+	onRetryInlineBoardSave,
 	onBeginPreviewPanelResize,
 	onTogglePreviewFocusMode,
 	onTogglePreviewImmersiveMode,
@@ -279,7 +304,7 @@ let {
 	onOpenWorkPublish,
 	onCloseWorkPublish,
 	onVisibleLinesChange,
-	onCanvasViewStateChange,
+	onBoardViewStateChange,
 }: SpaceFileDomainProps = $props();
 
 function closeMobileDrawerIfNeeded(mobile: boolean) {
@@ -303,59 +328,88 @@ const previewTabs = $derived([
 		key: tab.path,
 		label: tab.response?.name ?? tab.path.split("/").pop() ?? tab.path,
 		title: tab.path,
-		dirty: Boolean(
-			tab.response &&
-				isTextFileResponse(tab.response) &&
-				tab.draft !== tab.response.content,
-		),
+		syncStatus: tab.syncStatus,
 		active: activePreviewKind === "file" && tab.path === activeInlineFilePath,
 	})),
-	...inlineCanvasTabs.map((tab) => ({
-		kind: "canvas" as const,
+	...inlineBoardTabs.map((tab) => ({
+		kind: "board" as const,
 		key: tab.path,
 		label: tab.path.split("/").pop() ?? tab.path,
 		title: tab.path,
-		dirty: tab.saving,
-		active:
-			activePreviewKind === "canvas" && tab.path === activeInlineCanvasPath,
+		syncStatus: tab.saveError
+			? ("error" as const)
+			: tab.saving
+				? ("saving" as const)
+				: ("idle" as const),
+		active: activePreviewKind === "board" && tab.path === activeInlineBoardPath,
 	})),
 	...inlinePortTabs.map((tab) => ({
 		kind: "port" as const,
 		key: tab.port,
 		label: `:${tab.port}`,
 		title: tab.url,
-		dirty: false,
+		syncStatus: "idle" as const,
 		active: activePreviewKind === "port" && tab.port === activeInlinePort,
 	})),
 ]);
 
-function activatePreviewTab(kind: "file" | "canvas" | "port", key: string) {
+function activatePreviewTab(kind: "file" | "board" | "port", key: string) {
 	if (kind === "file") onActivateInlineFile(key);
-	else if (kind === "canvas") onActivateInlineCanvas(key);
+	else if (kind === "board") onActivateInlineBoard(key);
 	else onActivateInlinePort(key);
 }
 
-function closePreviewTab(kind: "file" | "canvas" | "port", key: string) {
+function closePreviewTab(kind: "file" | "board" | "port", key: string) {
 	if (kind === "file") onCloseInlineFileTab(key);
-	else if (kind === "canvas") onCloseInlineCanvasTab(key);
+	else if (kind === "board") onCloseInlineBoardTab(key);
 	else onCloseInlinePortTab(key);
 }
 
-/**
- * Open/close clip only when the preview column appears or disappears.
- * Tab switches (file ↔ canvas ↔ port) keep the shell still.
- */
-let previewShellWasOpen = false;
-let animatePreviewShell = $state(true);
-$effect.pre(() => {
-	const open = Boolean(activePreviewKind);
-	animatePreviewShell = open ? !previewShellWasOpen : true;
-	previewShellWasOpen = open;
-});
+function previewContentOut(node: Element) {
+	const reducedMotion =
+		typeof window !== "undefined" &&
+		window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	return fade(node, {
+		duration: isMobile || reducedMotion ? 0 : DURATION_PANEL,
+		easing: svelteEaseIn,
+	});
+}
 </script>
 
+<WorkspacePreviewPane
+	width={previewPanelWidth}
+	ariaLabel="Workspace preview"
+	onResizeStart={onBeginPreviewPanelResize}
+	immersive={previewImmersiveMode}
+	open={Boolean(activePreviewKind)}
+>
+	{#if activePreviewKind}
+		<div
+			class="relative flex h-full min-w-0 flex-col overflow-hidden"
+			out:previewContentOut
+		>
+			{#if !isMobile && !previewImmersiveMode}
+				<PreviewTabs
+					tabs={previewTabs}
+					onActivate={activatePreviewTab}
+					onClose={closePreviewTab}
+					{treeVisible}
+					{onToggleTree}
+				>
+					{#snippet trailing()}
+						<PreviewExpandMenu
+							focused={previewFocusMode}
+							immersive={previewImmersiveMode}
+							size="sm"
+							onToggleFocus={onTogglePreviewFocusMode}
+							onToggleImmersive={onTogglePreviewImmersiveMode}
+						/>
+					{/snippet}
+				</PreviewTabs>
+			{/if}
+			<div class="relative min-h-0 flex-1">
 {#if activePreviewKind === "file" && inlineFile}
-	<InlineFilePanel
+		<InlineFilePanel
 		{inlineFile}
 		{previewTabs}
 		{treeVisible}
@@ -373,19 +427,17 @@ $effect.pre(() => {
 		{inlineFileDiffError}
 		{inlineFileIsMarkdown}
 		{inlineFileIsHtml}
-		{inlineFileDirty}
 		{activeFsReadonly}
 		{canEditFiles}
 		{inlineFileCopied}
 		{inlineFileExt}
 		{inlineFileIsImage}
 		{inlineFileIsVideo}
+		{inlineFileIsAudio}
+		{inlineFileIsPdf}
 		{inlineFileDataUrl}
 		inlineFileSpaceId={spaceId}
 		{inlineFileWork}
-		previewPanelWidth={previewPanelWidth}
-		animateShell={animatePreviewShell}
-		previewFocusMode={previewFocusMode}
 		previewImmersiveMode={previewImmersiveMode}
 		{isMobile}
 		bind:fileActionMenuOpenPath
@@ -400,10 +452,11 @@ $effect.pre(() => {
 		onDownloadInlineFile={onDownloadInlineFile}
 		onRetryInlineFile={onRetryInlineFile}
 		onCopyInlineFileContent={onCopyInlineFileContent}
-		onSaveInlineFile={onSaveInlineFile}
+		onUpdateInlineFileDraft={onUpdateInlineFileDraft}
+		onRetryInlineFileSave={onRetryInlineFileSave}
+		onOverwriteInlineFile={onOverwriteInlineFile}
+		onReloadInlineFile={onReloadInlineFile}
 		onPublishInlineFile={publishInlineFile}
-		onPreviewResizeStart={onBeginPreviewPanelResize}
-		onTogglePreviewFocusMode={onTogglePreviewFocusMode}
 		onTogglePreviewImmersiveMode={onTogglePreviewImmersiveMode}
 		onLabelFile={(path: string, anchorEl?: HTMLElement | null) =>
 			onEditResourceLabels("file", path, anchorEl)}
@@ -412,33 +465,41 @@ $effect.pre(() => {
 		onRenameFilePath={(path: string) => onRenameNode(onGetFileActionNode(path))}
 		onDeleteFilePath={(path: string) => onDeleteNode(onGetFileActionNode(path))}
 		onVisibleLinesChange={onVisibleLinesChange}
-	/>
+		/>
 {/if}
 
-{#if activePreviewKind === "canvas" && inlineCanvas}
-	<CanvasPreviewPanel
-		canvas={inlineCanvas}
+{#if inlineBoard}
+	<div
+		class="h-full min-h-0"
+		hidden={activePreviewKind !== "board"}
+		inert={activePreviewKind !== "board"}
+		aria-hidden={activePreviewKind !== "board"}
+	>
+		<BoardPreviewPanel
+		board={inlineBoard}
 		previewTabs={previewTabs}
+		spaceId={spaceId}
+		active={activePreviewKind === "board"}
 		{treeVisible}
 		{onToggleTree}
 		onActivatePreviewTab={activatePreviewTab}
 		onClosePreviewTab={closePreviewTab}
-		width={previewPanelWidth}
-		focused={previewFocusMode}
 		immersive={previewImmersiveMode}
 		{isMobile}
-		animateShell={animatePreviewShell}
-		onResizeStart={onBeginPreviewPanelResize}
-		onToggleFocus={onTogglePreviewFocusMode}
+		collaborators={boardCollaborators}
+		activities={boardActivities}
+		onOpenActivity={onOpenBoardActivity}
 		onToggleImmersive={onTogglePreviewImmersiveMode}
-		onCommit={onCommitInlineCanvas}
-		onClose={onCloseInlineCanvas}
-		onViewStateChange={onCanvasViewStateChange}
-	/>
+		onCommit={onCommitInlineBoard}
+		onRetrySave={onRetryInlineBoardSave}
+		onViewStateChange={onBoardViewStateChange}
+		onOpenFile={onOpenInlineFile}
+		/>
+	</div>
 {/if}
 
 {#if activePreviewKind === "port" && inlinePortPreview}
-	<PortPreviewPanel
+		<PortPreviewPanel
 		previewTabs={previewTabs}
 		{treeVisible}
 		{onToggleTree}
@@ -448,18 +509,16 @@ $effect.pre(() => {
 		url={inlinePortEndpoint?.url ?? inlinePortPreview.url}
 		status={inlinePortEndpoint?.status ?? "unknown"}
 		observedAt={inlinePortEndpoint?.observedAt}
-		width={previewPanelWidth}
-		focused={previewFocusMode}
 		immersive={previewImmersiveMode}
 		{isMobile}
-		animateShell={animatePreviewShell}
-		onResizeStart={onBeginPreviewPanelResize}
-		onToggleFocus={onTogglePreviewFocusMode}
 		onToggleImmersive={onTogglePreviewImmersiveMode}
 		onPublish={() => onOpenWorkPublish("port", inlinePortPreview!.port)}
-		onClose={onCloseInlinePort}
-	/>
+		/>
 {/if}
+			</div>
+		</div>
+	{/if}
+</WorkspacePreviewPane>
 
 <FilesSidebarPanel
 	{spaceId}
@@ -470,7 +529,9 @@ $effect.pre(() => {
 		? "Files are not available for this shared session."
 		: fileTreeError}
 	subtitle={activeFsSidebarSubtitle}
-	activePort={spaceHasMinimalAccess ? null : (inlinePortPreview?.port ?? null)}
+	activePort={spaceHasMinimalAccess || activePreviewKind !== "port"
+		? null
+		: activeInlinePort}
 	canWrite={!spaceHasMinimalAccess && canEditFiles && !activeFsReadonly}
 	showItemActions={!spaceHasMinimalAccess && !activeFsReadonly}
 	draggable={!spaceHasMinimalAccess}
@@ -488,13 +549,14 @@ $effect.pre(() => {
 	onToggle={onToggleDirectory}
 	onSelect={(node, options) => {
 		if (node.type !== "file") return;
-		if (isCovasFile(node.path) && !activeFsReadonly) void onOpenInlineCanvas(node.path);
+		if (workspaceFilePreviewKind(node.path, activeFsReadonly) === "board")
+			void onOpenInlineBoard(node.path);
 		else void onOpenInlineFile(node.path);
 		closeMobileDrawerIfNeeded(options.mobile);
 	}}
 	onRefresh={onRefreshFileTree}
 	onCreateFile={onCreateFile}
-	onCreateCanvas={onCreateCanvas}
+	onCreateBoard={onCreateBoard}
 	onCreateDir={onCreateDir}
 	onRename={onRenameNode}
 	onMove={onMoveNode}

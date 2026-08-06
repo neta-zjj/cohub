@@ -16,6 +16,7 @@ import { UserApi } from "./apis/user.js";
 import { UsersApi } from "./apis/users.js";
 import { WorksApi } from "./apis/works.js";
 import { WorkCommerceApi } from "./apis/work-commerce.js";
+import { WorkRealtimeApi } from "./apis/work-realtime.js";
 import { PublicInviteApi } from "./apis/invitations.js";
 import { ReferralsApi } from "./apis/referrals.js";
 import { HttpTransport, type CohubClientOptions } from "./transport.js";
@@ -125,6 +126,11 @@ export class CohubClient {
     this.referrals = new ReferralsApi(this.transport);
     this.works = new WorksApi(this.transport);
     this.workCommerce = new WorkCommerceApi(this.transport);
+    this.work.realtime = new WorkRealtimeApi(
+      this.transport,
+      this.websocketClient,
+      () => this.workRuntime.context(),
+    );
   }
 
   context() {
@@ -136,6 +142,7 @@ export class CohubClient {
   };
 
   readonly work = {
+    realtime: null as unknown as WorkRealtimeApi,
     commerce: {
       resolveProducts: async (input: { productKeys: string[] }) => {
         const context = await this.workRuntime.context();
@@ -152,7 +159,8 @@ export class CohubClient {
         if (!context?.work?.id) throw new Error("Work context is unavailable — not running inside a published Work runtime.");
         return this.workCommerce.consumeCredits(context.work.id, input);
       },
-      purchase: async (input: { productKey: string }) => this.workRuntime.purchase(input),
+      purchase: async (input: { productKey: string; purchaseAttemptId?: string }) =>
+        this.workRuntime.purchase(input),
       getCheckoutState: async (): Promise<{ status: WorkCommerceCheckoutStatus; orderId: string | null }> => {
         const result = await this.workRuntime.checkoutState();
         return { status: result?.status ?? null, orderId: result?.orderId ?? null };

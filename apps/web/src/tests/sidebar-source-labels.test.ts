@@ -3,7 +3,9 @@ import { describe, test } from "node:test";
 import type { LabelListItem } from "@neta-art/cohub";
 import {
 	findSessionUserLabel,
+	getDisplayLabels,
 	getSessionUserLabelSystemKey,
+	isSystemLabel,
 	SESSION_USER_ROOT_LABEL_SYSTEM_KEY,
 } from "../lib/stores/sidebar-source-labels";
 
@@ -76,5 +78,68 @@ describe("findSessionUserLabel", () => {
 			children: [custom],
 		});
 		assert.equal(findSessionUserLabel([onlyCustom], "me-uuid"), null);
+	});
+});
+
+describe("sidebar label visibility", () => {
+	test("keeps user and migrated legacy labels visible", () => {
+		const nullKey = makeLabel({
+			id: "null-key",
+			name: "Bug",
+			source: "user",
+			systemKey: null,
+		});
+		const blankKey = makeLabel({
+			id: "blank-key",
+			name: "Frontend",
+			source: "user",
+			systemKey: "  ",
+		});
+		const legacyChild = makeLabel({
+			id: "legacy-child",
+			name: "P0",
+			parentId: "legacy-root",
+			depth: 1,
+			source: "user",
+			systemKey: null,
+		});
+		const legacyRoot = makeLabel({
+			id: "legacy-root",
+			name: "TODO",
+			source: "user",
+			systemKey: "legacy:pinned",
+			children: [legacyChild],
+		});
+
+		assert.deepEqual(
+			getDisplayLabels([nullKey, blankKey, legacyRoot]).map(
+				(label) => label.id,
+			),
+			["null-key", "blank-key", "legacy-root"],
+		);
+		assert.equal(isSystemLabel(legacyRoot, [legacyRoot]), false);
+		assert.equal(isSystemLabel(legacyChild, [legacyRoot]), false);
+	});
+
+	test("protects labels with a real system key and descendants of system roots", () => {
+		const child = makeLabel({
+			id: "system-child",
+			name: "Web App",
+			parentId: "system-root",
+			depth: 1,
+			source: "user",
+			systemKey: null,
+		});
+		const root = makeLabel({
+			id: "system-root",
+			name: "Source",
+			source: "user",
+			systemKey: "session-source:root",
+			children: [child],
+		});
+
+		assert.equal(isSystemLabel(root, [root]), true);
+		assert.equal(isSystemLabel(child, [root]), true);
+		assert.deepEqual(getDisplayLabels([root]), []);
 	});
 });

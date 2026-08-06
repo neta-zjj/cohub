@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "ui": {
+    "workspace": {
+      "defaultLayout": {
+        "leftSidebar": "collapsed",
+        "fileTree": "collapsed",
+        "preview": { "kind": "file", "path": "README.md" },
+        "presentation": "fullscreen"
+      }
+    }
+  }
+}

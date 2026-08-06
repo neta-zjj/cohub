@@ -7,35 +7,39 @@ import {
 	Loader2,
 	RefreshCw,
 	Rocket,
-	X,
 } from "lucide-svelte";
 import { onDestroy } from "svelte";
-import PreviewExpandMenu from "$lib/components/PreviewExpandMenu.svelte";
 import type { PreviewCaptureTarget } from "$lib/features/preview-mark";
 import PreviewMarkHost from "$lib/features/preview-mark/ui/PreviewMarkHost.svelte";
+import PreviewFloatChrome from "$lib/features/space/modules/PreviewFloatChrome.svelte";
+import type { PreviewTab } from "$lib/features/space/modules/preview-tabs";
 
 const {
 	port,
 	url,
 	status = "unknown",
 	observedAt,
-	focused = false,
 	immersive = false,
-	onToggleFocus,
-	onToggleImmersive,
+	previewTabs = [],
+	filesVisible = false,
+	onActivatePreview,
+	onClosePreview,
+	onToggleFiles,
+	onExitFloat,
 	onPublish,
-	onClose,
 }: {
 	port: string;
 	url: string;
 	status?: SpacePortStatus | "unknown";
 	observedAt?: number;
-	focused?: boolean;
 	immersive?: boolean;
-	onToggleFocus?: () => void;
-	onToggleImmersive?: () => void;
+	previewTabs?: PreviewTab[];
+	filesVisible?: boolean;
+	onActivatePreview?: (kind: PreviewTab["kind"], key: string) => void;
+	onClosePreview?: (kind: PreviewTab["kind"], key: string) => void;
+	onToggleFiles?: () => void | Promise<void>;
+	onExitFloat?: () => void | Promise<void>;
 	onPublish?: () => void;
-	onClose: () => void;
 } = $props();
 
 let frameVersion = $state(0);
@@ -132,63 +136,98 @@ onDestroy(() => {
 });
 </script>
 
+{#snippet PortActions()}
+	<span
+		class="port-status-dot {status === 'listening'
+			? 'is-listening'
+			: status === 'closed'
+				? 'is-closed'
+				: ''}"
+		title={statusLabel}
+	></span>
+	<button
+		type="button"
+		class="preview-icon-btn"
+		onclick={refresh}
+		title="Refresh preview"
+		disabled={!url}
+	>
+		<RefreshCw class="h-4 w-4" />
+	</button>
+	<button
+		type="button"
+		class="preview-icon-btn preview-context-secondary"
+		onclick={() => void copyUrl()}
+		title="Copy URL"
+		disabled={!url}
+	>
+		{#if copied}
+			<Check class="h-4 w-4 text-success-soft" />
+		{:else}
+			<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+		{/if}
+	</button>
+	{#if onPublish}
+		<button
+			type="button"
+			class="preview-icon-btn preview-context-secondary"
+			onclick={onPublish}
+			title="Publish work"
+			disabled={!url}
+		>
+			<Rocket class="h-4 w-4" />
+		</button>
+	{/if}
+	<a
+		class="preview-icon-btn"
+		href={url}
+		target="_blank"
+		rel="noreferrer"
+		title="Open externally"
+		aria-disabled={!url}
+	>
+		<ExternalLink class="h-4 w-4" />
+	</a>
+	{#if canEmbed}
+		<div class="preview-context-secondary">
+			<PreviewMarkHost bind:open={markOpen} target={markTarget} />
+		</div>
+	{/if}
+{/snippet}
+
 <div class="port-preview relative flex h-full min-w-0 flex-col bg-bg-content" class:port-preview--immersive={immersive}>
-	<div class="preview-chrome flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle bg-bg-surface px-3">
-		<div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-bg-primary text-text-secondary">
-			<Globe class="h-3.5 w-3.5" />
-		</div>
-		<div class="min-w-0 flex-1">
-			<div class="flex min-w-0 items-center gap-2">
-				<span class="truncate text-[13px] font-medium text-text-primary">:{port}</span>
-				<span class="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] leading-none {status === 'listening' ? 'border-success-soft/30 bg-success-bg text-success-soft' : status === 'closed' ? 'border-error-soft/30 bg-error-bg text-error-soft' : 'border-border-subtle bg-bg-primary text-text-tertiary'}">
-					<span class="h-1.5 w-1.5 rounded-full {status === 'listening' ? 'bg-success-soft' : status === 'closed' ? 'bg-error-soft' : 'bg-text-placeholder'}"></span>
-					{statusLabel}
-				</span>
-				{#if observedLabel}
-					<span class="hidden text-[11px] text-text-tertiary sm:inline">{observedLabel}</span>
-				{/if}
+	{#if immersive && onActivatePreview && onClosePreview && onExitFloat}
+		<PreviewFloatChrome
+			tabs={previewTabs}
+			{filesVisible}
+			onActivate={onActivatePreview}
+			onClose={onClosePreview}
+			onToggleFiles={onToggleFiles}
+			onExit={onExitFloat}
+		>
+			{#snippet context()}{@render PortActions()}{/snippet}
+		</PreviewFloatChrome>
+	{:else}
+		<div class="preview-chrome flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle bg-bg-surface px-3">
+			<div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-bg-primary text-text-secondary">
+				<Globe class="h-3.5 w-3.5" />
 			</div>
-			<div class="truncate text-[11px] text-text-tertiary" title={url}>{url}</div>
+			<div class="min-w-0 flex-1">
+				<div class="flex min-w-0 items-center gap-2">
+					<span class="truncate text-[13px] font-medium text-text-primary">:{port}</span>
+					<span class="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] leading-none {status === 'listening' ? 'border-success-soft/30 bg-success-bg text-success-soft' : status === 'closed' ? 'border-error-soft/30 bg-error-bg text-error-soft' : 'border-border-subtle bg-bg-primary text-text-tertiary'}">
+						<span class="h-1.5 w-1.5 rounded-full {status === 'listening' ? 'bg-success-soft' : status === 'closed' ? 'bg-error-soft' : 'bg-text-placeholder'}"></span>
+						{statusLabel}
+					</span>
+					{#if observedLabel}
+						<span class="hidden text-[11px] text-text-tertiary sm:inline">{observedLabel}</span>
+					{/if}
+				</div>
+				<div class="truncate text-[11px] text-text-tertiary" title={url}>{url}</div>
+			</div>
+			{@render PortActions()}
 		</div>
-		<button type="button" class="preview-icon-btn" onclick={refresh} title="Refresh preview" disabled={!url}>
-			<RefreshCw class="h-4 w-4" />
-		</button>
-		<button type="button" class="preview-icon-btn" onclick={() => void copyUrl()} title="Copy URL" disabled={!url}>
-			{#if copied}
-				<Check class="h-4 w-4 text-success-soft" />
-			{:else}
-				<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-			{/if}
-		</button>
-		{#if onPublish}
-			<button type="button" class="preview-icon-btn" onclick={onPublish} title="Publish work" disabled={!url}>
-				<Rocket class="h-4 w-4" />
-			</button>
-		{/if}
-		<a class="preview-icon-btn" href={url} target="_blank" rel="noreferrer" title="Open externally" aria-disabled={!url}>
-			<ExternalLink class="h-4 w-4" />
-		</a>
-		{#if canEmbed}
-			<PreviewMarkHost
-				bind:open={markOpen}
-				target={markTarget}
-				buttonClass="preview-icon-btn"
-			/>
-		{/if}
-		{#if onToggleFocus && onToggleImmersive}
-			<PreviewExpandMenu
-				{focused}
-				{immersive}
-				buttonClass="preview-icon-btn"
-				iconClass="h-4 w-4"
-				{onToggleFocus}
-				{onToggleImmersive}
-			/>
-		{/if}
-		<button type="button" class="preview-icon-btn" onclick={onClose} title="Close preview">
-			<X class="h-4 w-4" />
-		</button>
-	</div>
+	{/if}
 
 	{#if status === "closed"}
 		<div class="flex min-h-0 flex-1 items-center justify-center p-6">
@@ -205,25 +244,30 @@ onDestroy(() => {
 			</div>
 		</div>
 	{:else if url && iframeSrc}
-		<div class="relative min-h-0 flex-1 bg-bg-primary">
+		<div class="relative min-h-0 flex-1 bg-bg-primary" data-drawer-swipe-ignore>
 			{#if loading}
-				<div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2 border-b border-border-subtle bg-bg-content/95 px-3 py-2 text-[11px] text-text-tertiary">
+				<div
+					class="port-loading-notice pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2 border-b border-border-subtle bg-bg-content/95 px-3 py-2 text-[11px] text-text-tertiary"
+					class:port-loading-notice--immersive={immersive}
+				>
 					<Loader2 class="h-3.5 w-3.5 animate-spin" />
 					<span>{slowLoad ? "Still loading. If the app blocks embedding, open it externally." : "Loading preview…"}</span>
 				</div>
 			{/if}
-			<iframe
-				bind:this={iframeEl}
-				class="h-full w-full border-0 bg-overlay-control-text"
-				src={iframeSrc}
-				title={`Port ${port} preview`}
-				sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
-				referrerpolicy="no-referrer"
-				onload={() => {
-					loading = false;
-					slowLoad = false;
-				}}
-			></iframe>
+			<div class="h-full w-full" data-drawer-swipe-ignore>
+				<iframe
+					bind:this={iframeEl}
+					class="h-full w-full border-0 bg-overlay-control-text"
+					src={iframeSrc}
+					title={`Port ${port} preview`}
+					sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
+					referrerpolicy="no-referrer"
+					onload={() => {
+						loading = false;
+						slowLoad = false;
+					}}
+				></iframe>
+			</div>
 		</div>
 	{:else}
 		<div class="flex min-h-0 flex-1 items-center justify-center p-6 text-xs text-text-tertiary">No public URL for this port.</div>
@@ -235,29 +279,31 @@ onDestroy(() => {
 		position: relative;
 	}
 
-	.port-preview--immersive > :global(.preview-chrome) {
-		position: absolute;
-		top: 12px;
-		right: 12px;
-		left: auto;
-		z-index: 25;
-		width: auto;
-		max-width: min(560px, calc(100% - 24px));
-		height: auto;
-		min-height: 40px;
-		flex-wrap: wrap;
-		justify-content: flex-end;
-		gap: 6px;
-		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
-		padding: 6px 8px;
-		box-shadow: 0 12px 28px color-mix(in srgb, var(--overlay-scrim-strong) 16%, transparent);
-		backdrop-filter: blur(14px);
+	.port-status-dot {
+		height: 7px;
+		width: 7px;
+		flex: 0 0 auto;
+		border-radius: 999px;
+		background: var(--text-placeholder);
 	}
 
-	.port-preview--immersive > :global(.preview-chrome .min-w-0.flex-1) {
-		display: none;
+	.port-status-dot.is-listening {
+		background: var(--success-soft);
+	}
+
+	.port-status-dot.is-closed {
+		background: var(--error-soft);
+	}
+
+	.port-loading-notice--immersive {
+		top: 58px;
+		left: var(--preview-safe-left, 10px);
+		right: var(--preview-safe-right, 10px);
+		width: fit-content;
+		max-width: calc(100% - var(--preview-safe-left, 10px) - var(--preview-safe-right, 10px));
+		margin-left: auto;
+		border: 1px solid var(--border-subtle);
+		border-radius: 7px;
 	}
 
 	.preview-icon-btn {
@@ -309,5 +355,11 @@ onDestroy(() => {
 		border-color: var(--brand);
 		background: var(--brand);
 		color: var(--brand-contrast-fg);
+	}
+
+	@container (max-width: 560px) {
+		.preview-context-secondary {
+			display: none;
+		}
 	}
 </style>

@@ -1,12 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { ContentBlock, Usage } from "@cohub/protocol/core";
-import type { MessageRecord, MessageToolCallsFile, PersistMessageInput, SessionTurnRecord, SessionTurnStatus, StoredIntermediateMessage, StoredToolCall, TurnIntermediateMessagesFile } from "@cohub/protocol/model";
+import type {
+  ContextCompactionMeta,
+  ContextCompactionScope,
+  ContextCompactionTriggerReason,
+  MessageRecord,
+  MessageToolCallsFile,
+  PersistMessageInput,
+  SessionTurnRecord,
+  SessionTurnStatus,
+  StoredIntermediateMessage,
+  StoredToolCall,
+  TurnIntermediateMessagesFile,
+} from "@cohub/protocol/model";
+import type { ModelThinkingLevel } from "@cohub/protocol";
 import type { ChannelProvider, GatewayOutboundCommand } from "@cohub/protocol/gateway";
 import { getRealtimeUserRoom } from "@cohub/protocol/realtime";
 import { sessionMessages, sessionTurns, spaceChannels, spaceSessionBindings, spaceSessions, providerMessageRefs, userChannels, userProfiles } from "@cohub/db";
 import { sanitizeContentBlocksForPostgresJson, sanitizePostgresJsonValue } from "@cohub/core/content/sanitize";
-import { countToolCallsInContent, deriveMessagePreviewText, extractPlainText } from "@cohub/core/sessions";
+import { addImageToTextCallsToSummary, countToolCallsInContent, createImageToTextUsageSummaryAccumulator, deriveMessagePreviewText, extractPlainText, finalizeImageToTextUsageSummary, readImageToTextCalls, resolveMessageTurnId, summarizeSessionTurnCompactions, sumImageToTextUsage } from "@cohub/core/sessions";
 import { buildTraceHeaders, getCurrentRequestId } from "@cohub/infra/tracing";
 import { enqueueSessionMessagePostprocess } from "./session-message-postprocess-queue.js";
 import { normalizeAssistantTurn } from "./assistant-message-normalizer.js";
@@ -94,6 +107,15 @@ const normalizeUsage = (usage: PersistMessageInput["message"]["usage"]): Usage |
 
 const normalizeRecord = (value: unknown): Record<string, unknown> | null => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
+const THINKING_LEVEL_SET = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function extractThinkingLevel(meta: unknown): ModelThinkingLevel | null {
+  const record = normalizeRecord(meta);
+  if (!record) return null;
+  const level = record.effectiveThinkingLevel;
+  return typeof level === "string" && THINKING_LEVEL_SET.has(level) ? level as ModelThinkingLevel : null;
+}
+
 const getNextSessionSequence = async (sessionId: string) => {
   const [row] = await db.select({ max: sql<number>`coalesce(max(${sessionMessages.sequence}), 0)::int` }).from(sessionMessages).where(eq(sessionMessages.sessionId, sessionId));
   return (row?.max ?? 0) + 1;
@@ -142,6 +164,7 @@ const toTurnRecord = (row: typeof sessionTurns.$inferSelect): SessionTurnRecord 
   intermediateIndex: row.intermediateIndex ?? null,
   intermediateSummary: row.intermediateSummary ?? null,
   meta: normalizeRecord(row.meta),
+  thinkingLevel: extractThinkingLevel(row.meta),
   startedAt: toIsoOrNull(row.startedAt),
   completedAt: toIsoOrNull(row.completedAt),
   durationMs: row.durationMs ?? null,
@@ -256,10 +279,12 @@ async function persistMessageNode(input: PersistMessageInput & { message: Persis
   const startedAt = toDateOrNull(input.message.startedAt) ?? completedAt;
   const durationMs = typeof input.message.durationMs === "number" ? Math.max(0, Math.floor(input.message.durationMs)) : Math.max(0, completedAt.getTime() - startedAt.getTime());
   const anchorUserMessageId = input.anchorUserMessageId?.trim() || null;
+  const messageTurnId = resolveMessageTurnId(input.message.meta);
 
   const [messageNode] = await db.insert(sessionMessages).values({
     id: input.message.id?.trim() || undefined,
     sessionId: input.sessionId,
+    turnId: messageTurnId,
     role: messageRole,
     content,
     text,
@@ -293,7 +318,15 @@ const addUsage = (a: Usage | null | undefined, b: Usage | null | undefined): Usa
     cacheRead: (a?.cacheRead ?? 0) + (b?.cacheRead ?? 0),
     cacheWrite: (a?.cacheWrite ?? 0) + (b?.cacheWrite ?? 0),
     totalTokens: (a?.totalTokens ?? 0) + (b?.totalTokens ?? 0),
-    cost: a?.cost || b?.cost ? { total: (a?.cost?.total ?? 0) + (b?.cost?.total ?? 0) } : null,
+    cost: a?.cost || b?.cost
+      ? {
+          input: (a?.cost?.input ?? 0) + (b?.cost?.input ?? 0),
+          output: (a?.cost?.output ?? 0) + (b?.cost?.output ?? 0),
+          cacheRead: (a?.cost?.cacheRead ?? 0) + (b?.cost?.cacheRead ?? 0),
+          cacheWrite: (a?.cost?.cacheWrite ?? 0) + (b?.cost?.cacheWrite ?? 0),
+          total: (a?.cost?.total ?? 0) + (b?.cost?.total ?? 0),
+        }
+      : null,
   };
 };
 
@@ -409,7 +442,7 @@ const writeTurnObjects = async (files: Array<{ objectKey: string; value: unknown
 const buildIntermediateObjectsForTurn = async (input: { spaceId: string; sessionId: string; turnId: string }) => {
   const rows = await db.select().from(sessionMessages).where(and(
     eq(sessionMessages.sessionId, input.sessionId),
-    sql`${sessionMessages.meta}->>'turnId' = ${input.turnId}`,
+    eq(sessionMessages.turnId, input.turnId),
   )).orderBy(asc(sessionMessages.sequence), asc(sessionMessages.createdAt));
 
   const intermediateRows = rows.filter((row) => {
@@ -421,6 +454,7 @@ const buildIntermediateObjectsForTurn = async (input: { spaceId: string; session
   const prefix = buildTurnObjectPrefix(input);
   const toolCallsBaseObjectKey = `${prefix}intermediate/messages/`;
   let totalUsage: Usage | null = null;
+  const imageToText = createImageToTextUsageSummaryAccumulator();
   let totalDurationMs: number | null = null;
   let toolCallCount = 0;
   let hasError = false;
@@ -432,6 +466,9 @@ const buildIntermediateObjectsForTurn = async (input: { spaceId: string; session
     const details = extractToolCalls(content);
     toolCallCount += details.length;
     totalUsage = addUsage(totalUsage, row.usage as Usage | null | undefined);
+    const imageToTextCalls = readImageToTextCalls(row.meta);
+    addImageToTextCallsToSummary(imageToText, imageToTextCalls);
+    totalUsage = addUsage(totalUsage, sumImageToTextUsage(row.meta));
     totalDurationMs = addDurationMs(totalDurationMs, row.durationMs ?? null);
     hasError = hasError || Boolean(row.errorMessage) || details.some((tool) => tool.result?.isError);
     const toolCallsObjectKey = details.length > 0 ? `${toolCallsBaseObjectKey}${row.id}/tool-calls.json` : null;
@@ -451,6 +488,7 @@ const buildIntermediateObjectsForTurn = async (input: { spaceId: string; session
     messages.push({
       id: row.id,
       sessionId: row.sessionId,
+      sequence: row.sequence,
       role: row.role as "user" | "assistant" | "system",
       content: summarizeIntermediateContent(content, details),
       text: row.text ?? null,
@@ -473,8 +511,10 @@ const buildIntermediateObjectsForTurn = async (input: { spaceId: string; session
     durationMs: totalDurationMs,
     lastMessageText: messages.at(-1)?.text ?? null,
     hasError,
+    compaction: summarizeSessionTurnCompactions(messages),
+    imageToText: finalizeImageToTextUsageSummary(imageToText),
   };
-  if (messages.length === 0) return { index: null, summary, rows };
+  if (messages.length === 0) return { index: null, summary, rows, imageToTextAccumulator: imageToText };
 
   try {
     await writeTurnObjects(toolFiles);
@@ -497,15 +537,27 @@ const buildIntermediateObjectsForTurn = async (input: { spaceId: string; session
       },
       summary,
       rows,
+      imageToTextAccumulator: imageToText,
     };
   } catch (error) {
     logger.warn("[SessionTurn] failed to write intermediate objects", error);
-    return { index: null, summary, rows };
+    return { index: null, summary, rows, imageToTextAccumulator: imageToText };
   }
 };
 
 async function finalizeSessionTurnFromMessage(input: { spaceId: string; sessionId: string; turnId: string; status: Exclude<SessionTurnStatus, "running">; assistantContent: ContentBlock[]; assistantText: string | null; provider: string | null; model: string | null; stopReason: string | null; errorMessage: string | null; usage: Usage | null; metaPatch?: Record<string, unknown> | null }) {
   const intermediate = await buildIntermediateObjectsForTurn(input);
+  const imageToText = intermediate?.imageToTextAccumulator ?? createImageToTextUsageSummaryAccumulator();
+  const finalCalls = readImageToTextCalls(input.metaPatch);
+  addImageToTextCallsToSummary(imageToText, finalCalls);
+  const imageToTextSummary = finalizeImageToTextUsageSummary(imageToText);
+  const currentImageToText = normalizeRecord(input.metaPatch?.imageToText);
+  const turnMetaPatch = {
+    ...(input.metaPatch ?? {}),
+    ...(imageToTextSummary.callCount > 0
+      ? { imageToText: { ...(currentImageToText ?? {}), schemaVersion: 1, summary: imageToTextSummary } }
+      : {}),
+  };
   const completedAt = new Date();
   const completedAtIso = completedAt.toISOString();
   const [row] = await db.update(sessionTurns).set({
@@ -517,15 +569,15 @@ async function finalizeSessionTurnFromMessage(input: { spaceId: string; sessionI
     stopReason: input.stopReason,
     errorMessage: input.errorMessage,
     finalUsage: input.usage,
-    totalUsage: addUsage(intermediate?.summary.usage, input.usage),
-    ...(input.metaPatch && Object.keys(input.metaPatch).length > 0 ? { meta: sql`coalesce(${sessionTurns.meta}, '{}'::jsonb) || ${JSON.stringify(input.metaPatch)}::jsonb` } : {}),
+    totalUsage: addUsage(addUsage(intermediate?.summary.usage, input.usage), sumImageToTextUsage(input.metaPatch)),
+    ...(Object.keys(turnMetaPatch).length > 0 ? { meta: sql`coalesce(${sessionTurns.meta}, '{}'::jsonb) || ${JSON.stringify(turnMetaPatch)}::jsonb` } : {}),
     summary: { text: input.assistantText, finishReason: input.status === "interrupted" ? "interrupted" : input.status === "failed" ? "failed" : "completed" },
     intermediateIndex: intermediate?.index ?? null,
     intermediateSummary: intermediate?.summary ?? null,
     completedAt,
     durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`,
     updatedAt: completedAt,
-  }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["running", "abort_requested"]))).returning();
+  }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["running", "abort_requested", "interrupted"]))).returning();
   return { turn: row ? toTurnRecord(row) : null, messages: intermediate.rows };
 }
 
@@ -591,7 +643,14 @@ async function dispatchFinalAssistantToGateway(input: { spaceId: string; session
   }
 }
 
-export async function persistUserMessage(input: { spaceId: string; sessionId: string; userMessageId: string; turnId?: string | null; content: ContentBlock[]; meta?: Record<string, unknown> | null; startedAt?: string | null }) {
+export async function persistUserMessage(input: { spaceId: string; sessionId: string; userMessageId: string; turnId: string; agentSessionEntryId?: string | null; content: ContentBlock[]; meta?: Record<string, unknown> | null; startedAt?: string | null }) {
+  const turnId = resolveMessageTurnId({ turnId: input.turnId });
+  if (!turnId) throw new Error("Valid user message turn id is required");
+  const [turnRow] = await db.select().from(sessionTurns).where(and(
+    eq(sessionTurns.id, turnId),
+    eq(sessionTurns.sessionId, input.sessionId),
+  )).limit(1);
+  if (!turnRow) throw new Error("User message turn not found in session");
   const timing = completeMessageTiming({ startedAt: input.startedAt });
   const persisted = await persistMessageNode({
     spaceId: input.spaceId,
@@ -599,22 +658,18 @@ export async function persistUserMessage(input: { spaceId: string; sessionId: st
     previousMessageId: null,
     anchorUserMessageId: input.userMessageId,
     idempotencyKey: await buildUserIdempotencyKey({ messageId: input.userMessageId, content: input.content, meta: input.meta ?? null }),
-    message: { id: input.userMessageId, role: "user", content: input.content, meta: { ...(input.meta ?? {}), turnId: input.turnId ?? (typeof input.meta?.turnId === "string" ? input.meta.turnId : null), messageId: input.userMessageId, clientMessageId: typeof input.meta?.clientMessageId === "string" ? input.meta.clientMessageId : null, agentSessionEntryId: typeof input.meta?.sessionEntryId === "string" ? input.meta.sessionEntryId : null }, provider: null, model: null, stopReason: null, errorMessage: null, usage: null, ...timing },
+    message: { id: input.userMessageId, role: "user", content: input.content, meta: { ...(input.meta ?? {}), turnId, messageId: input.userMessageId, clientMessageId: typeof input.meta?.clientMessageId === "string" ? input.meta.clientMessageId : null, agentSessionEntryId: input.agentSessionEntryId ?? (typeof input.meta?.sessionEntryId === "string" ? input.meta.sessionEntryId : null) }, provider: null, model: null, stopReason: null, errorMessage: null, usage: null, ...timing },
   });
   const record = toMessageRecord(persisted.message);
   if (!persisted.created) return { ok: true, message: record, created: false };
   await publishMessagePersisted(input.spaceId, record);
-  const turnId = typeof record.meta?.turnId === "string" ? record.meta.turnId : null;
-  if (turnId) {
-    const [turnRow] = await db.select().from(sessionTurns).where(and(eq(sessionTurns.id, turnId), eq(sessionTurns.sessionId, input.sessionId))).limit(1);
-    if (turnRow) await publishTurnCreated(input.spaceId, toTurnRecord(turnRow)).catch((error) => logger.warn("[Realtime] failed to publish turn created", error));
-  }
+  await publishTurnCreated(input.spaceId, toTurnRecord(turnRow)).catch((error) => logger.warn("[Realtime] failed to publish turn created", error));
   return { ok: true, message: record };
 }
 
 const EMPTY_ASSISTANT_MESSAGE_ERROR = "LLM returned an empty assistant message after streaming completed.";
 
-export async function persistAssistantMessage(input: { spaceId: string; spaceSessionId: string; userMessageId: string; event: Record<string, unknown>; userId?: string | null; turnId?: string | null; startedAt?: string | null; completedAt?: string | null; messageOrdinal?: number | null }) {
+export async function persistAssistantMessage(input: { spaceId: string; spaceSessionId: string; userMessageId: string; event: Record<string, unknown>; userId?: string | null; turnId?: string | null; startedAt?: string | null; completedAt?: string | null; messageOrdinal?: number | null; thinkingLevel?: string | null }) {
   const assistantMessage = input.event.message;
   const toolResultsRaw = Array.isArray(input.event.toolResults) ? input.event.toolResults as Array<Record<string, unknown>> : [];
   if (!assistantMessage || typeof assistantMessage !== "object") {
@@ -660,9 +715,9 @@ export async function persistAssistantMessage(input: { spaceId: string; spaceSes
   if (record.meta?.messageKind === "assistant_final" || record.meta?.messageKind === "assistant_error") {
     const turnId = typeof record.meta.turnId === "string" ? record.meta.turnId : null;
     if (turnId) {
-      const { turn: finalized, messages: turnMessages } = await finalizeSessionTurnFromMessage({ spaceId: input.spaceId, sessionId: input.spaceSessionId, turnId, status: effectiveStopReason === "aborted" ? "interrupted" : record.meta.messageKind === "assistant_error" ? "failed" : "completed", assistantContent: record.content, assistantText: record.text, provider: record.provider, model: record.model, stopReason: record.stopReason, errorMessage: record.errorMessage, usage: record.usage, metaPatch: { ...(typeof record.meta.agentSessionEntryId === "string" ? { agentSessionEntryId: record.meta.agentSessionEntryId } : {}), ...(typeof record.durationMs === "number" ? { finalMessageDurationMs: record.durationMs } : {}) } });
+      const { turn: finalized, messages: turnMessages } = await finalizeSessionTurnFromMessage({ spaceId: input.spaceId, sessionId: input.spaceSessionId, turnId, status: effectiveStopReason === "aborted" ? "interrupted" : record.meta.messageKind === "assistant_error" ? "failed" : "completed", assistantContent: record.content, assistantText: record.text, provider: record.provider, model: record.model, stopReason: record.stopReason, errorMessage: record.errorMessage, usage: record.usage, metaPatch: { ...(typeof record.meta.agentSessionEntryId === "string" ? { agentSessionEntryId: record.meta.agentSessionEntryId } : {}), ...(record.meta.imageToText ? { imageToText: record.meta.imageToText } : {}), ...(typeof record.durationMs === "number" ? { finalMessageDurationMs: record.durationMs } : {}), ...(typeof input.thinkingLevel === "string" && input.thinkingLevel.trim() ? { effectiveThinkingLevel: input.thinkingLevel } : {}) } });
       if (finalized) {
-        indexTurnReferences({ spaceId: input.spaceId, sessionId: finalized.sessionId, turnId: finalized.id, userUuid: finalized.userUuid, messages: turnMessages });
+        indexTurnReferences({ spaceId: input.spaceId, sessionId: finalized.sessionId, turnId: finalized.id, messages: turnMessages });
         await publishTurnFinalized(input.spaceId, finalized).catch((error) => logger.warn("[Realtime] failed to publish finalized turn", error));
       }
     }
@@ -678,18 +733,23 @@ async function finalizeInterruptedTurn(input: { spaceId: string; sessionId: stri
   const [existing] = await db.select().from(sessionTurns).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId))).limit(1);
   if (!existing) return { turn: null, messages: [] };
   if (!["running", "abort_requested", "interrupted"].includes(existing.status)) return { turn: toTurnRecord(existing), messages: [] };
-  const [last] = await db.select().from(sessionMessages).where(and(eq(sessionMessages.sessionId, input.sessionId), eq(sessionMessages.role, "assistant"), sql`${sessionMessages.meta}->>'turnId' = ${input.turnId}`)).orderBy(desc(sessionMessages.sequence)).limit(1);
+  const [last] = await db.select().from(sessionMessages).where(and(
+    eq(sessionMessages.sessionId, input.sessionId),
+    eq(sessionMessages.turnId, input.turnId),
+    eq(sessionMessages.role, "assistant"),
+  )).orderBy(desc(sessionMessages.sequence)).limit(1);
   const intermediate = await buildIntermediateObjectsForTurn(input);
+  const imageToTextSummary = intermediate?.summary.imageToText;
   const completedAt = new Date();
   const completedAtIso = completedAt.toISOString();
-  const [row] = await db.update(sessionTurns).set({ status: "interrupted", assistantContent: last?.content ?? null, assistantText: last?.text ?? null, provider: last?.provider ?? null, model: last?.model ?? null, stopReason: input.stopReason, errorMessage: null, finalUsage: last?.usage as Usage | null ?? null, totalUsage: intermediate?.summary.usage ?? null, summary: input.summary, intermediateIndex: intermediate?.index ?? null, intermediateSummary: intermediate?.summary ?? null, completedAt, durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`, updatedAt: completedAt }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["running", "abort_requested", "interrupted"]))).returning();
+  const [row] = await db.update(sessionTurns).set({ status: "interrupted", assistantContent: last?.content ?? null, assistantText: last?.text ?? null, provider: last?.provider ?? null, model: last?.model ?? null, stopReason: input.stopReason, errorMessage: null, finalUsage: last?.usage as Usage | null ?? null, totalUsage: intermediate?.summary.usage ?? null, summary: input.summary, intermediateIndex: intermediate?.index ?? null, intermediateSummary: intermediate?.summary ?? null, ...(imageToTextSummary && imageToTextSummary.callCount > 0 ? { meta: sql`coalesce(${sessionTurns.meta}, '{}'::jsonb) || ${JSON.stringify({ imageToText: { schemaVersion: 1, summary: imageToTextSummary } })}::jsonb` } : {}), completedAt, durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`, updatedAt: completedAt }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["running", "abort_requested", "interrupted"]))).returning();
   return { turn: row ? toTurnRecord(row) : null, messages: intermediate.rows };
 }
 
 export async function interruptSessionTurn(input: { spaceId: string; sessionId: string; turnId: string; continuedByTurnId: string }) {
   const { turn, messages } = await finalizeInterruptedTurn({ ...input, stopReason: "interrupted", summary: { finishReason: "interrupted", reason: "steer", continuedByTurnId: input.continuedByTurnId } });
   if (turn) {
-    indexTurnReferences({ spaceId: input.spaceId, sessionId: turn.sessionId, turnId: turn.id, userUuid: turn.userUuid, messages });
+    indexTurnReferences({ spaceId: input.spaceId, sessionId: turn.sessionId, turnId: turn.id, messages });
     await publishTurnFinalized(input.spaceId, turn);
   }
   return turn;
@@ -698,7 +758,7 @@ export async function interruptSessionTurn(input: { spaceId: string; sessionId: 
 export async function abortSessionTurn(input: { spaceId: string; sessionId: string; turnId: string; actorUserId?: string | null }) {
   const { turn, messages } = await finalizeInterruptedTurn({ ...input, stopReason: "aborted", summary: { finishReason: "interrupted", reason: "abort" } });
   if (turn) {
-    indexTurnReferences({ spaceId: input.spaceId, sessionId: turn.sessionId, turnId: turn.id, userUuid: turn.userUuid, messages });
+    indexTurnReferences({ spaceId: input.spaceId, sessionId: turn.sessionId, turnId: turn.id, messages });
     await publishTurnFinalized(input.spaceId, turn);
   }
   return turn;
@@ -707,7 +767,7 @@ export async function abortSessionTurn(input: { spaceId: string; sessionId: stri
 export async function failSessionTurn(input: { spaceId: string; sessionId: string; turnId: string; errorMessage: string }) {
   const completedAt = new Date();
   const completedAtIso = completedAt.toISOString();
-  const [row] = await db.update(sessionTurns).set({ status: "failed", errorMessage: input.errorMessage, summary: { finishReason: "failed", text: input.errorMessage }, completedAt, durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`, updatedAt: completedAt }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["queued", "running", "abort_requested"]))).returning();
+  const [row] = await db.update(sessionTurns).set({ status: "failed", errorMessage: input.errorMessage, summary: { finishReason: "failed", text: input.errorMessage }, completedAt, durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`, updatedAt: completedAt }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["queued", "running", "abort_requested", "interrupted"]))).returning();
   const turn = row ? toTurnRecord(row) : null;
   if (turn) {
     // No message load on the failure path, so we skip live reference indexing
@@ -718,114 +778,248 @@ export async function failSessionTurn(input: { spaceId: string; sessionId: strin
   return turn;
 }
 
-/**
- * Persist a compaction event as a special turn + system message.
- *
- * Re-sequences existing turns with sequence >= insertBeforeSequence to make
- * room for the compact turn, which is inserted at insertBeforeSequence so it
- * appears before the first retained turn.
- *
- * Uses a big-offset trick to avoid unique constraint violations during re-sequence:
- *   1. Shift affected turns by +1,000,000
- *   2. Shift them back by 999,999 (net +1)
- *   3. Insert compact turn at the freed position
- *
- * Turn insert and message insert are in a single transaction.
- */
-export async function persistCompactionTurn(input: {
+type PersistCompactionEventInput = {
   spaceId: string;
   sessionId: string;
   actorUserId: string | null;
+  compactionId: string;
+  scope: ContextCompactionScope;
+  ownerTurnId: string | null;
+  firstKeptTurnId: string | null;
+  llmRound: number | null;
+  triggerReason: ContextCompactionTriggerReason;
   summary: string;
   tokensBefore: number;
-  tokensAfter: number | null;
+  estimatedTokensAfter: number | null;
   firstKeptEntryId: string;
   model: { provider: string; id: string };
   contextWindow: number;
   keepRecentTokens: number;
   summarizedMessageCount: number;
-  archivePath: string | undefined;
-  /** DB sequence at which to insert the compact turn (existing turns >= this are shifted +1). */
-  insertBeforeSequence: number;
-}): Promise<{ compactTurnId: string; compactSequence: number } | null> {
-  const now = new Date();
-  const compactSequence = input.insertBeforeSequence;
-
-  const compactionMeta = {
-    compaction: {
-      triggerReason: "threshold" as const,
-      contextWindow: input.contextWindow,
-      tokensBefore: input.tokensBefore,
-      tokensAfter: input.tokensAfter,
-      model: input.model.id,
-      provider: input.model.provider,
-      keepRecentTokens: input.keepRecentTokens,
-      summarizedMessageCount: input.summarizedMessageCount,
-      firstKeptEntryId: input.firstKeptEntryId,
-      archivePath: input.archivePath ?? null,
-      compactedAt: now.toISOString(),
-    },
+  attemptCount: number;
+  providerCalls: {
+    total: number;
+    succeeded: number;
+    failed: number;
   };
+  isSplitTurn: boolean;
+  usage: Usage | null | undefined;
+  durationMs: number;
+  archivePath: string | undefined;
+  insertBeforeTurnSequence: number | null;
+};
 
-  const state: { turnRow: typeof sessionTurns.$inferSelect | null; messageRow: typeof sessionMessages.$inferSelect | null; messageSequence: number } = { turnRow: null, messageRow: null, messageSequence: 0 };
+/** Persist a turn-boundary or in-turn compaction event at its retained-tail boundary. */
+export async function persistCompactionEvent(
+  input: PersistCompactionEventInput,
+): Promise<{ compactTurnId: string | null; compactSequence: number | null; messageSequence: number } | null> {
+  const completedAt = new Date();
+  const startedAt = new Date(completedAt.getTime() - Math.max(0, input.durationMs));
+  const usage = normalizeUsage(input.usage as PersistMessageInput["message"]["usage"]);
+  const state: {
+    turnRow: typeof sessionTurns.$inferSelect | null;
+    ownerTurnRow: typeof sessionTurns.$inferSelect | null;
+    messageRow: typeof sessionMessages.$inferSelect | null;
+    compactSequence: number | null;
+    messageSequence: number;
+  } = {
+    turnRow: null,
+    ownerTurnRow: null,
+    messageRow: null,
+    compactSequence: null,
+    messageSequence: 0,
+  };
 
   try {
     await db.transaction(async (tx) => {
-      // Step 1: Shift turns with sequence >= compactSequence by big offset.
-      await tx.update(sessionTurns)
-        .set({ sequence: sql`${sessionTurns.sequence} + 1000000` })
-        .where(and(eq(sessionTurns.sessionId, input.sessionId), gte(sessionTurns.sequence, compactSequence)));
+      const anchorTurnId = input.firstKeptTurnId ?? input.ownerTurnId;
+      const [anchorByEntry] = await tx.select({ id: sessionMessages.id, sequence: sessionMessages.sequence })
+        .from(sessionMessages)
+        .where(and(
+          eq(sessionMessages.sessionId, input.sessionId),
+          anchorTurnId ? eq(sessionMessages.turnId, anchorTurnId) : undefined,
+          sql`${sessionMessages.meta}->>'agentSessionEntryId' = ${input.firstKeptEntryId}`,
+        ))
+        .limit(1);
+      if (input.scope === "within_turn" && !anchorByEntry) {
+        throw new Error(`In-turn compaction anchor not found: ${input.firstKeptEntryId}`);
+      }
+      const [anchorByTurn] = anchorByEntry || !input.firstKeptTurnId
+        ? []
+        : await tx.select({ id: sessionMessages.id, sequence: sessionMessages.sequence })
+          .from(sessionMessages)
+          .where(and(
+            eq(sessionMessages.sessionId, input.sessionId),
+            eq(sessionMessages.turnId, input.firstKeptTurnId),
+          ))
+          .orderBy(asc(sessionMessages.sequence))
+          .limit(1);
+      const anchor = anchorByEntry ?? anchorByTurn ?? null;
+      const [maxMessage] = anchor
+        ? []
+        : await tx.select({ max: sql<number>`coalesce(max(${sessionMessages.sequence}), 0)::int` })
+          .from(sessionMessages)
+          .where(eq(sessionMessages.sessionId, input.sessionId));
+      const messageSequence = anchor?.sequence ?? ((maxMessage?.max ?? 0) + 1);
 
-      // Step 2: Shift them back by 999,999 (net +1, freeing compactSequence).
-      await tx.update(sessionTurns)
-        .set({ sequence: sql`${sessionTurns.sequence} - 999999` })
-        .where(and(eq(sessionTurns.sessionId, input.sessionId), gte(sessionTurns.sequence, compactSequence + 1000000)));
+      await tx.update(sessionMessages)
+        .set({ sequence: sql`${sessionMessages.sequence} + 1000000` })
+        .where(and(eq(sessionMessages.sessionId, input.sessionId), gte(sessionMessages.sequence, messageSequence)));
+      await tx.update(sessionMessages)
+        .set({ sequence: sql`${sessionMessages.sequence} - 999999` })
+        .where(and(eq(sessionMessages.sessionId, input.sessionId), gte(sessionMessages.sequence, messageSequence + 1000000)));
 
-      // Step 3: Insert compact turn at the freed position.
-      const [row] = await tx.insert(sessionTurns).values({
-        sessionId: input.sessionId,
-        userUuid: input.actorUserId,
-        sequence: compactSequence,
-        status: "completed",
-        intent: "compact",
-        userContent: [],
-        userText: null,
-        assistantContent: [{ type: "system_note", note_type: "compacted", text: input.summary }],
-        assistantText: null,
+      let compactTurnId: string | null = null;
+      let ordinalInTurn: number | null = null;
+      if (input.scope === "between_turns") {
+        const compactSequence = input.insertBeforeTurnSequence;
+        if (compactSequence == null) throw new Error("Missing compact turn insertion sequence");
+        await tx.update(sessionTurns)
+          .set({ sequence: sql`${sessionTurns.sequence} + 1000000` })
+          .where(and(eq(sessionTurns.sessionId, input.sessionId), gte(sessionTurns.sequence, compactSequence)));
+        await tx.update(sessionTurns)
+          .set({ sequence: sql`${sessionTurns.sequence} - 999999` })
+          .where(and(eq(sessionTurns.sessionId, input.sessionId), gte(sessionTurns.sequence, compactSequence + 1000000)));
+        state.compactSequence = compactSequence;
+      } else {
+        if (!input.ownerTurnId) throw new Error("Missing owner turn for in-turn compaction");
+        const [ownerTurn] = await tx.select().from(sessionTurns)
+          .where(and(eq(sessionTurns.id, input.ownerTurnId), eq(sessionTurns.sessionId, input.sessionId)))
+          .limit(1);
+        if (!ownerTurn) throw new Error("In-turn compaction owner turn not found");
+        state.ownerTurnRow = ownerTurn;
+        const [ordinalRow] = await tx.select({
+          ordinal: sql<number>`count(*)::int + 1`,
+        }).from(sessionMessages).where(and(
+          eq(sessionMessages.sessionId, input.sessionId),
+          eq(sessionMessages.turnId, input.ownerTurnId),
+          sql`${sessionMessages.meta}->>'messageKind' = 'compacted'`,
+        ));
+        ordinalInTurn = ordinalRow?.ordinal ?? 1;
+      }
+
+      const compaction: ContextCompactionMeta = {
+        version: 1,
+        compactionId: input.compactionId,
+        scope: input.scope,
+        ownerTurnId: input.ownerTurnId,
+        ordinalInTurn,
+        llmRound: input.llmRound,
+        triggerReason: input.triggerReason,
+        contextWindow: input.contextWindow,
+        tokensBefore: input.tokensBefore,
+        estimatedTokensAfter: input.estimatedTokensAfter,
         provider: input.model.provider,
         model: input.model.id,
-        stopReason: null,
-        errorMessage: null,
-        finalUsage: null,
-        totalUsage: null,
-        summary: { finishReason: "completed" },
-        meta: compactionMeta,
-        startedAt: now,
-        completedAt: now,
-        durationMs: 0,
-      }).returning();
-      if (!row) throw new Error("Failed to insert compact turn");
-      state.turnRow = row;
+        keepRecentTokens: input.keepRecentTokens,
+        summarizedMessageCount: input.summarizedMessageCount,
+        attemptCount: input.attemptCount,
+        providerCalls: input.providerCalls,
+        isSplitTurn: input.isSplitTurn,
+        firstKeptEntryId: input.firstKeptEntryId,
+        archivePath: input.archivePath ?? null,
+        compactedAt: completedAt.toISOString(),
+        placement: {
+          beforeSessionEntryId: input.firstKeptEntryId,
+          beforeMessageId: anchor?.id ?? null,
+        },
+      };
+      const compactionMeta = { compaction };
 
-      // Step 4: Insert system message in the same transaction.
-      const [maxMsgRow] = await tx.select({ max: sql<number>`coalesce(max(${sessionMessages.sequence}), 0)::int` }).from(sessionMessages).where(eq(sessionMessages.sessionId, input.sessionId));
-      state.messageSequence = (maxMsgRow?.max ?? 0) + 1;
-      const [msgRow] = await tx.insert(sessionMessages).values({
+      if (input.scope === "between_turns") {
+        const compactSequence = state.compactSequence;
+        if (compactSequence == null) throw new Error("Missing compact turn sequence");
+        const [turnRow] = await tx.insert(sessionTurns).values({
+          sessionId: input.sessionId,
+          userUuid: input.actorUserId,
+          sequence: compactSequence,
+          status: "completed",
+          intent: "compact",
+          userContent: [],
+          userText: null,
+          assistantContent: [{ type: "system_note", note_type: "compacted", text: input.summary }],
+          assistantText: null,
+          provider: input.model.provider,
+          model: input.model.id,
+          stopReason: null,
+          errorMessage: null,
+          finalUsage: usage,
+          totalUsage: usage,
+          summary: { finishReason: "completed" },
+          meta: compactionMeta,
+          startedAt,
+          completedAt,
+          durationMs: input.durationMs,
+        }).returning();
+        if (!turnRow) throw new Error("Failed to insert compact turn");
+        state.turnRow = turnRow;
+        compactTurnId = turnRow.id;
+      }
+
+      const messageTurnId = input.scope === "within_turn" ? input.ownerTurnId : compactTurnId;
+      const [messageRow] = await tx.insert(sessionMessages).values({
         sessionId: input.sessionId,
+        turnId: messageTurnId,
         role: "system",
         content: [{ type: "system_note", note_type: "compacted", text: input.summary }],
         text: null,
-        sequence: state.messageSequence,
-        meta: { messageKind: "compacted", turnId: state.turnRow?.id ?? null, ...compactionMeta },
-        startedAt: now,
-        completedAt: now,
-        durationMs: 0,
+        provider: input.model.provider,
+        model: input.model.id,
+        sequence: messageSequence,
+        idempotencyKey: `compaction:${input.compactionId}`,
+        usage,
+        meta: {
+          messageKind: "compacted",
+          turnId: messageTurnId,
+          actorUserId: input.actorUserId,
+          ...compactionMeta,
+        },
+        startedAt,
+        completedAt,
+        durationMs: input.durationMs,
       }).returning();
-      state.messageRow = msgRow ?? null;
+      if (!messageRow) throw new Error("Failed to insert compact message");
+      state.messageRow = messageRow;
+      state.messageSequence = messageSequence;
+
     });
   } catch (error) {
     logger.error(`[Compaction] DB transaction failed sessionId=${input.sessionId}:`, error);
     return null;
+  }
+
+  const ownerTurn = state.ownerTurnRow;
+  if (
+    ownerTurn &&
+    !["queued", "running", "abort_requested", "interrupted"].includes(ownerTurn.status)
+  ) {
+    try {
+      const rebuilt = await buildIntermediateObjectsForTurn({
+        spaceId: input.spaceId,
+        sessionId: input.sessionId,
+        turnId: ownerTurn.id,
+      });
+      const [rebuiltTurn] = await db.update(sessionTurns)
+        .set({
+          intermediateIndex: rebuilt.index ?? ownerTurn.intermediateIndex,
+          intermediateSummary: rebuilt.summary,
+          totalUsage: addUsage(rebuilt.summary.usage, ownerTurn.finalUsage as Usage | null),
+          updatedAt: completedAt,
+        })
+        .where(and(eq(sessionTurns.id, ownerTurn.id), eq(sessionTurns.sessionId, input.sessionId)))
+        .returning();
+      if (rebuiltTurn) {
+        state.ownerTurnRow = rebuiltTurn;
+        indexTurnReferences({
+          spaceId: input.spaceId,
+          sessionId: input.sessionId,
+          turnId: ownerTurn.id,
+          messages: rebuilt.rows,
+        });
+      }
+    } catch (error) {
+      logger.warn("[Compaction] failed to rebuild completed owner turn", error);
+    }
   }
 
   if (state.turnRow) {
@@ -836,16 +1030,35 @@ export async function persistCompactionTurn(input: {
     await publishTurnFinalized(input.spaceId, turn).catch((error) => {
       logger.warn("[Compaction] failed to publish turn finalized", error);
     });
+  } else if (state.ownerTurnRow) {
+    const turn = toTurnRecord(state.ownerTurnRow);
+    await publishRealtimeEnvelope({
+      domain: "session",
+      type: "session.turn.updated",
+      spaceId: input.spaceId,
+      sessionId: input.sessionId,
+      payload: { turn },
+    }).catch((error) => logger.warn("[Compaction] failed to publish owner turn update", error));
   }
   if (state.messageRow) {
     await publishMessagePersisted(input.spaceId, toMessageRecord(state.messageRow)).catch((error) => {
       logger.warn("[Compaction] failed to publish compact message persisted", error);
     });
+    await enqueueSessionMessagePostprocess({
+      sessionId: input.sessionId,
+      messageId: state.messageRow.id,
+    }).catch((error) => logger.warn("[Compaction] failed to enqueue usage postprocess", error));
   }
 
   logger.info(
-    `[Compaction] persisted turn seq=${compactSequence} msgSeq=${state.messageSequence} sessionId=${input.sessionId}`,
+    `[Compaction] persisted scope=${input.scope} turnSeq=${state.compactSequence ?? "inline"} msgSeq=${state.messageSequence} sessionId=${input.sessionId}`,
   );
 
-  return state.turnRow ? { compactTurnId: state.turnRow.id, compactSequence } : null;
+  return state.messageRow
+    ? {
+        compactTurnId: state.turnRow?.id ?? null,
+        compactSequence: state.compactSequence,
+        messageSequence: state.messageSequence,
+      }
+    : null;
 }

@@ -314,6 +314,7 @@ async function submitProduct(input: {
 	name: string;
 	description?: string;
 	amountUsd: number;
+	cohubBalanceUsd?: number;
 	status: "draft" | "active";
 }) {
 	productSaving = true;
@@ -331,6 +332,7 @@ async function submitProduct(input: {
 				name: input.name,
 				description: input.description,
 				amountUsd: input.amountUsd,
+				cohubBalanceUsd: input.cohubBalanceUsd,
 				status: input.status,
 				visibility: "public",
 			});
@@ -414,17 +416,13 @@ async function unbindBenefit(binding: SpaceCommerceProductBenefitBinding) {
 // ---- Formatting helpers ----
 
 function formatPrice(product: SpaceCommerceProduct): string {
-	const price = `${product.pricing.amountUsd.toLocaleString("en-US", {
-		minimumFractionDigits: 2,
-		maximumFractionDigits: 2,
-	})}`;
-	if (
-		product.display.creditsAmount != null &&
-		product.display.creditsAmount > 0
-	) {
-		return `${price} · ${product.display.creditsAmount} credits`;
-	}
-	return price;
+	return (
+		"$" +
+		product.pricing.amountUsd.toLocaleString("en-US", {
+			minimumFractionDigits: 2,
+			maximumFractionDigits: 2,
+		})
+	);
 }
 
 function metadataEntries(
@@ -685,6 +683,12 @@ $effect(() => {
 												<span class="h-1.5 w-1.5 rounded-full {archived ? 'bg-text-placeholder' : draft ? 'bg-text-tertiary' : 'bg-brand'}" aria-hidden="true"></span>
 												{product.status}
 											</span>
+											{#if product.cohubBalance}
+												<span class="rounded-[4px] border border-border-subtle px-1.5 py-0.5 text-[10px] text-text-secondary">{"$" + product.cohubBalance.amountUsd} Balance</span>
+											{/if}
+											{#if product.display.creditsAmount != null && product.display.creditsAmount > 0}
+												<span class="rounded-[4px] border border-border-subtle px-1.5 py-0.5 text-[10px] text-text-secondary">{product.display.creditsAmount} credits</span>
+											{/if}
 										</div>
 
 										{#if product.description}

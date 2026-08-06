@@ -7,11 +7,12 @@ const SPACE_LIST_SCOPE = "all";
 function dedupeSpaces(spaces: SpaceRecord[]) {
 	const byId = new Map<string, SpaceRecord>();
 	for (const space of spaces) {
+		const normalized = { ...space, isPinned: space.isPinned ?? false };
 		if (!byId.has(space.id)) {
-			byId.set(space.id, space);
+			byId.set(space.id, normalized);
 			continue;
 		}
-		byId.set(space.id, { ...byId.get(space.id), ...space });
+		byId.set(space.id, { ...byId.get(space.id), ...normalized });
 	}
 	return Array.from(byId.values());
 }

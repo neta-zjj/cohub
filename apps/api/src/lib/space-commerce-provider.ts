@@ -10,11 +10,11 @@ import { benefitsFeature, type CreditsBenefit } from "@talesofai-billing/sdk/adm
 import { businessesFeature } from "@talesofai-billing/sdk/admin/businesses";
 import { customersFeature } from "@talesofai-billing/sdk/admin/customers";
 import { ordersFeature } from "@talesofai-billing/sdk/admin/orders";
-import { productsFeature, type Product } from "@talesofai-billing/sdk/admin/products";
+import { productsFeature } from "@talesofai-billing/sdk/admin/products";
 import { createBusinessBillingOperations } from "@cohub/billing";
 import type { BillingClientConfig } from "@cohub/billing";
 import { config } from "../config.js";
-import type { CreditsBenefit as LocalCreditsBenefit, Product as LocalProduct } from "./commerce-types.js";
+import type { CreditsBenefit as LocalCreditsBenefit } from "./commerce-types.js";
 
 export { ApiError };
 
@@ -78,12 +78,16 @@ export async function loadBusinessCreditBenefits(input: {
   return creditBenefits;
 }
 
-const COHUB_BOUND_BENEFIT_KEYS_META_KEY = "cohub_bound_benefit_keys";
-
-export function readBoundBenefitKeys(product: LocalProduct): string[] {
-  const value = (product as Product).meta?.[COHUB_BOUND_BENEFIT_KEYS_META_KEY];
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+export async function loadBoundBenefitKeys(input: {
+  sdk: SpaceCommerceSdk;
+  businessKey: string;
+  productKey: string;
+}): Promise<string[]> {
+  const bindings = await input.sdk.admin.products.listBenefits({
+    business_key: input.businessKey,
+    product_key: input.productKey,
+  });
+  return bindings.map((binding) => binding.benefit_key);
 }
 
 export async function createBillingBusiness(input: {

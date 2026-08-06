@@ -1,0 +1,527 @@
+<script lang="ts">
+import type { BoardViewport } from "@neta-art/cohub/board";
+import { Bot, Smartphone, Terminal } from "lucide-svelte";
+import type {
+	BoardAutomationActivity,
+	BoardCollaboratorProfile,
+} from "$lib/board/board-activity";
+import {
+	collaborationColorToken,
+	type RemoteBoardAwarenessPeer,
+} from "$lib/board/board-awareness";
+import UserAvatar from "$lib/components/UserAvatar.svelte";
+
+type Props = {
+	peers: RemoteBoardAwarenessPeer[];
+	activities: BoardAutomationActivity[];
+	profiles: Map<string, BoardCollaboratorProfile>;
+	camera: BoardViewport;
+	surface: { width: number; height: number };
+	cursorVisibleMs: number;
+	isMobile: boolean;
+	/** Only Agent activity bound to a chat turn is actionable. */
+	onOpenActivity?: (activity: BoardAutomationActivity) => void;
+};
+
+let {
+	peers,
+	activities,
+	profiles,
+	camera,
+	surface,
+	cursorVisibleMs,
+	isMobile,
+	onOpenActivity,
+}: Props = $props();
+
+/** Touch has no hover: hold the last contact briefly, then fade it out. */
+const TOUCH_HOLD_MS = 700;
+const TOUCH_FADE_MS = 200;
+const EDGE_INSET = 14;
+
+let now = $state(Date.now());
+
+/** Coarse enough for a fade and a label flip; fine enough to look immediate. */
+const TICK_MS = 100;
+
+/**
+ * Only cursors are time-driven, and only briefly.
+ *
+ * The fades themselves are CSS transitions, so this clock exists for the few
+ * discrete moments the *model* changes: a released touch finishing its fade, the
+ * name label timing out, a peer going stale. Automation markers are excluded
+ * outright — the controller expires those on its own timer and removes them from
+ * the list, so ticking for them would be pure overhead.
+ */
+/**
+ * When the cursor model next changes on its own.
+ *
+ * Only genuinely transient things belong here: a released touch finishing its
+ * fade, and a name label timing out. The 5s visibility cutoff is deliberately
+ * *not* included — heartbeats re-arm it every 2s, so counting it would keep this
+ * timer alive for as long as anyone has a cursor. The controller already prunes
+ * on its own 1s interval, which is what retires a peer that went quiet.
+ */
+const pendingCursorDeadline = $derived.by(() => {
+	let deadline = 0;
+	for (const peer of peers) {
+		if (!(peer.state?.cursor ?? peer.lastCursor)) continue;
+		const until = Math.max(
+			peer.cursorClearedAt == null
+				? 0
+				: peer.cursorClearedAt + TOUCH_HOLD_MS + TOUCH_FADE_MS,
+			peer.cursorMovedAt + 1_500,
+		);
+		deadline = Math.max(deadline, until);
+	}
+	return deadline;
+});
+
+$effect(() => {
+	// Read the deadline (tracked) but not `now` (untracked), so the timer is
+	// rebuilt when peer state changes — not on every one of its own ticks.
+	const deadline = pendingCursorDeadline;
+	if (deadline <= Date.now()) return;
+	const timer = setInterval(() => {
+		now = Date.now();
+		if (now >= deadline) clearInterval(timer);
+	}, TICK_MS);
+	return () => clearInterval(timer);
+});
+
+function toScreen(point: { x: number; y: number }) {
+	return {
+		x: point.x * camera.zoom + camera.x,
+		y: point.y * camera.zoom + camera.y,
+	};
+}
+
+function displayName(actorId: string, fallback: string) {
+	return profiles.get(actorId)?.displayName ?? fallback;
+}
+
+function avatarUrl(actorId: string) {
+	return profiles.get(actorId)?.avatarUrl ?? null;
+}
+
+/**
+ * Human cursors, resolved to screen space.
+ *
+ * Touch is the interesting case: a finger has no hover, so `pointerup` clears
+ * the cursor. Rather than snapping the marker away we hold the last contact
+ * point briefly and fade it, which reads as "this is where they last touched"
+ * instead of "they are still pressing".
+ */
+const cursors = $derived.by(() => {
+	return peers.flatMap((peer) => {
+		const cursor = peer.state?.cursor ?? peer.lastCursor;
+		if (!cursor) return [];
+		if (now - peer.lastSeenAt > cursorVisibleMs) return [];
+
+		const released = peer.state?.cursor == null;
+		const heldFor =
+			released && peer.cursorClearedAt ? now - peer.cursorClearedAt : 0;
+		if (released && heldFor > TOUCH_HOLD_MS + TOUCH_FADE_MS) return [];
+		const opacity = !released
+			? 1
+			: heldFor <= TOUCH_HOLD_MS
+				? 1
+				: Math.max(0, 1 - (heldFor - TOUCH_HOLD_MS) / TOUCH_FADE_MS);
+
+		const screen = toScreen(cursor);
+		const offscreen =
+			screen.x < 0 ||
+			screen.y < 0 ||
+			screen.x > surface.width ||
+			screen.y > surface.height;
+		// Mobile peers are the ones worth chasing off-screen: their viewport rarely
+		// matches ours. Showing an edge hint for every desktop peer would crowd it.
+		const mobile = peer.state?.client?.formFactor === "mobile";
+		if (offscreen && !mobile) return [];
+
+		// Keep the label on the leading side so it never runs off the right edge.
+		const flip = screen.x > surface.width - 148;
+		return [
+			{
+				key: peer.connectionId,
+				name: displayName(peer.actorId, peer.actorName),
+				avatar: avatarUrl(peer.actorId),
+				color: `var(${collaborationColorToken(peer.actorId)})`,
+				pointerType: cursor.pointerType,
+				mobile,
+				released,
+				opacity,
+				offscreen,
+				flip,
+				// Names are noise once someone parks their cursor; keep them while moving
+				// or mid-gesture, which is when knowing who is acting actually matters.
+				showName: peer.gesture !== null || now - peer.cursorMovedAt < 1_500,
+				x: offscreen
+					? Math.min(Math.max(screen.x, EDGE_INSET), surface.width - EDGE_INSET)
+					: screen.x,
+				y: offscreen
+					? Math.min(
+							Math.max(screen.y, EDGE_INSET),
+							surface.height - EDGE_INSET,
+						)
+					: screen.y,
+			},
+		];
+	});
+});
+
+/**
+ * CLI / Agent markers.
+ *
+ * These have no pointer, so they are anchored to the top-left of whatever the
+ * transaction touched and deliberately shaped differently from a human cursor —
+ * automation should not masquerade as a person.
+ */
+const automation = $derived.by(() => {
+	return activities.flatMap((activity) => {
+		const screen = toScreen(activity.focus);
+		const x = Math.min(
+			Math.max(screen.x, EDGE_INSET),
+			Math.max(surface.width - EDGE_INSET, EDGE_INSET),
+		);
+		const y = Math.min(
+			Math.max(screen.y, EDGE_INSET),
+			Math.max(surface.height - EDGE_INSET, EDGE_INSET),
+		);
+		const name = displayName(activity.actorId, "Someone");
+		// Only an agent turn has somewhere to navigate to.
+		const actionable =
+			activity.kind === "agent" && Boolean(activity.source.sessionId);
+		const label =
+			activity.kind === "agent" ? `${name}'s agent` : `${name} · CLI`;
+		return [
+			{
+				key: activity.id,
+				activity,
+				kind: activity.kind,
+				label,
+				title: actionable ? `${label} \u2014 open chat` : label,
+				color: `var(${collaborationColorToken(activity.actorId)})`,
+				avatar: avatarUrl(activity.actorId),
+				name,
+				actionable,
+				x,
+				y,
+			},
+		];
+	});
+});
+</script>
+
+{#snippet ActivityBody(marker: {
+	kind: "cli" | "agent";
+	label: string;
+	name: string;
+	avatar: string | null;
+})}
+	<span class="collab-activity-icon">
+		{#if marker.kind === "agent"}
+			<Bot class="h-3 w-3" />
+			<span class="collab-activity-corner"><Terminal class="h-1.5 w-1.5" /></span>
+		{:else}
+			<Terminal class="h-3 w-3" />
+		{/if}
+	</span>
+	<span class="collab-activity-label">{marker.label}</span>
+	<UserAvatar name={marker.name} avatarUrl={marker.avatar} size="xxs" class="collab-activity-avatar" />
+{/snippet}
+
+<div class="collab-overlay">
+	{#each cursors as cursor (cursor.key)}
+		<div
+			class="collab-cursor"
+			class:collab-cursor--flip={cursor.flip}
+			class:collab-cursor--edge={cursor.offscreen}
+			style:--collab-color={cursor.color}
+			style:transform={`translate3d(${cursor.x}px, ${cursor.y}px, 0)`}
+			style:opacity={cursor.opacity}
+			aria-hidden="true"
+		>
+			{#if cursor.pointerType === "touch"}
+				<span class="collab-touch-ring" class:collab-touch-ring--released={cursor.released}></span>
+			{:else if cursor.pointerType === "pen"}
+				<span class="collab-pen-dot"></span>
+			{:else}
+				<svg class="collab-arrow" viewBox="0 0 14 18" width="14" height="18" focusable="false">
+					<path
+						d="M0 0 L1.5 16 L5.5 12 L9 18 L12 16 L8.5 10 L14 9 Z"
+						fill="var(--collab-color)"
+						stroke="var(--bg-primary)"
+						stroke-width="1.2"
+						stroke-linejoin="round"
+					/>
+				</svg>
+			{/if}
+
+			<span class="collab-tag">
+				<span class="collab-avatar-wrap">
+					<UserAvatar name={cursor.name} avatarUrl={cursor.avatar} size="xs" class="collab-avatar" />
+					{#if cursor.mobile}
+						<span class="collab-badge"><Smartphone class="h-2 w-2" /></span>
+					{/if}
+				</span>
+				{#if cursor.showName}
+					<span class="collab-name">{cursor.name}</span>
+				{/if}
+			</span>
+		</div>
+	{/each}
+
+	{#each automation as marker (marker.key)}
+		<div
+			class="collab-activity"
+			style:--collab-color={marker.color}
+			style:transform={`translate3d(${marker.x}px, ${marker.y}px, 0)`}
+		>
+			{#if marker.actionable}
+				<button
+					type="button"
+					class="collab-activity-chip collab-activity-chip--actionable"
+					title={marker.title}
+					onclick={() => onOpenActivity?.(marker.activity)}
+				>
+					{@render ActivityBody(marker)}
+				</button>
+			{:else}
+				<span class="collab-activity-chip" title={marker.title}>
+					{@render ActivityBody(marker)}
+				</span>
+			{/if}
+		</div>
+	{/each}
+</div>
+
+<style>
+	/* Screen-space layer above the canvas. Never intercepts board input: only the
+	   agent chip opts back in via pointer-events. */
+	.collab-overlay {
+		position: absolute;
+		inset: 0;
+		overflow: hidden;
+		pointer-events: none;
+		z-index: 12;
+	}
+
+	.collab-cursor,
+	.collab-activity {
+		position: absolute;
+		top: 0;
+		left: 0;
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		will-change: transform;
+	}
+
+	/* Network updates are throttled, so smooth between samples. Transform only,
+	   to stay off the layout/paint path. */
+	.collab-cursor {
+		transition: transform 90ms linear, opacity 160ms ease-out;
+	}
+
+	.collab-cursor--flip {
+		flex-direction: row-reverse;
+		transform-origin: top right;
+	}
+
+	.collab-cursor--edge .collab-arrow,
+	.collab-cursor--edge .collab-touch-ring,
+	.collab-cursor--edge .collab-pen-dot {
+		opacity: 0.35;
+	}
+
+	.collab-arrow {
+		display: block;
+		flex-shrink: 0;
+		filter: drop-shadow(0 1px 2px var(--shadow-medium));
+	}
+
+	/* Touch gets a contact ring rather than an arrow — a fingertip is an area,
+	   not a point, and the ring keeps the content under it readable. */
+	.collab-touch-ring {
+		position: relative;
+		display: block;
+		margin: -13px 0 0 -13px;
+		height: 26px;
+		width: 26px;
+		flex-shrink: 0;
+		border: 2px solid var(--collab-color);
+		border-radius: 9999px;
+		background: color-mix(in srgb, var(--collab-color) 12%, transparent);
+	}
+
+	.collab-touch-ring::after {
+		content: "";
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		height: 4px;
+		width: 4px;
+		transform: translate(-50%, -50%);
+		border-radius: 9999px;
+		background: var(--collab-color);
+	}
+
+	/* Lifted finger: drop the solid centre so the ring reads as "last touch"
+	   rather than "still pressing". */
+	.collab-touch-ring--released::after {
+		opacity: 0;
+	}
+
+	.collab-pen-dot {
+		display: block;
+		height: 10px;
+		width: 10px;
+		flex-shrink: 0;
+		margin: -5px 0 0 -5px;
+		border-radius: 9999px;
+		background: var(--collab-color);
+		box-shadow: 0 0 0 2px var(--bg-primary);
+	}
+
+	.collab-tag {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		margin-top: 12px;
+		max-width: 160px;
+	}
+
+	.collab-avatar-wrap {
+		position: relative;
+		display: inline-flex;
+		flex-shrink: 0;
+	}
+
+	:global(.collab-avatar) {
+		box-shadow: 0 0 0 1.5px var(--collab-color);
+	}
+
+	/* Small device hint on the avatar, so "who" and "on what" read as one unit
+	   instead of adding another floating label. */
+	.collab-badge {
+		position: absolute;
+		right: -3px;
+		bottom: -3px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 10px;
+		width: 10px;
+		border-radius: 9999px;
+		background: var(--bg-elevated);
+		color: var(--text-secondary);
+		box-shadow: 0 0 0 1px var(--border-subtle);
+	}
+
+	.collab-name {
+		max-width: 128px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		border-radius: 4px;
+		padding: 1px 5px;
+		background: var(--collab-color);
+		color: var(--brand-contrast-fg);
+		font-size: 11px;
+		font-weight: 600;
+		line-height: 1.5;
+	}
+
+	/* Automation is intentionally chip-shaped, not cursor-shaped: it has no
+	   pointer, and pretending otherwise would misrepresent what happened. */
+	.collab-activity {
+		transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+		animation: collab-activity-in 120ms ease-out both;
+	}
+
+	.collab-activity-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		border: 1px solid color-mix(in srgb, var(--collab-color) 45%, transparent);
+		border-radius: 6px;
+		padding: 2px 5px;
+		background: var(--bg-elevated);
+		color: var(--text-secondary);
+		font-size: 11px;
+		font-weight: 500;
+		line-height: 1.5;
+		box-shadow: 0 2px 6px var(--shadow-subtle);
+	}
+
+	.collab-activity-chip--actionable {
+		pointer-events: auto;
+		cursor: pointer;
+		transition: background-color 100ms ease-out, border-color 100ms ease-out;
+	}
+
+	.collab-activity-chip--actionable:hover {
+		background: var(--bg-hover);
+		border-color: var(--collab-color);
+	}
+
+	.collab-activity-chip--actionable:focus-visible {
+		outline: 2px solid var(--brand-ring);
+		outline-offset: 1px;
+	}
+
+	.collab-activity-icon {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		color: var(--collab-color);
+	}
+
+	/* Agent-via-CLI reads as one idea: bot with a terminal corner mark. */
+	.collab-activity-corner {
+		position: absolute;
+		right: -3px;
+		bottom: -3px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 8px;
+		width: 8px;
+		border-radius: 2px;
+		background: var(--bg-elevated);
+		color: var(--text-tertiary);
+	}
+
+	.collab-activity-label {
+		max-width: 148px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	:global(.collab-activity-avatar) {
+		box-shadow: 0 0 0 1px var(--collab-color);
+	}
+
+	@keyframes collab-activity-in {
+		from {
+			opacity: 0;
+			scale: 0.96;
+		}
+		to {
+			opacity: 1;
+			scale: 1;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.collab-cursor,
+		.collab-activity {
+			transition: none;
+			animation: none;
+		}
+	}
+</style>

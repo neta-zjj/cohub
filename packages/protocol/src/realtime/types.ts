@@ -1,29 +1,59 @@
 import type { ContentBlock } from "../core/content.js";
 import type { BillingPayload } from "../billing.js";
 import type { MessageRecord, SessionRecord, SessionTurnRecord } from "../model/session.js";
+import type { ModelThinkingLevel } from "../model/completion.js";
 import type { SessionTurnSummary } from "../model/turn.js";
 import type { TaskRunStatus } from "../task/index.js";
 import type { SpaceFsChangedPayload } from "../fs/index.js";
 import type { SpacePortsChangedPayload } from "../ports/index.js";
+import type { BoardOperation, BoardPlaybackSnapshot } from "../board.js";
+import type { RequestSource } from "../provenance.js";
+import type { WorkArtifactDescriptor, WorkContentKind } from "../work.js";
+import type {
+  BoardAwarenessClientPayload,
+  BoardAwarenessUpdate,
+} from "./board-awareness.js";
 
 export const WS_COMPACT_STREAM_CAPABILITY = "session.compact_stream.v1";
 export const WS_ROOM_SUBSCRIPTION_CAPABILITY = "realtime.rooms.v1";
+export const WS_BOARD_AWARENESS_CAPABILITY = "board.awareness.v1";
+export const WS_REALTIME_ROOM_CAPABILITY = "realtime.room.v1";
 export const REALTIME_OUTBOUND_CHANNEL = "pubsub:realtime:outbound";
 export const AGENT_REALTIME_PATCH_CHANNEL = "pubsub:realtime:agent_patches";
+export const REALTIME_ROOM_KEY_PREFIX = "cohub:realtime-room:v1";
 
-export type RealtimeRoom = `space:${string}` | `user:${string}`;
+/** Accepted room event names. Shared so a client can reject one before sending. */
+export const REALTIME_ROOM_EVENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+/** Maximum encoded size of a room event payload. */
+export const REALTIME_ROOM_MAX_PAYLOAD_BYTES = 16 * 1024;
+
+export const getRealtimeRoomMetaKey = (roomId: string) => `${REALTIME_ROOM_KEY_PREFIX}:room:${roomId}`;
+export const getRealtimeRoomCodeKey = (workId: string, code: string) => `${REALTIME_ROOM_KEY_PREFIX}:code:${workId}:${code}`;
+export const getRealtimeRoomMembersKey = (roomId: string) => `${REALTIME_ROOM_KEY_PREFIX}:room:${roomId}:members`;
+export const getRealtimeRoomLeasesKey = (roomId: string) => `${REALTIME_ROOM_KEY_PREFIX}:room:${roomId}:leases`;
+export const getRealtimeRoomSequenceKey = (roomId: string) => `${REALTIME_ROOM_KEY_PREFIX}:room:${roomId}:sequence`;
+export const getRealtimeRoomRateKey = (roomId: string) => `${REALTIME_ROOM_KEY_PREFIX}:room:${roomId}:rate`;
+export const getRealtimeRoomIndexKey = (workId: string) => `${REALTIME_ROOM_KEY_PREFIX}:work:${workId}:rooms`;
+
+export type RealtimeRoom =
+  | `space:${string}`
+  | `user:${string}`
+  | `board:${string}`
+  | `room:${string}`;
 
 export const getRealtimeSpaceRoom = (spaceId: string): RealtimeRoom => `space:${spaceId}`;
 export const getRealtimeUserRoom = (userId: string): RealtimeRoom => `user:${userId}`;
+export const getRealtimeBoardRoom = (boardId: string): RealtimeRoom => `board:${boardId}`;
+export const getRealtimeRoom = (roomId: string): RealtimeRoom => `room:${roomId}`;
 
-export const parseRealtimeRoom = (room: string): { kind: "space" | "user"; id: string } | null => {
+export const parseRealtimeRoom = (room: string): { kind: "space" | "user" | "board" | "room"; id: string } | null => {
   const trimmed = room.trim();
   const separatorIndex = trimmed.indexOf(":");
   if (separatorIndex <= 0) return null;
   const kind = trimmed.slice(0, separatorIndex);
   const id = trimmed.slice(separatorIndex + 1).trim();
   if (!id) return null;
-  if (kind !== "space" && kind !== "user") return null;
+  if (kind !== "space" && kind !== "user" && kind !== "board" && kind !== "room") return null;
   return { kind, id };
 };
 
@@ -41,20 +71,25 @@ export type WsClientEvent =
   | { type: "auth"; requestId?: string; payload: { token: string; capabilities?: string[] } }
   | { type: "subscribe"; requestId?: string; payload: { rooms: string[] } }
   | { type: "unsubscribe"; requestId?: string; payload: { rooms: string[] } }
-  | { type: "session.message.create"; requestId?: string; payload: { spaceId: string; sessionId: string; clientMessageId?: string; content: ContentBlock[]; model?: string; provider?: string } }
-  | { type: "canvas.tx"; requestId?: string; payload: { spaceId: string; documentId: string; txId: string; baseVersion?: number | null; clientId?: string | null; undoGroupId?: string | null; ops: Array<Record<string, unknown>> } }
+  | { type: "session.message.create"; requestId?: string; payload: { spaceId: string; sessionId: string; clientMessageId?: string; content: ContentBlock[]; model?: string; provider?: string; thinkingLevel?: ModelThinkingLevel } }
   | { type: "presence.update"; requestId?: string; payload: { spaceId: string; meta?: Record<string, unknown> | null } }
+  | { type: "board.awareness.update"; requestId?: string; payload: BoardAwarenessClientPayload }
+  | { type: "realtime.room.join"; requestId?: string; payload: { roomId: string; ticket: string } }
+  | { type: "realtime.room.publish"; requestId?: string; payload: { roomId: string; event: string; data: unknown; clientEventId?: string } }
+  | { type: "realtime.room.leave"; requestId?: string; payload: { roomId: string } }
+  | { type: "realtime.room.presence.update"; requestId?: string; payload: { roomId: string; presence: Record<string, unknown> | null } }
   | { type: "ping"; requestId?: string; payload?: Record<string, unknown> }
   | { type: "ack"; requestId?: string; payload?: { eventId?: string } };
 
 export type RealtimeEnvelope = {
   id: string;
   timestamp: number;
-  domain: "system" | "session" | "space" | "label";
+  domain: "system" | "session" | "space" | "label" | "room";
   type: string;
   requestId?: string | null;
   spaceId?: string | null;
   sessionId?: string | null;
+  roomId?: string | null;
   rooms?: RealtimeRoom[];
   payload: Record<string, unknown>;
 };
@@ -62,6 +97,146 @@ export type RealtimeEnvelope = {
 export type ChannelEnvelope = RealtimeEnvelope;
 export type RealtimeEnvelopeBase = RealtimeEnvelope;
 export type RealtimeDomain = RealtimeEnvelopeBase["domain"];
+
+export type RealtimeRoomDescriptor = {
+  id: string;
+  code: string;
+  createdAt: string;
+  expiresAt: string;
+  maxParticipants: number;
+  /**
+   * When true a viewer holds at most one seat: rejoining from another tab, or
+   * after an unclean disconnect, takes over the existing seat instead of
+   * consuming a second one. Default false, which gives every connection its own
+   * seat (two tabs are two participants).
+   */
+  seatPerUser: boolean;
+};
+
+export type RealtimeRoomMember = {
+  participantId: string;
+  joinedAt: string;
+  presence: Record<string, unknown> | null;
+  /**
+   * Opaque, stable per room and viewer. Connections of the same viewer share it,
+   * so an application can group or de-duplicate participants without seeing the
+   * underlying account id.
+   */
+  userKey?: string;
+};
+
+export type RealtimeRoomEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.event";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  rooms: RealtimeRoom[];
+  payload: {
+    roomId: string;
+    sequence: number;
+    event: string;
+    data: unknown;
+    clientEventId: string | null;
+    sender: { participantId: string };
+  };
+};
+
+export type RealtimeRoomJoinedEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.joined";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  rooms: RealtimeRoom[];
+  payload: {
+    room: RealtimeRoomDescriptor;
+    participantId: string;
+    members: RealtimeRoomMember[];
+    sequence: number;
+  };
+};
+
+export type RealtimeRoomMemberChangedEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.member.joined" | "realtime.room.member.left";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  rooms: RealtimeRoom[];
+  payload: {
+    roomId: string;
+    sequence: number;
+    member: RealtimeRoomMember;
+  };
+};
+
+export type RealtimeRoomPresenceUpdatedEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.presence.updated";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  rooms: RealtimeRoom[];
+  payload: {
+    roomId: string;
+    sequence: number;
+    member: RealtimeRoomMember;
+  };
+};
+
+export type RealtimeRoomRequestEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.request.ok";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  roomId?: string | null;
+  payload: {
+    roomId: string;
+    sequence?: number;
+    eventId?: string | null;
+    clientEventId?: string | null;
+  };
+};
+
+export type RealtimeRoomRequestErrorEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.request.error";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  roomId?: string | null;
+  payload: {
+    roomId: string;
+    code: string;
+    message: string;
+  };
+};
+
+export type RealtimeRoomClosedEvent = {
+  id: string;
+  timestamp: number;
+  domain: "room";
+  type: "realtime.room.closed";
+  requestId?: string | null;
+  spaceId?: null;
+  sessionId?: null;
+  rooms: RealtimeRoom[];
+  payload: { roomId: string; reason: "expired" | "left" | "revoked" | "superseded" };
+};
 
 export type RealtimeCompactFrame =
   | { t: "d"; sid: string; s: number; b: number; v: unknown }
@@ -86,7 +261,7 @@ export type SystemAuthOkEvent = {
   requestId?: string | null;
   spaceId?: string | null;
   sessionId?: string | null;
-  payload: { connectionId: string; user: Record<string, unknown> };
+  payload: { connectionId: string; user: Record<string, unknown>; capabilities?: string[] };
 };
 
 export type SystemRequestErrorEvent = {
@@ -318,6 +493,7 @@ export type RealtimeTurnRecord = Partial<Pick<
   | "intermediateIndex"
   | "intermediateSummary"
   | "meta"
+  | "thinkingLevel"
   | "startedAt"
   | "completedAt"
   | "durationMs"
@@ -466,50 +642,105 @@ export type SpacePresenceUpdatedEvent = {
   payload: SpacePresenceSnapshot;
 };
 
-export type CanvasTransactionAppliedEvent = {
+export type BoardTransactionAppliedEvent = {
   id: string;
   timestamp: number;
   domain: "space";
-  type: "canvas.tx.applied";
+  type: "board.transaction.applied";
   requestId?: string | null;
   spaceId: string;
   sessionId?: string | null;
   payload: {
-    documentId: string;
+    boardId: string;
     actorId: string;
     txId: string;
     version: number;
-    ops: Array<Record<string, unknown>>;
+    operations: BoardOperation[];
+    metadata?: Record<string, unknown> & { source?: RequestSource };
   };
 };
 
-export type CanvasTransactionAckEvent = {
+export type BoardAwarenessUpdatedEvent = {
   id: string;
   timestamp: number;
   domain: "space";
-  type: "canvas.tx.ack";
+  type: "board.awareness.updated";
   requestId?: string | null;
   spaceId: string;
   sessionId?: string | null;
+  rooms?: RealtimeRoom[];
   payload: {
-    documentId: string;
-    txId: string;
-    version: number;
+    boardId: string;
+    connectionId: string;
+    actorId: string;
+    actorName: string;
+    seq: number;
+    update: BoardAwarenessUpdate;
   };
 };
 
-export type CanvasTransactionErrorEvent = {
+export type BoardPlaybackChangedEvent = {
   id: string;
   timestamp: number;
   domain: "space";
-  type: "canvas.tx.error";
+  type: "board.playback.changed";
   requestId?: string | null;
-  spaceId?: string | null;
+  spaceId: string;
   sessionId?: string | null;
+  payload: BoardPlaybackSnapshot;
+};
+
+export type RealtimeWorkStatus = "published" | "disabled";
+export type RealtimeWorkVisibility = "public" | "space";
+export type RealtimeWorkTargetType = "file" | "directory" | "port";
+
+export type RealtimeWorkRecord = {
+  id: string;
+  spaceId: string;
+  userUuid: string;
+  slug: string;
+  status: RealtimeWorkStatus;
+  visibility: RealtimeWorkVisibility;
+  targetType: RealtimeWorkTargetType;
+  targetRef: string;
+  assetKey: string | null;
+  currentVersionId: string | null;
+  latestVersion: number;
+  publishedAt: string | null;
+  workScopes: string[];
+  allowedViewerScopes: string[];
+  meta: Record<string, unknown> | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type RealtimeWorkVersionRecord = {
+  id: string;
+  workId: string;
+  version: number;
+  targetType: RealtimeWorkTargetType;
+  targetRef: string;
+  assetKey: string | null;
+  contentKind: WorkContentKind;
+  artifact: WorkArtifactDescriptor | null;
+  meta: Record<string, unknown> | null;
+  createdAt: string | null;
+};
+
+export type WorkVersionPublishedEvent = {
+  id: string;
+  timestamp: number;
+  domain: "space";
+  type: "work.version.published";
+  requestId?: string | null;
+  spaceId: string;
+  sessionId?: null;
   payload: {
-    documentId?: string | null;
-    txId?: string | null;
-    message: string;
+    work: RealtimeWorkRecord;
+    version: RealtimeWorkVersionRecord;
+    previousVersionId: string | null;
+    actor: { userId: string };
+    source: RequestSource | null;
   };
 };
 
@@ -560,10 +791,11 @@ export type LabelAssignmentsUpdatedEvent = {
   domain: "label";
   type: "label.assignments.updated";
   requestId?: string | null;
-  spaceId: string;
+  /** Space room target; null for user-scoped label events (delivered to user room). */
+  spaceId: string | null;
   sessionId?: string | null;
   payload: {
-    resourceType: "session" | "checkpoint" | "file";
+    resourceType: "session" | "checkpoint" | "file" | "space";
     resourceRef: string;
     labels: unknown[];
     assignments: unknown[];
@@ -595,12 +827,20 @@ export type RealtimeServerEvent =
   | SpaceFsChangedEvent
   | SpacePortsChangedEvent
   | SpacePresenceUpdatedEvent
-  | CanvasTransactionAppliedEvent
-  | CanvasTransactionAckEvent
-  | CanvasTransactionErrorEvent
+  | BoardTransactionAppliedEvent
+  | BoardAwarenessUpdatedEvent
+  | BoardPlaybackChangedEvent
+  | WorkVersionPublishedEvent
   | TaskCreatedEvent
   | TaskUpdatedEvent
-  | LabelAssignmentsUpdatedEvent;
+  | LabelAssignmentsUpdatedEvent
+  | RealtimeRoomEvent
+  | RealtimeRoomJoinedEvent
+  | RealtimeRoomMemberChangedEvent
+  | RealtimeRoomPresenceUpdatedEvent
+  | RealtimeRoomRequestEvent
+  | RealtimeRoomRequestErrorEvent
+  | RealtimeRoomClosedEvent;
 
 export type WsServerEnvelope = RealtimeEnvelope;
 export type ChannelServerEnvelope = ChannelEnvelope;

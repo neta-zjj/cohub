@@ -21,5 +21,3 @@ assert.equal(getCurrentSessionExecutionAuth(sessionId, "turn-2"), null);
 
 clearCurrentSessionExecutionAuth(sessionId);
 assert.equal(getCurrentSessionExecutionAuth(sessionId, turnId), null);
-
-console.log("session execution auth isolation checks passed");

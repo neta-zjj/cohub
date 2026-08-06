@@ -3,7 +3,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import type { ContentBlock } from "@cohub/protocol/core";
 import type { ChannelConfig, ChannelProvider, GatewayChannelCommandEvent, GatewayInboundEvent, GatewayOutboundCommand } from "@cohub/protocol/gateway";
-import type { RealtimeRoom, RealtimeServerEvent } from "@cohub/protocol/realtime";
+import type { RealtimeEnvelope, RealtimeRoom, RealtimeServerEvent } from "@cohub/protocol/realtime";
 import { getRealtimeSpaceRoom, getRealtimeUserRoom, normalizeRealtimeRooms } from "@cohub/protocol/realtime";
 import { executeChannelCommand } from "./channel-commands.js";
 import { db } from "./db/index.js";
@@ -16,7 +16,7 @@ import {
   extractInboundText,
 } from "./session-interactions.js";
 import { hasPermission } from "./permissions.js";
-import { getRecord, normalizeChannelModelConfig } from "./lib/channel-model-config.js";
+import { getRecord, normalizeChannelModelConfig, type ChannelModelSelection } from "./lib/channel-model-config.js";
 import { buildSessionSourceChannel } from "./lib/session-source-channel.js";
 import { assignSessionChannelSystemLabel } from "@cohub/core/labels/session-channel";
 import { assignSessionSourceSystemLabel } from "@cohub/core/labels/session-source";
@@ -72,7 +72,7 @@ type ResolvedChannelInbound = {
   binding: typeof spaceSessionBindings.$inferSelect;
   conversationId: string;
   bindingKey: string;
-  model: { provider: string; id: string } | null;
+  model: ChannelModelSelection | null;
 };
 
 function resolveChannelInboundModel(input: {
@@ -377,7 +377,7 @@ const resolveRealtimeEventRooms = (input: {
   return input.spaceId ? [getRealtimeSpaceRoom(input.spaceId)] : [];
 };
 
-export async function dispatchRealtimeEvent(input: RealtimeServerEvent & { rooms?: RealtimeRoom[] }) {
+export async function dispatchRealtimeEvent(input: (RealtimeServerEvent | RealtimeEnvelope) & { rooms?: RealtimeRoom[] }) {
   const payload = input.payload as Record<string, unknown>;
   const task = payload.task && typeof payload.task === "object" ? payload.task as { userId?: unknown } : null;
   const userId = typeof payload.userId === "string"
@@ -722,6 +722,7 @@ async function handleMessageCreateInboundEvent(event: GatewayInboundEvent) {
     clientMessageId: event.externalMessageId,
     model: resolved.model?.id,
     provider: resolved.model?.provider,
+    thinkingLevel: resolved.model?.thinkingLevel,
     inboundRef: {
       provider: event.provider,
       spaceChannelId: resolved.spaceChannelId,

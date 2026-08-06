@@ -86,7 +86,7 @@ export async function runInActiveSpan<T>(
   parentCtx: ReturnType<typeof context.active>,
   fn: (span: Span) => Promise<T>,
 ): Promise<T> {
-  const span = tracer.startSpan(name, options);
+  const span = tracer.startSpan(name, options, parentCtx);
   const activeCtx = trace.setSpan(parentCtx, span);
   return context.with(activeCtx, async () => {
     try {

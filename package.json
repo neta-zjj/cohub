@@ -19,6 +19,7 @@
     "build:worker": "pnpm --filter @cohub/worker... build",
     "lint": "pnpm -r lint",
     "lint:fix": "pnpm -r lint:fix",
+    "test": "node scripts/test/workspaces.mjs",
     "typecheck": "pnpm -r typecheck",
     "format": "biome format --write .",
     "lint:biome": "biome lint .",
@@ -37,6 +38,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
     "@changesets/cli": "^2.31.0",
+    "@napi-rs/canvas": "1.0.2",
     "husky": "^9.1.7",
     "lint-staged": "^17.0.8",
     "tsx": "4.23.1",

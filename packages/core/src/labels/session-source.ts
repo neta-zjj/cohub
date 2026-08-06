@@ -22,6 +22,7 @@ const CUSTOM_LABEL_NAME_SUFFIX = " (Custom)";
 const SOURCE_LABELS: Record<string, string> = {
   public_api: "Source/Public API",
   scheduled_task: "Source/Scheduled Task",
+  space_hook: "Source/Hook",
   web: "Source/Web App",
   web_app: "Source/Web App",
   websocket: "Source/Websocket",

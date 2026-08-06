@@ -5,5 +5,7 @@ export * from "./content/index.js";
 export * from "./tasks/index.js";
 export * from "./referrals/index.js";
 export * from "./commands/index.js";
+export * from "./hooks/index.js";
 export * from "./fs-cdn/index.js";
 export * from "./labels/index.js";
+export * from "./works/index.js";

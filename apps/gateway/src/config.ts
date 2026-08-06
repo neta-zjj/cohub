@@ -13,6 +13,7 @@ export const gatewayConfig = {
   // agents for local sandboxes. Falls back to localhost for single-node dev.
   podIp: (process.env.POD_IP ?? "127.0.0.1").trim(),
   nodeId: process.env.POD_NAME || process.env.HOSTNAME || "unknown",
+  bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.REDIS_URL ?? "redis://localhost:6379",
   volcAsr: {
     apiKey: process.env.VOLC_ASR_API_KEY ?? "",
     resourceId: "volc.seedasr.sauc.duration",

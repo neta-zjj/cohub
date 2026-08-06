@@ -26,7 +26,7 @@ OVERRIDE_IMAGE=ghcr.io/example/cohub-agent:latest ./deploy.sh
 ## 说明
 
 - Agent 作为控制面独立部署
-- Sandbox 通过 `AGENT_WS_BASE_URL` 主动连接 Agent
+- Agent 作为 WebSocket 客户端主动连接各 Space 的 Sandbox
 - Session 数据目录由 Agent 自己管理（`SESSIONS_DIR`）
 - 当前脚本会渲染并应用：
   - `configmap.tmpl.yaml`

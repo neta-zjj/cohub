@@ -4,8 +4,11 @@
  * Keeps UserSessionsPage mounted across child navigations so the left list
  * does not remount (and jump) when opening/changing a new-chat draft.
  */
+import type { Snippet } from "svelte";
 import { page } from "$app/state";
 import UserSessionsPage from "$lib/features/sessions/UserSessionsPage.svelte";
+
+let { children }: { children: Snippet } = $props();
 
 // Child +page loads supply sessionId / isNew / newChatSpaceId; layout owns the UI.
 // Prefer newChatSpaceId over spaceId so draft targets never collide with app-layout
@@ -22,3 +25,4 @@ const data = $derived({
 </script>
 
 <UserSessionsPage {data} />
+{@render children()}

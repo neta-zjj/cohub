@@ -40,11 +40,6 @@ Checkpoint 是从 Space 中保存出来的不可变快照。
 
 它记录一个有价值的时刻，可以被分享、派生、恢复，也可以作为新工作的稳定基准。
 
-### Proposal
-Proposal 是把一个 Checkpoint 的成果带回另一个 Space 的协作流程。
-
-它让评审、讨论与合入尽量贴近作品本身。
-
 ### Agent
 Agent 是在 Space 中执行协作的主动角色。
 
@@ -69,7 +64,6 @@ Cohub 的核心思路是：**人先在 Space 里创作，真正有价值的上�
 - 在实时 Space 中和人、Agent 一起创作
 - 将阶段性成果保存为 Checkpoint
 - 基于 Checkpoint Fork 出新的 Space 继续探索
-- 通过 Proposal 把变更带回另一个 Space
 - 从文件、目录或端口发布 Works
 - 通过 CLI 和 API 用同一套产品能力自动化操作
 
@@ -87,10 +81,18 @@ cohub/
 │   ├── web/          # SvelteKit Web 应用
 │   └── worker/       # 任务调度器 — 定时任务与异步任务处理
 ├── deploy/           # 各环境部署配置
-├── docs/             # 架构与产品模型文档
+├── docs/             # 架构说明、使用指南与示例
 ├── packages/
-│   ├── protocol/     # 跨应用共享的类型与协议
-│   └── sdk/          # 面向 Spaces、Sessions、Checkpoints 等能力的客户端 SDK
+│   ├── billing/              # Billing provider 抽象
+│   ├── cli/                  # @neta-art/cohub-cli
+│   ├── core/                 # 服务端共享领域逻辑
+│   ├── db/                   # Drizzle schema 与数据库辅助
+│   ├── identity/             # 鉴权 / 身份辅助
+│   ├── infra/                # 基础设施辅助（Redis、存储、遥测）
+│   ├── protocol/             # 跨应用共享类型与协议（private）
+│   ├── sandbox-client/       # Agent 侧 sandbox WS 客户端
+│   ├── sandbox-controller/   # Sandbox 供给控制器
+│   └── sdk/                  # @neta-art/cohub 客户端 SDK
 ├── scripts/          # 工具脚本
 └── README.zh-CN.md
 ```
@@ -123,13 +125,22 @@ pnpm build
 
 ## 文档
 
-推荐优先阅读：
-- `docs/CO-CREATION-MODEL.md`
-- `docs/space-state-model.md`
-- `docs/generations.md`
-- `docs/works-guide.md`
+产品文档（Web）：
+- 中文：[cohub.run/docs/zh](https://cohub.run/docs/zh)
+- English：[cohub.run/docs](https://cohub.run/docs)
+
+产品文档内容源：
+- `docs/product/zh/`
+- `docs/product/en/`
+
+仓库内工程说明仍保留：
+- `docs/self-hosting.md`
 - `docs/agent-sandbox-runtime.md`
-- `docs/prod-deploy-checklist.md`
+- `docs/works-guide.md`
+- `docs/work-commerce-guide.md`
+- `docs/generations.md`
+- `docs/space-hooks.md`
+- `docs/examples/` — generation 声明、Work capability lab 等示例
 
 ## 开源说明
 

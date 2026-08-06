@@ -4,7 +4,7 @@ import { createLogger } from "@cohub/infra/logging";
 
 
 const logger = createLogger({ serviceName: "cohub-agent" });
-const redis = new Redis(env.REDIS_URL);
+const redis = new Redis(env.REDIS_URL, { disableClientInfo: true });
 
 export type AgentInstanceRecord = {
   instanceId: string;

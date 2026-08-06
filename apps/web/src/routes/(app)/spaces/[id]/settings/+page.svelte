@@ -19,6 +19,7 @@ import type {
 	SpaceRole,
 	SpaceSandboxAutoDestroyPolicy,
 } from "@neta-art/cohub";
+import { buildSpaceInvitePath } from "@neta-art/cohub";
 import {
 	ArrowLeft,
 	Check,
@@ -54,15 +55,13 @@ import {
 import ChannelModelPicker from "$lib/components/ChannelModelPicker.svelte";
 import Sheet from "$lib/components/Sheet.svelte";
 import SpaceAvatar from "$lib/components/SpaceAvatar.svelte";
+import UploadProgress from "$lib/components/UploadProgress.svelte";
 import UserAvatar from "$lib/components/UserAvatar.svelte";
 import { isComposingKeyboardEvent } from "$lib/keyboard";
 import { uploadSpaceAvatarImage } from "$lib/public-asset-images";
 import { sdk } from "$lib/sdk";
-import { validatePublicSlugInput } from "$lib/slug-rules";
-import {
-	buildSpaceLandingRoute,
-	buildUserProfileHref,
-} from "$lib/space-routes";
+import { validateSpaceSlugInput } from "$lib/slug-rules";
+import { buildSpaceLandingRoute } from "$lib/space-routes";
 import { billingConversion } from "$lib/stores/billing-conversion.svelte";
 import { invalidateCachedSpaceMembers } from "$lib/stores/space-profile-cache";
 import { cacheSpaceRecordSoon } from "$lib/stores/space-record-cache";
@@ -213,6 +212,10 @@ let spaceDescriptionDraft = $state("");
 let spaceDescriptionSaving = $state(false);
 let spaceProfileError = $state("");
 let spaceAvatarUploading = $state(false);
+let spaceAvatarUploadStage = $state<
+	"idle" | "preparing" | "uploading" | "saving"
+>("idle");
+let spaceAvatarUploadProgress = $state(0);
 let editingSpaceSlug = $state(false);
 let spaceSlugDraft = $state("");
 let spaceSlugSaving = $state(false);
@@ -578,7 +581,9 @@ function handleSpaceSlugKeydown(event: KeyboardEvent) {
 async function saveSpaceSlug() {
 	if (!space || spaceSlugSaving) return;
 	spaceSlugError = "";
-	const result = validatePublicSlugInput(spaceSlugDraft);
+	const result = validateSpaceSlugInput(spaceSlugDraft, {
+		currentValue: space.slug,
+	});
 	if (result.error) {
 		spaceSlugError = result.error;
 		return;
@@ -663,9 +668,19 @@ function handleDescriptionKeydown(event: KeyboardEvent) {
 async function uploadSpaceAvatar(file: File) {
 	if (!canEditSpaceProfile || spaceAvatarUploading) return;
 	spaceAvatarUploading = true;
+	spaceAvatarUploadStage = "preparing";
+	spaceAvatarUploadProgress = 0;
 	spaceProfileError = "";
 	try {
-		const asset = await uploadSpaceAvatarImage({ spaceId, file });
+		const asset = await uploadSpaceAvatarImage({
+			spaceId,
+			file,
+			onProgress: ({ ratio }) => {
+				spaceAvatarUploadStage = "uploading";
+				spaceAvatarUploadProgress = Math.round(ratio * 100);
+			},
+		});
+		spaceAvatarUploadStage = "saving";
 		const result = await sdk.space(spaceId).profile({
 			description: space?.description ?? null,
 			avatarUrl: asset.publicUrl,
@@ -677,6 +692,8 @@ async function uploadSpaceAvatar(file: File) {
 			err instanceof Error ? err.message : "Failed to upload space avatar";
 	} finally {
 		spaceAvatarUploading = false;
+		spaceAvatarUploadStage = "idle";
+		spaceAvatarUploadProgress = 0;
 	}
 }
 
@@ -740,7 +757,21 @@ async function forceRecoverSandbox() {
 async function loadPage() {
 	loading = true;
 	error = "";
+	invitationsError = "";
 	try {
+		const spacePromise = sdk.space(spaceId).get();
+		const invitationPromise = spacePromise.then(
+			async (result): Promise<SpaceInvitation[]> => {
+				if (!result.access?.permissions.includes("member.manage")) return [];
+				try {
+					return (await sdk.space(spaceId).invitations.list()).items;
+				} catch (err) {
+					invitationsError =
+						err instanceof Error ? err.message : "Failed to load invitations";
+					return [];
+				}
+			},
+		);
 		const [
 			spaceResult,
 			accessResult,
@@ -751,9 +782,9 @@ async function loadPage() {
 			allChannelResult,
 			sandboxResult,
 			sandboxConfigResult,
-			invitationResult,
+			invitationItems,
 		] = await Promise.all([
-			sdk.space(spaceId).get(),
+			spacePromise,
 			sdk
 				.space(spaceId)
 				.access.get()
@@ -783,10 +814,7 @@ async function loadPage() {
 				.space(spaceId)
 				.getConfig()
 				.catch(() => null),
-			sdk
-				.space(spaceId)
-				.invitations.list()
-				.catch(() => ({ items: [] })),
+			invitationPromise,
 		]);
 		space = spaceResult;
 		spaceDescriptionDraft = spaceResult.description ?? "";
@@ -808,7 +836,7 @@ async function loadPage() {
 					| Record<string, SandboxSpecOption>
 					| undefined) ?? sandboxSpecs;
 		}
-		invitations = invitationResult.items;
+		invitations = invitationItems;
 		applySandboxConfigFromSpace(spaceResult);
 		if (channelHealthRefreshTimer) clearInterval(channelHealthRefreshTimer);
 		channelHealthRefreshTimer = setInterval(() => {
@@ -1034,6 +1062,11 @@ async function removeMember(userId: string) {
 }
 
 async function loadInvitations() {
+	if (!canManageSpaceMembers) {
+		invitations = [];
+		invitationsError = "";
+		return;
+	}
 	loadingInvitations = true;
 	invitationsError = "";
 	try {
@@ -1081,7 +1114,13 @@ async function createInvite() {
 }
 
 async function copyInviteLink(token: string) {
-	const url = `${window.location.origin}/invite/${token}`;
+	const path = buildSpaceInvitePath({
+		spaceId,
+		ownerUsername: getSpaceOwnerUsername(space),
+		spaceSlug: getSpaceSlug(space),
+		inviteCode: token,
+	});
+	const url = `${window.location.origin}${path}`;
 	try {
 		if (navigator.clipboard?.writeText) {
 			await navigator.clipboard.writeText(url);
@@ -1534,11 +1573,14 @@ $effect(() => {
 										</span>
 										<input type="file" accept="image/jpeg,image/png,image/webp" class="sr-only" disabled={spaceAvatarUploading} onchange={handleSpaceAvatarFileChange} />
 									</label>
-									<label class="inline-flex cursor-pointer items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11px] leading-none text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary {spaceAvatarUploading ? 'pointer-events-none opacity-50' : ''}">
+									<label class="inline-flex cursor-pointer items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11px] leading-none text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary {spaceAvatarUploading ? 'pointer-events-none opacity-70' : ''}">
 										{#if spaceAvatarUploading}<Loader2 class="h-3 w-3 animate-spin" />{:else}<Upload class="h-3 w-3" />{/if}
-										<span>{space?.publicProfile?.avatarUrl ? "Change" : "Upload"}</span>
+										<span aria-live="polite">{spaceAvatarUploadStage === "preparing" ? "Preparing" : spaceAvatarUploadStage === "uploading" ? `${spaceAvatarUploadProgress}%` : spaceAvatarUploadStage === "saving" ? "Saving" : space?.publicProfile?.avatarUrl ? "Change" : "Upload"}</span>
 										<input type="file" accept="image/jpeg,image/png,image/webp" class="sr-only" disabled={spaceAvatarUploading} onchange={handleSpaceAvatarFileChange} />
 									</label>
+									{#if spaceAvatarUploading}
+										<UploadProgress class="w-12 rounded-full" value={spaceAvatarUploadStage === "uploading" ? spaceAvatarUploadProgress : null} label="Space avatar upload progress" />
+									{/if}
 								{:else}
 									<SpaceAvatar name={space?.name || space?.title || spaceId} profile={space?.publicProfile} size="lg" class="h-14 w-14 rounded-full" />
 								{/if}
@@ -1615,7 +1657,9 @@ $effect(() => {
 								<h1 class="text-[18px] font-semibold tracking-tight text-text-primary">Access</h1>
 								<p class="mt-1 text-[13px] leading-5 text-text-tertiary">Who can view and build here.</p>
 							</div>
-							<button type="button" onclick={() => { showInvitePanel = true; inviteCreateError = ""; }} disabled={!canManageSpaceMembers} class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-[5px] border border-brand-border bg-brand-muted px-2.5 text-[12px] font-medium text-brand transition-colors hover:bg-brand-muted-hover disabled:opacity-50"><Link class="h-3.5 w-3.5" /> Invite</button>
+							{#if canManageSpaceMembers}
+								<button type="button" onclick={() => { showInvitePanel = true; inviteCreateError = ""; }} class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-[5px] border border-brand-border bg-brand-muted px-2.5 text-[12px] font-medium text-brand transition-colors hover:bg-brand-muted-hover"><Link class="h-3.5 w-3.5" /> Invite</button>
+							{/if}
 						</div>
 
 						<!-- Default roles: settings rows -->
@@ -1643,22 +1687,11 @@ $effect(() => {
 							<div class="mt-3 overflow-hidden rounded-md border border-border-subtle">
 								<div class="divide-y divide-border-subtle">
 									{#each members as member (member.userId)}
-										{@const memberProfileHref = buildUserProfileHref(member.profile)}
 										<div class="flex items-center gap-3 px-3 py-2.5">
-											{#if memberProfileHref}
-												<a href={memberProfileHref} class="shrink-0 rounded-full transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/70" data-sveltekit-preload-data="hover" title={`View @${member.profile?.username}`}>
-													<UserAvatar name={getMemberDisplayName(member)} avatarUrl={member.profile?.avatarUrl} size="sm" />
-												</a>
-											{:else}
-												<UserAvatar name={getMemberDisplayName(member)} avatarUrl={member.profile?.avatarUrl} size="sm" />
-											{/if}
+											<UserAvatar name={getMemberDisplayName(member)} avatarUrl={member.profile?.avatarUrl} size="sm" />
 											<div class="min-w-0 flex-1">
 												<div class="flex items-center gap-1.5">
-													{#if memberProfileHref}
-														<a href={memberProfileHref} class="min-w-0 truncate text-[13px] font-medium text-text-primary transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/70" data-sveltekit-preload-data="hover">{getMemberDisplayName(member)}</a>
-													{:else}
-														<span class="truncate text-[13px] font-medium text-text-primary">{getMemberDisplayName(member)}</span>
-													{/if}
+													<span class="truncate text-[13px] font-medium text-text-primary">{getMemberDisplayName(member)}</span>
 													{#if getMemberRoleIcon(member.role)}<span class="shrink-0 text-[11px]" title="Host">{getMemberRoleIcon(member.role)}</span>{/if}
 												</div>
 												<button type="button" onclick={() => { void copyMemberUuid(member); }} title="Copy user UUID" class="mt-0.5 inline-flex max-w-full items-center gap-1 font-mono text-[10px] text-text-placeholder transition-colors hover:text-text-secondary"><span class="min-w-0 truncate">{getMemberUuid(member)}</span>{#if copiedMemberUserId === member.userId}<Check class="h-3 w-3 shrink-0 text-status-running" />{/if}</button>
@@ -1687,6 +1720,7 @@ $effect(() => {
 							{#if addingMemberError}<p class="mt-2 text-[12px] text-error-soft break-words">{addingMemberError}</p>{/if}
 						</div>
 
+						{#if canManageSpaceMembers}
 						<!-- Invite links -->
 						<div class="border-t border-border-subtle py-6">
 							<div class="flex items-center justify-between gap-3">
@@ -1719,6 +1753,7 @@ $effect(() => {
 								</div>
 							{/if}
 						</div>
+						{/if}
 						</section>
 
 						<!-- ════════ Environment ════════ -->
@@ -1982,6 +2017,7 @@ $effect(() => {
 	</div>
 </div>
 
+{#if canManageSpaceMembers}
 <Sheet open={showInvitePanel} onClose={() => { showInvitePanel = false; }} maxWidth="400px">
 	<div class="p-5 pb-safe">
 		<div class="mb-4 flex items-start justify-between gap-3">
@@ -2003,6 +2039,7 @@ $effect(() => {
 		</div>
 	</div>
 </Sheet>
+{/if}
 
 <SandboxSpecPicker
 	open={specPickerOpen}

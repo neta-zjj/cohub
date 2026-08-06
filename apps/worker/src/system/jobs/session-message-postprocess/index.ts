@@ -1,5 +1,6 @@
 import { billingOperations, COHUB_BILLING_TOKEN_TYPES, COHUB_BILLING_USAGE_TYPES } from "@cohub/billing";
 import { qualifyAndRewardReferral } from "@cohub/core/referrals";
+import { readImageToTextCalls } from "@cohub/core/sessions";
 import { sessionMessages, sessionTurns, spaceSessions, tokenUsageStatsHourly } from "@cohub/db";
 import {
   SESSION_MESSAGE_POSTPROCESS_JOB,
@@ -11,6 +12,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { createLogger } from "@cohub/infra/logging";
 import { db } from "../../../db.js";
 import { registerSystemJob } from "../../registry.js";
+import { resolveLlmRequestStats } from "./request-stats.js";
 
 const logger = createLogger({ serviceName: "cohub-worker" });
 
@@ -34,22 +36,52 @@ const resolveActorUserId = async (message: typeof sessionMessages.$inferSelect) 
   return typeof userId === "string" && userId.trim() ? userId.trim() : null;
 };
 
-const recordBilling = async (message: typeof sessionMessages.$inferSelect, userId: string | null, usage: Usage | null) => {
-  if (!userId || message.errorMessage || message.stopReason === "error" || message.stopReason === "aborted") return;
-  const amount = usage?.cost?.total;
+const recordBillingUsage = async (input: {
+  userId: string | null;
+  usage: Usage | null;
+  sourceId: string;
+  operationId: string;
+  provider: string;
+  model: string;
+}) => {
+  if (!input.userId) return;
+  const amount = input.usage?.cost?.total;
   const amountUsd = typeof amount === "number" && Number.isFinite(amount) && amount > 0
     ? Number(amount.toFixed(8))
     : 0;
   if (amountUsd <= 0 || !billingOperations.status.configured) return;
   await billingOperations.recordUsage({
-    userId,
+    userId: input.userId,
     amountUsd,
     tokenType: COHUB_BILLING_TOKEN_TYPES.usdMicroCent,
     usageType: COHUB_BILLING_USAGE_TYPES.generationLlm,
-    sourceId: message.id,
-    operationId: `llm:${message.id}`,
-    reason: `LLM usage ${message.provider ?? "unknown"}/${message.model ?? "unknown"}`,
+    sourceId: input.sourceId,
+    operationId: input.operationId,
+    reason: `LLM usage ${input.provider}/${input.model}`,
   });
+};
+
+const recordBilling = async (message: typeof sessionMessages.$inferSelect, userId: string | null, usage: Usage | null) => {
+  if (!message.errorMessage && message.stopReason !== "error" && message.stopReason !== "aborted") {
+    await recordBillingUsage({
+      userId,
+      usage,
+      sourceId: message.id,
+      operationId: `llm:${message.id}`,
+      provider: message.provider ?? "unknown",
+      model: message.model ?? "unknown",
+    });
+  }
+  await Promise.all(readImageToTextCalls(message.meta).map((call) => call.status === "succeeded"
+    ? recordBillingUsage({
+        userId,
+        usage: call.usage,
+        sourceId: message.id,
+        operationId: `llm:image-to-text:${message.id}:${call.sourceKey}`,
+        provider: call.provider,
+        model: call.model,
+      })
+    : Promise.resolve()));
 };
 
 const maybeQualifyReferral = async (message: typeof sessionMessages.$inferSelect) => {
@@ -79,26 +111,23 @@ const maybeQualifyReferral = async (message: typeof sessionMessages.$inferSelect
   });
 };
 
+const isLlmUsageMessage = (message: typeof sessionMessages.$inferSelect) => {
+  if (message.role === "assistant") return true;
+  const meta = message.meta as Record<string, unknown> | null;
+  return message.role === "system" && meta?.messageKind === "compacted";
+};
+
 const aggregateUsage = async (
   message: typeof sessionMessages.$inferSelect,
   spaceId: string,
   userId: string | null,
   usage: Usage | null,
 ) => {
-  if (message.role !== "assistant" || message.usageAggregatedAt) return;
+  if (!isLlmUsageMessage(message) || message.usageAggregatedAt) return;
   const bucketStartAt = new Date(message.createdAt ?? new Date());
   bucketStartAt.setUTCMinutes(0, 0, 0);
-  const inputTokens = finiteNumberOrZero(usage?.input);
-  const outputTokens = finiteNumberOrZero(usage?.output);
-  const cacheReadTokens = finiteNumberOrZero(usage?.cacheRead);
-  const cacheWriteTokens = finiteNumberOrZero(usage?.cacheWrite);
-  const totalTokens = finiteNumberOrZero(usage?.totalTokens);
-  const costInput = finiteNumberOrZero(usage?.cost?.input);
-  const costOutput = finiteNumberOrZero(usage?.cost?.output);
-  const costCacheRead = finiteNumberOrZero(usage?.cost?.cacheRead);
-  const costCacheWrite = finiteNumberOrZero(usage?.cost?.cacheWrite);
-  const costTotal = finiteNumberOrZero(usage?.cost?.total);
-  const success = !message.errorMessage && message.stopReason !== "error";
+  const mainStats = resolveLlmRequestStats(message);
+  const auxiliaryCalls = readImageToTextCalls(message.meta);
 
   await db.transaction(async (tx) => {
     const [claimed] = await tx
@@ -108,53 +137,89 @@ const aggregateUsage = async (
       .returning({ id: sessionMessages.id });
     if (!claimed) return;
 
-    await tx.insert(tokenUsageStatsHourly).values({
-      bucketStartAt,
-      userId,
-      spaceId,
-      sessionId: message.sessionId,
+    const increment = async (input: {
+      provider: string | null;
+      model: string | null;
+      usage: Usage | null;
+      requestCount: number;
+      successCount: number;
+      errorCount: number;
+    }) => {
+      const inputTokens = finiteNumberOrZero(input.usage?.input);
+      const outputTokens = finiteNumberOrZero(input.usage?.output);
+      const cacheReadTokens = finiteNumberOrZero(input.usage?.cacheRead);
+      const cacheWriteTokens = finiteNumberOrZero(input.usage?.cacheWrite);
+      const totalTokens = finiteNumberOrZero(input.usage?.totalTokens);
+      const costInput = finiteNumberOrZero(input.usage?.cost?.input);
+      const costOutput = finiteNumberOrZero(input.usage?.cost?.output);
+      const costCacheRead = finiteNumberOrZero(input.usage?.cost?.cacheRead);
+      const costCacheWrite = finiteNumberOrZero(input.usage?.cost?.cacheWrite);
+      const costTotal = finiteNumberOrZero(input.usage?.cost?.total);
+      await tx.insert(tokenUsageStatsHourly).values({
+        bucketStartAt,
+        userId,
+        spaceId,
+        sessionId: message.sessionId,
+        provider: input.provider,
+        model: input.model,
+        requestCount: input.requestCount,
+        successCount: input.successCount,
+        errorCount: input.errorCount,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        totalTokens,
+        costInput: String(costInput),
+        costOutput: String(costOutput),
+        costCacheRead: String(costCacheRead),
+        costCacheWrite: String(costCacheWrite),
+        costTotal: String(costTotal),
+        updatedAt: new Date(),
+      }).onConflictDoUpdate({
+        target: [
+          tokenUsageStatsHourly.bucketStartAt,
+          tokenUsageStatsHourly.userId,
+          tokenUsageStatsHourly.spaceId,
+          tokenUsageStatsHourly.sessionId,
+          tokenUsageStatsHourly.provider,
+          tokenUsageStatsHourly.model,
+        ],
+        set: {
+          requestCount: sql`${tokenUsageStatsHourly.requestCount} + ${input.requestCount}`,
+          successCount: sql`${tokenUsageStatsHourly.successCount} + ${input.successCount}`,
+          errorCount: sql`${tokenUsageStatsHourly.errorCount} + ${input.errorCount}`,
+          inputTokens: sql`${tokenUsageStatsHourly.inputTokens} + ${inputTokens}`,
+          outputTokens: sql`${tokenUsageStatsHourly.outputTokens} + ${outputTokens}`,
+          cacheReadTokens: sql`${tokenUsageStatsHourly.cacheReadTokens} + ${cacheReadTokens}`,
+          cacheWriteTokens: sql`${tokenUsageStatsHourly.cacheWriteTokens} + ${cacheWriteTokens}`,
+          totalTokens: sql`${tokenUsageStatsHourly.totalTokens} + ${totalTokens}`,
+          costInput: sql`${tokenUsageStatsHourly.costInput} + ${String(costInput)}::numeric`,
+          costOutput: sql`${tokenUsageStatsHourly.costOutput} + ${String(costOutput)}::numeric`,
+          costCacheRead: sql`${tokenUsageStatsHourly.costCacheRead} + ${String(costCacheRead)}::numeric`,
+          costCacheWrite: sql`${tokenUsageStatsHourly.costCacheWrite} + ${String(costCacheWrite)}::numeric`,
+          costTotal: sql`${tokenUsageStatsHourly.costTotal} + ${String(costTotal)}::numeric`,
+          updatedAt: new Date(),
+        },
+      });
+    };
+
+    await increment({
       provider: message.provider,
       model: message.model,
-      requestCount: 1,
-      successCount: success ? 1 : 0,
-      errorCount: success ? 0 : 1,
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheWriteTokens,
-      totalTokens,
-      costInput: String(costInput),
-      costOutput: String(costOutput),
-      costCacheRead: String(costCacheRead),
-      costCacheWrite: String(costCacheWrite),
-      costTotal: String(costTotal),
-      updatedAt: new Date(),
-    }).onConflictDoUpdate({
-      target: [
-        tokenUsageStatsHourly.bucketStartAt,
-        tokenUsageStatsHourly.userId,
-        tokenUsageStatsHourly.spaceId,
-        tokenUsageStatsHourly.sessionId,
-        tokenUsageStatsHourly.provider,
-        tokenUsageStatsHourly.model,
-      ],
-      set: {
-        requestCount: sql`${tokenUsageStatsHourly.requestCount} + 1`,
-        successCount: sql`${tokenUsageStatsHourly.successCount} + ${success ? 1 : 0}`,
-        errorCount: sql`${tokenUsageStatsHourly.errorCount} + ${success ? 0 : 1}`,
-        inputTokens: sql`${tokenUsageStatsHourly.inputTokens} + ${inputTokens}`,
-        outputTokens: sql`${tokenUsageStatsHourly.outputTokens} + ${outputTokens}`,
-        cacheReadTokens: sql`${tokenUsageStatsHourly.cacheReadTokens} + ${cacheReadTokens}`,
-        cacheWriteTokens: sql`${tokenUsageStatsHourly.cacheWriteTokens} + ${cacheWriteTokens}`,
-        totalTokens: sql`${tokenUsageStatsHourly.totalTokens} + ${totalTokens}`,
-        costInput: sql`${tokenUsageStatsHourly.costInput} + ${String(costInput)}::numeric`,
-        costOutput: sql`${tokenUsageStatsHourly.costOutput} + ${String(costOutput)}::numeric`,
-        costCacheRead: sql`${tokenUsageStatsHourly.costCacheRead} + ${String(costCacheRead)}::numeric`,
-        costCacheWrite: sql`${tokenUsageStatsHourly.costCacheWrite} + ${String(costCacheWrite)}::numeric`,
-        costTotal: sql`${tokenUsageStatsHourly.costTotal} + ${String(costTotal)}::numeric`,
-        updatedAt: new Date(),
-      },
+      usage,
+      ...mainStats,
     });
+    for (const call of auxiliaryCalls) {
+      await increment({
+        provider: call.provider,
+        model: call.model,
+        usage: call.usage,
+        requestCount: 1,
+        successCount: call.status === "succeeded" ? 1 : 0,
+        errorCount: call.status === "failed" ? 1 : 0,
+      });
+    }
   });
 };
 
@@ -168,7 +233,7 @@ registerSystemJob(SESSION_MESSAGE_POSTPROCESS_JOB, async (job: Job) => {
     .limit(1);
   if (!context) throw new Error(`Session message not found: ${messageId}`);
   const { message, spaceId } = context;
-  if (message.role !== "assistant") return { ok: true, skipped: "non_assistant" };
+  if (!isLlmUsageMessage(message)) return { ok: true, skipped: "non_llm_usage" };
 
   const usage = normalizeUsage(message.usage);
   const userId = await resolveActorUserId(message);

@@ -14,9 +14,21 @@
       "types": "./dist/core/index.d.ts",
       "default": "./dist/core/index.js"
     },
+    "./board-constants": {
+      "types": "./dist/board-constants.d.ts",
+      "default": "./dist/board-constants.js"
+    },
+    "./board-document": {
+      "types": "./dist/board-document.d.ts",
+      "default": "./dist/board-document.js"
+    },
     "./model": {
       "types": "./dist/model/session.d.ts",
       "default": "./dist/model/session.js"
+    },
+    "./model/status": {
+      "types": "./dist/model/status.d.ts",
+      "default": "./dist/model/status.js"
     },
     "./realtime": {
       "types": "./dist/realtime/index.d.ts",
@@ -54,6 +66,10 @@
       "types": "./dist/space-style.d.ts",
       "default": "./dist/space-style.js"
     },
+    "./space-hooks": {
+      "types": "./dist/space-hooks.d.ts",
+      "default": "./dist/space-hooks.js"
+    },
     "./gateway/types": {
       "types": "./dist/gateway/types.d.ts",
       "default": "./dist/gateway/types.js"
@@ -65,6 +81,14 @@
     "./realtime/schema": {
       "types": "./dist/realtime/schema.d.ts",
       "default": "./dist/realtime/schema.js"
+    },
+    "./provenance": {
+      "types": "./dist/provenance.d.ts",
+      "default": "./dist/provenance.js"
+    },
+    "./public-identifiers": {
+      "types": "./dist/public-identifiers.d.ts",
+      "default": "./dist/public-identifiers.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -73,10 +97,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "test": "node ../../scripts/test/run.mjs --test-isolation=none '*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@neta-art/generation": "^0.1.13",
+    "@neta-art/generation": "^0.1.18",
     "zod": "^4.4.3"
   },
   "devDependencies": {

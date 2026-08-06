@@ -1,11 +1,11 @@
 ---
 name: cohub-generate
-description: Generate or transform images, video, and music with Cohub multimodal models via `cohub generate`. Use when the user asks to create, edit, restyle, animate, or remove backgrounds from media, or generate songs.
+description: Generate or transform images, video, speech, and music with Cohub multimodal models via `cohub generate`. Use when the user asks to create, edit, restyle, animate, remove backgrounds, synthesize speech (TTS), or generate songs.
 ---
 
 # Cohub Multimodal Generation
 
-Use `cohub generate` to create or transform images, video, and music.
+Use `cohub generate` to create or transform images, video, speech, and music.
 
 Prefer simple, explicit commands. Use `--json` when reading output for decisions, extracting URLs, or chaining commands. If a target Space is required, add `-s "$COHUB_SPACE_ID"` or an explicit Space ID.
 
@@ -26,7 +26,7 @@ Always resolve models from the live list; do not hardcode a catalog.
 cohub models ls --model-type multimodal --json
 ```
 
-Typical categories: text-to-image / image editing, text-to-video / image-to-video, background removal, music.
+Typical categories: text-to-image / image editing, text-to-video / image-to-video, text-to-speech (TTS), background removal, music.
 
 Before using non-default parameters or reference media, inspect the model schema for supported inputs, roles, parameters, defaults, and examples:
 
@@ -54,7 +54,7 @@ cohub generate "restyle this image" \
   --param size=1024x1024
 ```
 
-Supported inputs: `--image`, `--video`, and `--audio`, each accepting a local path or URL and repeatable.
+Supported inputs: `--image`, `--video`, and `--audio`, each repeatable and accepting the source types declared by the model.
 
 When a model requires input roles, prefix the path or URL:
 
@@ -88,7 +88,25 @@ Other useful flags:
 cohub generate "..." --model <model> --output ./out.png   # save locally
 cohub generate "..." --model <model> --async              # queue and return
 cohub generate "..." --model <model> --timeout-ms 120000  # sync wait limit
-cohub generate "..." --model <model> --meta '<json>'      # attach metadata
+cohub generate "..." --model <model> --meta '<json>'      # pass model metadata
+```
+
+## Speech (TTS)
+
+Design a voice from text:
+
+```bash
+cohub generate "Welcome to Cohub. This voice was created from a description." \
+  --model qwen-audio-3.0-tts-plus \
+  --meta '{"voice_prompt":"A calm, clear male narrator with a warm tone"}'
+```
+
+Clone one voice from a public reference URL:
+
+```bash
+cohub generate "Welcome to Cohub. This voice follows the reference recording." \
+  --model higgs-tts \
+  --audio "$REFERENCE_AUDIO_URL"
 ```
 
 ## Workflows

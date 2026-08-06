@@ -5,14 +5,20 @@ import type {
 } from "@neta-art/cohub";
 import { HttpError } from "@neta-art/cohub";
 import {
-	canvasItemToNode,
-	createEmptyCovasDocument,
-} from "$lib/canvas/canvas-document";
-import { ensureCovasExtension, isCovasFile } from "$lib/canvas/canvas-file";
+	boardItemToNode,
+	createEmptyBoardDocument,
+} from "$lib/board/board-document";
+import { ensureBoardExtension } from "$lib/board/board-file";
+import {
+	deleteFilePendingDraft,
+	readFilePendingDraft,
+	writeFilePendingDraft,
+} from "$lib/cache/repositories/file-pending-draft-repo";
 import {
 	defaultFileViewMode,
 	type FileViewMode,
 } from "$lib/components/file-diff-view";
+import { filePreviewModel } from "$lib/file-preview-model";
 import { sdk } from "$lib/sdk";
 import {
 	isTextFileResponse,
@@ -28,18 +34,18 @@ import {
 } from "$lib/stores/space-fs-cache";
 import type { WorkspaceFilePosition } from "$lib/workspace-file-links";
 import { type ActiveFsSource, createActiveFsClient } from "./active-fs-client";
+import { createFileAutosaveCoordinator } from "./file-autosave-coordinator";
 import {
 	buildFsEntry,
 	getParentDirPath,
-	hasRenderedFilePreview,
-	isHtmlPath,
-	isMarkdownPath,
 	makeFsNodes,
 	replaceNodeChildren,
 	resolveFsMoveDestination,
 	rewriteFsPathPrefix,
 	updateNodeState,
 } from "./file-workspace-utils";
+import type { PreviewSyncStatus } from "./preview-sync-status";
+import { workspaceFilePreviewKind } from "./preview-tabs";
 
 export type { ActiveFsSource, FileViewMode };
 
@@ -58,6 +64,8 @@ export type FileWorkspaceInlineFile = {
 	position: WorkspaceFilePosition | null;
 	loading: boolean;
 	saving: boolean;
+	syncStatus: PreviewSyncStatus;
+	saveError: string | null;
 	error: string | null;
 	tooLarge: boolean;
 	viewMode: FileViewMode;
@@ -77,9 +85,10 @@ type FileWorkspaceControllerOptions = {
 	getCanEditFiles: () => boolean;
 	getActiveFsReadonly: () => boolean;
 	getSpaceHasMinimalAccess: () => boolean;
-	onOpenInlineCanvas: (path: string) => Promise<void>;
-	onCloseInlineCanvas: () => void;
-	onRenameInlineCanvas?: (fromPath: string, toPath: string) => void;
+	onOpenInlineFile: (path: string) => Promise<void>;
+	onOpenInlineBoard: (path: string) => Promise<void>;
+	onCloseInlineBoard: () => void;
+	onRenameInlineBoard?: (fromPath: string, toPath: string) => void;
 	onOpenInlinePort: (
 		port: string,
 		url: string,
@@ -118,6 +127,32 @@ export function createFileWorkspaceController(
 	let pendingUploadFiles = $state<File[]>([]);
 	let pendingUploadEntries = $state<{ file: File; relativePath: string }[]>([]);
 	let pendingFileSavePaths = $state<Set<string>>(new Set());
+	const pendingSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	// Reuse the same mutationId across autosave retries of one logical save so
+	// the backend can dedupe on the job id instead of re-issuing the mutation.
+	const pendingSaveMutationIds = new Map<string, string>();
+	const ownFileMutationIds = new Set<string>();
+	const fileSaveRetryAttempts = new Map<string, number>();
+	const pendingDraftPersistTimers = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>();
+	const pendingDraftTails = new Map<string, Promise<void>>();
+	const forcedOverwritePaths = new Set<string>();
+	const deletingPaths = new Set<string>();
+	let workspaceSpaceId = options.getSpaceId();
+	let workspaceGeneration = 0;
+	type WorkspaceContext = { spaceId: string; generation: number };
+	const getWorkspaceContext = (): WorkspaceContext => ({
+		spaceId: workspaceSpaceId,
+		generation: workspaceGeneration,
+	});
+	const isCurrentWorkspaceContext = (context: WorkspaceContext) =>
+		context.spaceId === workspaceSpaceId &&
+		context.generation === workspaceGeneration;
+	const fileAutosave = createFileAutosaveCoordinator({
+		save: (path) => saveInlineFilePath(path),
+	});
 
 	const getActiveInlineFile = () =>
 		inlineFileTabs.find((tab) => tab.path === activeInlineFilePath) ?? null;
@@ -144,6 +179,8 @@ export function createFileWorkspaceController(
 			position,
 			loading: true,
 			saving: false,
+			syncStatus: "idle",
+			saveError: null,
 			error: null,
 			tooLarge: false,
 			viewMode: "source",
@@ -167,25 +204,184 @@ export function createFileWorkspaceController(
 		path: string | undefined,
 		source?: string,
 		kind?: string,
+		mutationId?: string,
 	) {
-		return Boolean(
-			path &&
-				source === "api-fs" &&
-				kind === "modify" &&
-				pendingFileSavePaths.has(path),
-		);
+		if (mutationId) return ownFileMutationIds.has(mutationId);
+		if (!path || !pendingFileSavePaths.has(path)) return false;
+		// While a file is being saved, its change echo must not be treated as an
+		// external edit: direct PVC writes arrive as api-fs, sandbox mutations
+		// arrive as sandbox-inotify (no mutationId) from the sandbox watcher.
+		if (source === "api-fs") return kind === "modify";
+		if (source === "sandbox-inotify")
+			return kind === "modify" || kind === "create";
+		return false;
 	}
 
 	function markFileSavePending(path: string) {
+		// A new save for the same path extends the window: cancel any pending
+		// cleanup so an earlier save's timer cannot clear a newer save's marker.
+		const existing = pendingSaveTimers.get(path);
+		if (existing) clearTimeout(existing);
+		pendingSaveTimers.delete(path);
 		pendingFileSavePaths = new Set(pendingFileSavePaths).add(path);
 	}
 
 	function clearFileSavePendingSoon(path: string) {
-		setTimeout(() => {
-			const next = new Set(pendingFileSavePaths);
-			next.delete(path);
-			pendingFileSavePaths = next;
-		}, 3000);
+		const existing = pendingSaveTimers.get(path);
+		if (existing) clearTimeout(existing);
+		pendingSaveTimers.set(
+			path,
+			setTimeout(() => {
+				pendingSaveTimers.delete(path);
+				const next = new Set(pendingFileSavePaths);
+				next.delete(path);
+				pendingFileSavePaths = next;
+			}, 3000),
+		);
+	}
+
+	function queuePendingDraftTask(
+		context: WorkspaceContext,
+		path: string,
+		task: () => Promise<void>,
+	) {
+		const key = `${context.spaceId}\0${path}`;
+		const previous = pendingDraftTails.get(key) ?? Promise.resolve();
+		const next = previous
+			.catch(() => undefined)
+			.then(task)
+			.catch((error) => {
+				console.warn("[files] Failed to persist pending draft", {
+					spaceId: context.spaceId,
+					path,
+					error,
+				});
+			});
+		pendingDraftTails.set(key, next);
+		void next.finally(() => {
+			if (pendingDraftTails.get(key) === next) pendingDraftTails.delete(key);
+		});
+		return next;
+	}
+
+	function persistPendingDraft(
+		path: string,
+		mutationId: string = crypto.randomUUID(),
+		context = getWorkspaceContext(),
+	) {
+		const tab = inlineFileTabs.find((item) => item.path === path);
+		if (!tab?.response || !isTextFileResponse(tab.response))
+			return Promise.resolve();
+		const input = {
+			spaceId: context.spaceId,
+			path,
+			draft: tab.draft,
+			baseContent: tab.response.content,
+			baseMtimeMs: tab.response.mtimeMs,
+			baseSize: tab.response.size,
+			mutationId,
+		};
+		return queuePendingDraftTask(context, path, async () => {
+			await writeFilePendingDraft(input);
+		});
+	}
+
+	function schedulePendingDraftPersist(path: string) {
+		const existing = pendingDraftPersistTimers.get(path);
+		if (existing) clearTimeout(existing);
+		const context = getWorkspaceContext();
+		pendingDraftPersistTimers.set(
+			path,
+			setTimeout(() => {
+				pendingDraftPersistTimers.delete(path);
+				void persistPendingDraft(path, crypto.randomUUID(), context);
+			}, 200),
+		);
+	}
+
+	function clearPendingDraft(path: string, context = getWorkspaceContext()) {
+		const timer = pendingDraftPersistTimers.get(path);
+		if (timer) clearTimeout(timer);
+		pendingDraftPersistTimers.delete(path);
+		return queuePendingDraftTask(context, path, async () => {
+			await deleteFilePendingDraft(context.spaceId, path);
+		});
+	}
+
+	async function persistInlineFileDrafts() {
+		const context = getWorkspaceContext();
+		await Promise.all(
+			inlineFileTabs
+				.filter(
+					(tab) =>
+						tab.response &&
+						isTextFileResponse(tab.response) &&
+						tab.draft !== tab.response.content,
+				)
+				.map((tab) =>
+					persistPendingDraft(tab.path, crypto.randomUUID(), context),
+				),
+		);
+	}
+
+	async function restorePendingDraft(
+		path: string,
+		requestToken: number,
+		file: SpaceFsFileResponse,
+		context: WorkspaceContext,
+	) {
+		if (!isTextFileResponse(file) || options.getActiveFsReadonly()) return;
+		const pending = await readFilePendingDraft(context.spaceId, path);
+		const tab = inlineFileTabs.find((item) => item.path === path);
+		if (
+			!pending ||
+			!tab ||
+			tab.requestToken !== requestToken ||
+			!isCurrentWorkspaceContext(context)
+		)
+			return;
+		if (pending.draft === file.content) {
+			await clearPendingDraft(path, context);
+			return;
+		}
+		const baselineMatches =
+			pending.baseContent === file.content &&
+			pending.baseMtimeMs === file.mtimeMs &&
+			pending.baseSize === file.size;
+		setInlineFileTab(path, (item) => ({
+			...item,
+			draft: pending.draft,
+			syncStatus: baselineMatches ? "dirty" : "conflict",
+			saveError: baselineMatches ? null : "Changed elsewhere",
+		}));
+		if (baselineMatches) {
+			// Reuse the persisted mutationId so a retry after reload dedupes on
+			// the same job id instead of issuing a second mutation.
+			pendingSaveMutationIds.set(path, pending.mutationId);
+			fileAutosave.schedule(path);
+		}
+	}
+
+	function updateInlineFileDraft(path: string, draft: string) {
+		if (options.getActiveFsReadonly() || !options.getCanEditFiles()) return;
+		fileSaveRetryAttempts.delete(path);
+		const tab = inlineFileTabs.find((item) => item.path === path);
+		if (!tab?.response || !isTextFileResponse(tab.response)) return;
+		const clean = draft === tab.response.content;
+		setInlineFileTab(path, (item) => ({
+			...item,
+			draft,
+			syncStatus:
+				item.syncStatus === "conflict" ? "conflict" : clean ? "idle" : "dirty",
+			saveError: item.syncStatus === "conflict" ? item.saveError : null,
+		}));
+		if (clean) {
+			fileAutosave.cancel(path);
+			void clearPendingDraft(path);
+			return;
+		}
+		schedulePendingDraftPersist(path);
+		if (tab.syncStatus !== "conflict") fileAutosave.schedule(path);
 	}
 
 	function setActiveFileTree(nodes: SpaceFsNode[]) {
@@ -209,8 +405,23 @@ export function createFileWorkspaceController(
 		);
 	}
 
-	function clearInlinePreviews() {
+	function clearInlinePreviews(context = getWorkspaceContext()) {
 		inlineFileRequestToken += 1;
+		for (const tab of inlineFileTabs) {
+			const timer = pendingDraftPersistTimers.get(tab.path);
+			if (timer) clearTimeout(timer);
+			pendingDraftPersistTimers.delete(tab.path);
+			if (
+				tab.response &&
+				isTextFileResponse(tab.response) &&
+				tab.draft !== tab.response.content
+			) {
+				void persistPendingDraft(tab.path, crypto.randomUUID(), context);
+			}
+			fileAutosave.cancel(tab.path);
+			fileSaveRetryAttempts.delete(tab.path);
+			forcedOverwritePaths.delete(tab.path);
+		}
 		inlineFileTabs = [];
 		activeInlineFilePath = null;
 		clearFileDiff();
@@ -231,6 +442,8 @@ export function createFileWorkspaceController(
 			);
 			if (!ok) return false;
 		}
+		const previousContext = getWorkspaceContext();
+		workspaceGeneration += 1;
 		fileTreeBySource = { ...fileTreeBySource, [fileTreeSourceKey]: fileTree };
 		fileTreeSourceKey = sourceKey;
 		fileTree = fileTreeBySource[sourceKey] ?? [];
@@ -238,7 +451,7 @@ export function createFileWorkspaceController(
 		fileTreeError = null;
 		fileTreeLoading = false;
 		fileTreeRequestToken += 1;
-		clearInlinePreviews();
+		clearInlinePreviews(previousContext);
 		void loadFileTree(false);
 		return true;
 	}
@@ -258,13 +471,19 @@ export function createFileWorkspaceController(
 	}
 
 	/** Reset space-scoped FS state. Returns false if blocked by dirty drafts. */
-	function resetForSpace(optionsArg: { force?: boolean } = {}): boolean {
+	function resetForSpace(
+		nextSpaceId: string,
+		optionsArg: { force?: boolean } = {},
+	): boolean {
 		if (!optionsArg.force && hasDirtyInlineFiles()) {
 			const ok = confirm(
 				"Discard unsaved file changes before leaving this space?",
 			);
 			if (!ok) return false;
 		}
+		const previousContext = getWorkspaceContext();
+		workspaceGeneration += 1;
+		workspaceSpaceId = nextSpaceId;
 		fileTree = [];
 		fileTreeBySource = {};
 		fileTreeSourceKey = "live";
@@ -272,10 +491,13 @@ export function createFileWorkspaceController(
 		fileTreeError = null;
 		directoryLoadTokenByPath = {};
 		fileTreeRequestToken += 1;
-		clearInlinePreviews();
+		clearInlinePreviews(previousContext);
 		uploadPaneVisible = false;
 		pendingUploadFiles = [];
 		pendingUploadEntries = [];
+		for (const timer of pendingSaveTimers.values()) clearTimeout(timer);
+		pendingSaveTimers.clear();
+		pendingSaveMutationIds.clear();
 		pendingFileSavePaths = new Set();
 		return true;
 	}
@@ -283,10 +505,12 @@ export function createFileWorkspaceController(
 	function markInlineFileExternalChange(path?: string) {
 		const targetPath = path ?? activeInlineFilePath;
 		if (!targetPath) return;
+		fileAutosave.cancel(targetPath);
 		setInlineFileTab(targetPath, (tab) => ({
 			...tab,
-			error:
-				"File changed externally. Save carefully or reload before editing further.",
+			saving: false,
+			syncStatus: "conflict",
+			saveError: "Changed elsewhere",
 		}));
 		invalidateFileDiff(targetPath);
 		const activeTab = getActiveInlineFile();
@@ -298,12 +522,28 @@ export function createFileWorkspaceController(
 	async function patchFsDirectory(
 		dirPath: string,
 		updater: (entries: SpaceFsEntry[]) => SpaceFsEntry[],
+		context = getWorkspaceContext(),
 	) {
-		const nextEntries = await patchCachedSpaceFsDir(
-			options.getSpaceId(),
+		let nextEntries = await patchCachedSpaceFsDir(
+			context.spaceId,
 			dirPath,
 			updater,
 		);
+		if (!isCurrentWorkspaceContext(context)) return nextEntries;
+		if (!nextEntries) {
+			try {
+				nextEntries = await fetchSpaceFsDirWithCache(
+					context.spaceId,
+					dirPath,
+					async () =>
+						(await sdk.space(context.spaceId).files.list(dirPath)).entries,
+					{ force: true },
+				);
+			} catch {
+				return null;
+			}
+		}
+		if (!isCurrentWorkspaceContext(context)) return nextEntries;
 		if (dirPath === "") {
 			updateRootFsEntries(nextEntries);
 			return nextEntries;
@@ -478,11 +718,13 @@ export function createFileWorkspaceController(
 
 	/** Open a file in the unified preview surface (Files column). */
 	async function openSpaceFile(path: string) {
-		if (isCovasFile(path) && !options.getActiveFsReadonly()) {
-			await options.onOpenInlineCanvas(path);
+		if (
+			workspaceFilePreviewKind(path, options.getActiveFsReadonly()) === "board"
+		) {
+			await options.onOpenInlineBoard(path);
 			return;
 		}
-		await openInlineFile(path);
+		await options.onOpenInlineFile(path);
 	}
 
 	async function downloadActiveFsFile(
@@ -528,6 +770,7 @@ export function createFileWorkspaceController(
 					? (existingTab?.backStack ?? [])
 					: [];
 		const sourceKey = options.getActiveFsSourceKey();
+		const context = getWorkspaceContext();
 		const requestToken = inlineFileRequestToken + 1;
 		inlineFileRequestToken = requestToken;
 		const shouldActivate = optionsArg.activate ?? true;
@@ -618,13 +861,18 @@ export function createFileWorkspaceController(
 				response: file,
 				draft: textReady ? file.content : "",
 				loading: false,
+				saving: false,
+				syncStatus: "idle",
+				saveError: null,
 				// Soft-fail: keep response so Download still works.
 				error: hydrateError,
 				tooLarge: false,
 				viewMode: defaultFileViewMode(
-					textReady && hasRenderedFilePreview(file),
+					textReady && filePreviewModel(file).hasRenderedPreview,
 				),
 			}));
+			if (textReady)
+				await restorePendingDraft(path, requestToken, file, context);
 			if (activeInlineFilePath === path) clearFileDiff();
 		} catch (error) {
 			const targetTab = inlineFileTabs.find((tab) => tab.path === path);
@@ -670,14 +918,23 @@ export function createFileWorkspaceController(
 	function closeInlineFile(path = activeInlineFilePath, skipConfirm = false) {
 		if (!path) return;
 		const tab = inlineFileTabs.find((item) => item.path === path);
-		if (
+		const dirty = Boolean(
 			tab?.response &&
-			isTextFileResponse(tab.response) &&
-			tab.draft !== tab.response.content &&
-			!skipConfirm &&
-			!confirm(`Close ${path} with unsaved changes?`)
-		)
-			return;
+				isTextFileResponse(tab.response) &&
+				tab.draft !== tab.response.content,
+		);
+		if (dirty && !skipConfirm) {
+			if (tab?.syncStatus === "error" || tab?.syncStatus === "conflict") {
+				if (!confirm(`Close ${path} with unsynced changes?`)) return;
+			} else {
+				void fileAutosave.flush(path).then(() => {
+					if (!isInlineFileDirty(path)) closeInlineFile(path, true);
+				});
+				return;
+			}
+		}
+		if (dirty) void persistPendingDraft(path);
+		fileAutosave.cancel(path);
 		inlineFileRequestToken += 1;
 		const closingActive = activeInlineFilePath === path;
 		const index = inlineFileTabs.findIndex((item) => item.path === path);
@@ -760,6 +1017,7 @@ export function createFileWorkspaceController(
 
 	function setInlineFileViewMode(mode: FileViewMode) {
 		if (!activeInlineFilePath) return;
+		void fileAutosave.flush(activeInlineFilePath);
 		setInlineFileTab(activeInlineFilePath, (tab) => ({
 			...tab,
 			viewMode: mode,
@@ -767,65 +1025,214 @@ export function createFileWorkspaceController(
 		if (mode === "diff") void ensureInlineFileDiff();
 	}
 
-	async function saveInlineFile() {
-		const inlineFile = getActiveInlineFile();
+	async function saveInlineFilePath(path: string) {
+		const context = getWorkspaceContext();
+		const inlineFile = inlineFileTabs.find((tab) => tab.path === path);
+		const response = inlineFile?.response;
 		if (
 			options.getActiveFsReadonly() ||
 			!options.getCanEditFiles() ||
 			!inlineFile ||
-			!isTextFileResponse(inlineFile.response)
+			!response ||
+			!isTextFileResponse(response)
 		)
-			return;
-		const savingPath = inlineFile.path;
+			return "blocked" as const;
+		const requestToken = inlineFile.requestToken;
+		const force = forcedOverwritePaths.delete(path);
+		if (inlineFile.syncStatus === "conflict" && !force)
+			return "blocked" as const;
+		if (inlineFile.draft === response.content) {
+			setInlineFileTab(path, (tab) => ({
+				...tab,
+				saving: false,
+				syncStatus: "idle",
+				saveError: null,
+			}));
+			await clearPendingDraft(path);
+			return "clean" as const;
+		}
+
 		const nextContent = inlineFile.draft;
-		markFileSavePending(savingPath);
-		setInlineFileTab(savingPath, (tab) => ({
+		const baseResponse = response;
+		const mutationId = pendingSaveMutationIds.get(path) ?? crypto.randomUUID();
+		await persistPendingDraft(path, mutationId, context);
+		if (
+			!isCurrentWorkspaceContext(context) ||
+			inlineFileTabs.find((tab) => tab.path === path)?.requestToken !==
+				requestToken
+		)
+			return "blocked" as const;
+		ownFileMutationIds.add(mutationId);
+		if (ownFileMutationIds.size > 256) {
+			const oldest = ownFileMutationIds.values().next().value;
+			if (oldest) ownFileMutationIds.delete(oldest);
+		}
+		// Sandbox mutations echo through sandbox-inotify without a mutationId, so
+		// also mark the path as a pending save to keep that echo from being read
+		// as an external change.
+		markFileSavePending(path);
+		setInlineFileTab(path, (tab) => ({
 			...tab,
 			saving: true,
-			error: null,
+			syncStatus: "saving",
+			saveError: null,
 		}));
 		try {
-			await sdk.space(options.getSpaceId()).files.write({
-				path: savingPath,
+			const result = await sdk.space(context.spaceId).files.write({
+				path,
 				content: nextContent,
 				encoding: "utf-8",
+				expected: force
+					? undefined
+					: { mtimeMs: baseResponse.mtimeMs, size: baseResponse.size },
+				mutationId,
 			});
-			setInlineFileTab(savingPath, (tab) => ({
+			pendingSaveMutationIds.delete(path);
+			const savedSize = result.size;
+			const savedMtimeMs = result.mtimeMs;
+			const current = inlineFileTabs.find((tab) => tab.path === path);
+			if (
+				!isCurrentWorkspaceContext(context) ||
+				current?.requestToken !== requestToken
+			)
+				return "saved" as const;
+			if (current.syncStatus === "conflict") return "blocked" as const;
+			fileSaveRetryAttempts.delete(path);
+			setInlineFileTab(path, (tab) => ({
 				...tab,
 				response: tab.response
 					? ({
 							...tab.response,
 							content: nextContent,
-							size: new Blob([nextContent]).size,
+							size: savedSize,
+							mtimeMs: savedMtimeMs,
 						} as SpaceFsFileResponse)
 					: tab.response,
-				error: null,
+				saving: false,
+				syncStatus: tab.draft === nextContent ? "idle" : "dirty",
+				saveError: null,
 			}));
-			invalidateFileDiff(savingPath);
-			await patchFsDirectory(getParentDirPath(savingPath), (entries) =>
-				entries.map((entry) =>
-					entry.path === savingPath
-						? {
-								...entry,
-								size: new Blob([nextContent]).size,
-								mtimeMs: Date.now(),
-							}
-						: entry,
-				),
+			invalidateFileDiff(path);
+			await patchFsDirectory(
+				getParentDirPath(path),
+				(entries) =>
+					entries.map((entry) =>
+						entry.path === path
+							? {
+									...entry,
+									size: savedSize,
+									mtimeMs: savedMtimeMs,
+								}
+							: entry,
+					),
+				context,
 			);
-			const activeTab = getActiveInlineFile();
-			if (activeTab?.path === savingPath && activeTab.viewMode === "diff") {
+			if (!isCurrentWorkspaceContext(context)) return "saved" as const;
+			const latest = inlineFileTabs.find(
+				(tab) => tab.path === path && tab.requestToken === requestToken,
+			);
+			if (latest?.syncStatus !== "conflict") {
+				if (latest?.draft === nextContent)
+					await clearPendingDraft(path, context);
+				else await persistPendingDraft(path, crypto.randomUUID(), context);
+			}
+			if (latest?.path === activeInlineFilePath && latest.viewMode === "diff") {
 				void ensureInlineFileDiff(true);
 			}
+			return "saved" as const;
 		} catch (error) {
-			setInlineFileTab(savingPath, (tab) => ({
+			if (
+				!isCurrentWorkspaceContext(context) ||
+				inlineFileTabs.find((tab) => tab.path === path)?.requestToken !==
+					requestToken
+			)
+				return "blocked" as const;
+			const conflict = error instanceof HttpError && error.status === 409;
+			if (conflict) pendingSaveMutationIds.delete(path);
+			else pendingSaveMutationIds.set(path, mutationId);
+			setInlineFileTab(path, (tab) => ({
 				...tab,
-				error: error instanceof Error ? error.message : "Failed to save file",
+				saving: false,
+				syncStatus: conflict ? "conflict" : "error",
+				saveError: conflict ? "Changed elsewhere" : "Not saved",
 			}));
+			if (!conflict) {
+				const attempt = (fileSaveRetryAttempts.get(path) ?? 0) + 1;
+				fileSaveRetryAttempts.set(path, attempt);
+				const delays = [2_000, 5_000, 15_000, 30_000];
+				fileAutosave.retry(
+					path,
+					delays[Math.min(attempt - 1, delays.length - 1)],
+				);
+			}
+			return "blocked" as const;
 		} finally {
-			setInlineFileTab(savingPath, (tab) => ({ ...tab, saving: false }));
-			clearFileSavePendingSoon(savingPath);
+			if (isCurrentWorkspaceContext(context)) {
+				clearFileSavePendingSoon(path);
+				setInlineFileTab(path, (tab) =>
+					tab.requestToken === requestToken && tab.syncStatus === "saving"
+						? {
+								...tab,
+								saving: false,
+								syncStatus:
+									tab.response &&
+									isTextFileResponse(tab.response) &&
+									tab.draft === tab.response.content
+										? "idle"
+										: "dirty",
+							}
+						: tab,
+				);
+			}
 		}
+	}
+
+	function saveInlineFile() {
+		return activeInlineFilePath
+			? fileAutosave.flush(activeInlineFilePath)
+			: Promise.resolve("clean" as const);
+	}
+
+	function flushInlineFiles() {
+		return Promise.all(
+			inlineFileTabs
+				.filter((tab) => isInlineFileDirty(tab.path))
+				.map((tab) => fileAutosave.flush(tab.path)),
+		);
+	}
+
+	function retryFailedInlineFiles() {
+		for (const tab of inlineFileTabs) {
+			if (tab.syncStatus === "error") fileAutosave.retry(tab.path, 0);
+		}
+	}
+
+	function retryInlineFileSave(path = activeInlineFilePath) {
+		if (!path) return Promise.resolve("blocked" as const);
+		setInlineFileTab(path, (tab) => ({
+			...tab,
+			syncStatus: "dirty",
+			saveError: null,
+		}));
+		return fileAutosave.flush(path);
+	}
+
+	function overwriteInlineFile(path = activeInlineFilePath) {
+		if (!path) return Promise.resolve("blocked" as const);
+		forcedOverwritePaths.add(path);
+		setInlineFileTab(path, (tab) => ({
+			...tab,
+			syncStatus: "dirty",
+			saveError: null,
+		}));
+		return fileAutosave.flush(path);
+	}
+
+	async function reloadInlineFile(path = activeInlineFilePath) {
+		if (!path) return;
+		fileAutosave.cancel(path);
+		await clearPendingDraft(path);
+		await openInlineFile(path, { forceReload: true });
 	}
 
 	async function copyInlineFileContent() {
@@ -879,34 +1286,38 @@ export function createFileWorkspaceController(
 				...entries,
 				buildFsEntry(path, "file"),
 			]);
-			if (isCovasFile(path)) await options.onOpenInlineCanvas(path);
-			else await openInlineFile(path);
+			if (workspaceFilePreviewKind(path, false) === "board")
+				await options.onOpenInlineBoard(path);
+			else await options.onOpenInlineFile(path);
 		} catch (error) {
 			fileTreeError =
 				error instanceof Error ? error.message : "Failed to create file";
 		}
 	}
 
-	async function handleCreateCanvas(parentPath: string) {
+	async function handleCreateBoard(parentPath: string) {
 		if (options.getActiveFsReadonly() || !options.getCanEditFiles()) return;
-		const name = prompt("New canvas name", "Untitled.covas");
+		const name = prompt("New board name", "Untitled.board");
 		if (!name?.trim()) return;
-		const fileName = ensureCovasExtension(name);
+		const fileName = ensureBoardExtension(name);
 		const path = parentPath ? `${parentPath}/${fileName}` : fileName;
 		try {
-			await sdk.space(options.getSpaceId()).canvas.create({
+			await sdk.space(options.getSpaceId()).boards.create({
 				path,
 				title: fileName,
-				nodes: createEmptyCovasDocument().items.map(canvasItemToNode),
+				mutationId: crypto.randomUUID(),
+				nodes: createEmptyBoardDocument().items.map((item, index, all) =>
+					boardItemToNode(item, index, all.length),
+				),
 			});
 			await patchFsDirectory(parentPath, (entries) => [
 				...entries,
 				buildFsEntry(path, "file"),
 			]);
-			await options.onOpenInlineCanvas(path);
+			await options.onOpenInlineBoard(path);
 		} catch (error) {
 			fileTreeError =
-				error instanceof Error ? error.message : "Failed to create canvas";
+				error instanceof Error ? error.message : "Failed to create board";
 		}
 	}
 
@@ -916,7 +1327,9 @@ export function createFileWorkspaceController(
 		if (!name?.trim()) return;
 		const path = parentPath ? `${parentPath}/${name.trim()}` : name.trim();
 		try {
-			await sdk.space(options.getSpaceId()).files.createDir(path);
+			await sdk
+				.space(options.getSpaceId())
+				.files.createDir(path, crypto.randomUUID());
 			await patchFsDirectory(parentPath, (entries) => [
 				...entries,
 				buildFsEntry(path, "dir"),
@@ -972,13 +1385,25 @@ export function createFileWorkspaceController(
 		}
 
 		renameOpenPaths(fromPath, toPath);
-		options.onRenameInlineCanvas?.(fromPath, toPath);
+		options.onRenameInlineBoard?.(fromPath, toPath);
 	}
 
 	async function moveNodeToPath(node: SpaceFsNode, toPath: string) {
 		const fromPath = node.path;
 		if (fromPath === toPath) return false;
-		await sdk.space(options.getSpaceId()).files.move({ fromPath, toPath });
+		const affectedTabs = inlineFileTabs.filter(
+			(tab) => tab.path === fromPath || tab.path.startsWith(`${fromPath}/`),
+		);
+		for (const tab of affectedTabs) {
+			await fileAutosave.flush(tab.path);
+			if (isInlineFileDirty(tab.path))
+				throw new Error("Resolve file sync before moving it.");
+		}
+		await sdk.space(options.getSpaceId()).files.move({
+			fromPath,
+			toPath,
+			mutationId: crypto.randomUUID(),
+		});
 		await applyMovedNode(node, fromPath, toPath);
 		return true;
 	}
@@ -1025,23 +1450,50 @@ export function createFileWorkspaceController(
 		}
 	}
 
-	async function handleDeleteNode(node: SpaceFsNode) {
-		if (options.getActiveFsReadonly() || !options.getCanEditFiles()) return;
-		if (!confirm(`Delete ${node.name}?`)) return;
+	async function handleDeleteNode(node: SpaceFsNode): Promise<boolean> {
+		if (
+			options.getActiveFsReadonly() ||
+			!options.getCanEditFiles() ||
+			deletingPaths.has(node.path)
+		)
+			return false;
+		if (!confirm(`Delete ${node.name}?`)) return false;
+		const context = getWorkspaceContext();
+		const parentPath = getParentDirPath(node.path);
+		deletingPaths.add(node.path);
 		try {
 			await sdk
-				.space(options.getSpaceId())
-				.files.delete(node.path, node.type === "dir");
-			await patchFsDirectory(getParentDirPath(node.path), (entries) =>
-				entries.filter((entry) => entry.path !== node.path),
+				.space(context.spaceId)
+				.files.delete(node.path, node.type === "dir", crypto.randomUUID());
+			await patchFsDirectory(
+				parentPath,
+				(entries) => entries.filter((entry) => entry.path !== node.path),
+				context,
 			);
 			if (node.type === "dir")
-				await clearCachedSpaceFsSubtree(options.getSpaceId(), node.path);
+				await clearCachedSpaceFsSubtree(context.spaceId, node.path);
 			if (inlineFileTabs.some((tab) => tab.path === node.path))
 				closeInlineFile(node.path);
+			try {
+				const entries = await fetchSpaceFsDirWithCache(
+					context.spaceId,
+					parentPath,
+					async () =>
+						(await sdk.space(context.spaceId).files.list(parentPath)).entries,
+					{ force: true },
+				);
+				if (isCurrentWorkspaceContext(context))
+					applyDirectoryEntries(parentPath, entries);
+			} catch {
+				// The confirmed delete remains authoritative; realtime will retry refresh.
+			}
+			return true;
 		} catch (error) {
 			fileTreeError =
 				error instanceof Error ? error.message : "Failed to delete";
+			return false;
+		} finally {
+			deletingPaths.delete(node.path);
 		}
 	}
 
@@ -1109,9 +1561,24 @@ export function createFileWorkspaceController(
 
 	function dispose() {
 		closeReadyCopies();
+		for (const tab of inlineFileTabs) {
+			if (isInlineFileDirty(tab.path)) void persistPendingDraft(tab.path);
+		}
+		fileAutosave.dispose();
+		for (const timer of pendingDraftPersistTimers.values()) clearTimeout(timer);
+		pendingDraftPersistTimers.clear();
+		for (const timer of pendingSaveTimers.values()) clearTimeout(timer);
+		pendingSaveTimers.clear();
+		pendingSaveMutationIds.clear();
 	}
 
 	function renameOpenPaths(fromPath: string, toPath: string) {
+		for (const tab of inlineFileTabs) {
+			const nextPath = rewriteFsPathPrefix(tab.path, fromPath, toPath);
+			if (!nextPath) continue;
+			fileAutosave.cancel(tab.path);
+			void clearPendingDraft(tab.path);
+		}
 		inlineFileTabs = inlineFileTabs.map((tab) => {
 			const nextPath = rewriteFsPathPrefix(tab.path, fromPath, toPath);
 			if (!nextPath) return tab;
@@ -1182,48 +1649,37 @@ export function createFileWorkspaceController(
 			);
 		},
 		get inlineFileIsMarkdown() {
-			const response = getActiveInlineFile()?.response;
-			return Boolean(
-				response &&
-					isTextFileResponse(response) &&
-					isMarkdownPath(response.path),
+			return (
+				filePreviewModel(getActiveInlineFile()?.response).kind === "markdown"
 			);
 		},
 		get inlineFileIsHtml() {
-			const response = getActiveInlineFile()?.response;
-			return Boolean(
-				response && isTextFileResponse(response) && isHtmlPath(response.path),
-			);
+			return filePreviewModel(getActiveInlineFile()?.response).kind === "html";
 		},
 		get inlineFileHasRenderedPreview() {
-			const response = getActiveInlineFile()?.response;
-			return Boolean(response && hasRenderedFilePreview(response));
+			return filePreviewModel(getActiveInlineFile()?.response)
+				.hasRenderedPreview;
 		},
 		get inlineFileIsText() {
-			return isTextFileResponse(getActiveInlineFile()?.response);
+			return filePreviewModel(getActiveInlineFile()?.response).isText;
 		},
 		get inlineFileExt() {
-			const response = getActiveInlineFile()?.response;
-			return isTextFileResponse(response)
-				? (response?.name.split(".").pop()?.toLowerCase() ?? "plaintext")
-				: "plaintext";
+			return filePreviewModel(getActiveInlineFile()?.response).language;
 		},
 		get inlineFileIsImage() {
-			return Boolean(
-				getActiveInlineFile()?.response?.mimeType?.startsWith("image/"),
-			);
+			return filePreviewModel(getActiveInlineFile()?.response).kind === "image";
 		},
 		get inlineFileIsVideo() {
-			return Boolean(
-				getActiveInlineFile()?.response?.mimeType?.startsWith("video/"),
-			);
+			return filePreviewModel(getActiveInlineFile()?.response).kind === "video";
+		},
+		get inlineFileIsAudio() {
+			return filePreviewModel(getActiveInlineFile()?.response).kind === "audio";
+		},
+		get inlineFileIsPdf() {
+			return filePreviewModel(getActiveInlineFile()?.response).kind === "pdf";
 		},
 		get inlineFileDataUrl() {
-			const response = getActiveInlineFile()?.response ?? null;
-			if (!response || isTextFileResponse(response)) return null;
-			return response.delivery === "url"
-				? (response.url ?? null)
-				: `data:${response.mimeType ?? "application/octet-stream"};base64,${response.content}`;
+			return filePreviewModel(getActiveInlineFile()?.response).mediaUrl;
 		},
 		get inlineFileDownloadUrl() {
 			const inlineFile = getActiveInlineFile();
@@ -1341,6 +1797,8 @@ export function createFileWorkspaceController(
 		openInlineFile,
 		closeInlineFile,
 		activateInlineFile: (path: string) => {
+			if (activeInlineFilePath && activeInlineFilePath !== path)
+				void fileAutosave.flush(activeInlineFilePath);
 			activeInlineFilePath = path;
 			const tab = inlineFileTabs.find((item) => item.path === path);
 			if (tab?.viewMode === "diff") void ensureInlineFileDiff();
@@ -1349,12 +1807,19 @@ export function createFileWorkspaceController(
 		},
 		closeInlineFileTab: closeInlineFile,
 		goBackInlineFile,
+		updateInlineFileDraft,
 		saveInlineFile,
+		flushInlineFiles,
+		persistInlineFileDrafts,
+		retryInlineFileSave,
+		retryFailedInlineFiles,
+		overwriteInlineFile,
+		reloadInlineFile,
 		copyInlineFileContent,
 		downloadInlineFile,
 		downloadActiveFsFile,
 		handleCreateFile,
-		handleCreateCanvas,
+		handleCreateBoard,
 		handleCreateDir,
 		handleRenameNode,
 		handleMoveNode,

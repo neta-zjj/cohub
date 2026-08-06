@@ -5,12 +5,15 @@ import {
 	sanitizeRelativePath,
 } from "$lib/upload-entries";
 
-export type SpaceUploadStage = "uploading" | "importing" | "done";
+export type SpaceUploadStage = "preparing" | "uploading" | "importing" | "done";
 
 export type SpaceUploadProgress = {
 	stage: SpaceUploadStage;
 	uploadedBytes: number;
 	totalBytes: number;
+	completedFiles: number;
+	activeFileIndex?: number;
+	activeFileUploadedBytes: number;
 	importedFiles: number;
 	totalFiles: number;
 };
@@ -28,6 +31,7 @@ export type UploadSpaceEntriesOptions = {
 	targetDir?: string;
 	entries: LocalUploadEntry[];
 	onProgress?: (progress: SpaceUploadProgress) => void;
+	signal?: AbortSignal;
 };
 
 export function joinUploadPath(...parts: string[]) {
@@ -38,14 +42,37 @@ export function joinUploadPath(...parts: string[]) {
 		.join("/");
 }
 
+function createAbortError() {
+	const error = new Error("Upload cancelled");
+	error.name = "AbortError";
+	return error;
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+	if (signal?.aborted) throw createAbortError();
+}
+
 function putWithProgress(
 	file: File,
 	uploadUrl: string,
 	headers: Record<string, string> | undefined,
 	onProgress?: (uploaded: number) => void,
+	signal?: AbortSignal,
 ) {
 	return new Promise<void>((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(createAbortError());
+			return;
+		}
 		const xhr = new XMLHttpRequest();
+		let settled = false;
+		const handleAbort = () => xhr.abort();
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", handleAbort);
+			callback();
+		};
 		try {
 			xhr.open("PUT", uploadUrl);
 			for (const [key, value] of Object.entries(headers ?? {})) {
@@ -55,10 +82,12 @@ function putWithProgress(
 				xhr.setRequestHeader(key, value);
 			}
 		} catch (error) {
-			reject(
-				error instanceof Error
-					? error
-					: new Error("Upload failed: invalid request headers"),
+			finish(() =>
+				reject(
+					error instanceof Error
+						? error
+						: new Error("Upload failed: invalid request headers"),
+				),
 			);
 			return;
 		}
@@ -67,10 +96,12 @@ function putWithProgress(
 			onProgress?.(event.loaded);
 		};
 		xhr.onload = () => {
-			if (xhr.status >= 200 && xhr.status < 300) resolve();
-			else reject(new Error(`Upload failed (${xhr.status})`));
+			if (xhr.status >= 200 && xhr.status < 300) finish(resolve);
+			else finish(() => reject(new Error(`Upload failed (${xhr.status})`)));
 		};
-		xhr.onerror = () => reject(new Error("Upload failed"));
+		xhr.onerror = () => finish(() => reject(new Error("Upload failed")));
+		xhr.onabort = () => finish(() => reject(createAbortError()));
+		signal?.addEventListener("abort", handleAbort, { once: true });
 		xhr.send(file);
 	});
 }
@@ -159,6 +190,7 @@ export async function uploadSpaceEntries({
 	targetDir = "",
 	entries,
 	onProgress,
+	signal,
 }: UploadSpaceEntriesOptions): Promise<SpaceUploadedFile[]> {
 	if (entries.length === 0) return [];
 	const uploadDestination = normalizeDestination({ destination, targetDir });
@@ -174,71 +206,88 @@ export async function uploadSpaceEntries({
 	const ids = safeEntries.map(() => crypto.randomUUID());
 
 	onProgress?.({
-		stage: "uploading",
+		stage: "preparing",
 		uploadedBytes: 0,
 		totalBytes,
+		completedFiles: 0,
+		activeFileUploadedBytes: 0,
 		importedFiles: 0,
 		totalFiles,
 	});
+	throwIfAborted(signal);
 
-	const plan = await sdk.space(spaceId).files.createUpload({
-		destination: uploadDestination,
-		entries: safeEntries.map((entry, index) => ({
-			id: ids[index],
-			name: entry.file.name,
-			relativePath: entry.relativePath,
-			size: entry.file.size,
-			mimeType: entry.file.type || null,
-			lastModified: entry.file.lastModified,
-		})),
-	});
+	const plan = await sdk.space(spaceId).files.createUpload(
+		{
+			destination: uploadDestination,
+			entries: safeEntries.map((entry, index) => ({
+				id: ids[index],
+				name: entry.file.name,
+				relativePath: entry.relativePath,
+				size: entry.file.size,
+				mimeType: entry.file.type || null,
+				lastModified: entry.file.lastModified,
+			})),
+		},
+		{ signal },
+	);
+	throwIfAborted(signal);
 	const planById = new Map(plan.entries.map((entry) => [entry.id, entry]));
 	let completedBytes = 0;
 
 	for (const [index, entry] of safeEntries.entries()) {
+		throwIfAborted(signal);
 		const id = ids[index];
 		const planned = planById.get(id);
 		if (!planned) throw new Error("Upload plan missing file");
-		if (!planned.uploadUrl) {
-			// Remote downloadUrl entry — nothing to PUT.
-			completedBytes += entry.file.size;
-			onProgress?.({
-				stage: "uploading",
-				uploadedBytes: completedBytes,
-				totalBytes,
-				importedFiles: 0,
-				totalFiles,
-			});
-			continue;
+		onProgress?.({
+			stage: "uploading",
+			uploadedBytes: completedBytes,
+			totalBytes,
+			completedFiles: index,
+			activeFileIndex: index,
+			activeFileUploadedBytes: 0,
+			importedFiles: 0,
+			totalFiles,
+		});
+		if (planned.uploadUrl) {
+			await putWithProgress(
+				entry.file,
+				planned.uploadUrl,
+				planned.headers,
+				(loaded) => {
+					onProgress?.({
+						stage: "uploading",
+						uploadedBytes: Math.min(totalBytes, completedBytes + loaded),
+						totalBytes,
+						completedFiles: index,
+						activeFileIndex: index,
+						activeFileUploadedBytes: Math.min(entry.file.size, loaded),
+						importedFiles: 0,
+						totalFiles,
+					});
+				},
+				signal,
+			);
 		}
-		await putWithProgress(
-			entry.file,
-			planned.uploadUrl,
-			planned.headers,
-			(loaded) => {
-				onProgress?.({
-					stage: "uploading",
-					uploadedBytes: Math.min(totalBytes, completedBytes + loaded),
-					totalBytes,
-					importedFiles: 0,
-					totalFiles,
-				});
-			},
-		);
 		completedBytes += entry.file.size;
 		onProgress?.({
 			stage: "uploading",
 			uploadedBytes: completedBytes,
 			totalBytes,
+			completedFiles: index + 1,
+			activeFileUploadedBytes: 0,
 			importedFiles: 0,
 			totalFiles,
 		});
 	}
 
+	throwIfAborted(signal);
 	onProgress?.({
 		stage: "importing",
 		uploadedBytes: totalBytes,
 		totalBytes,
+		completedFiles: totalFiles,
+		activeFileUploadedBytes: 0,
 		importedFiles: 0,
 		totalFiles,
 	});
@@ -252,6 +301,8 @@ export async function uploadSpaceEntries({
 		stage: "done",
 		uploadedBytes: totalBytes,
 		totalBytes,
+		completedFiles: totalFiles,
+		activeFileUploadedBytes: 0,
 		importedFiles: totalFiles,
 		totalFiles,
 	});

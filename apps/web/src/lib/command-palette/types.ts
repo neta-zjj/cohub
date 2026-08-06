@@ -51,6 +51,7 @@ export type CommandPaletteItem = {
 	labelResourceRef?: string | null;
 	updatedAt: string | null;
 	source: CommandPaletteItemSource;
+	isPinned?: boolean;
 	localScore?: number;
 	remoteScore?: number;
 };

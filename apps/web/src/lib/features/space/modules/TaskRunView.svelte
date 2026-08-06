@@ -3,6 +3,7 @@ import type { TaskRunRecord, UserProfile } from "@neta-art/cohub";
 import { Check, Copy, GitCommitHorizontal } from "lucide-svelte";
 import { onDestroy } from "svelte";
 import { goto } from "$app/navigation";
+import AudioPlayer from "$lib/components/AudioPlayer.svelte";
 import CenteredLoading from "$lib/components/CenteredLoading.svelte";
 import MessageContentFlow from "$lib/components/MessageContentFlow.svelte";
 import UserIdentity from "$lib/components/UserIdentity.svelte";
@@ -269,7 +270,10 @@ function userTitle(
 											{:else if block.type === "video" && blockSrc}
 												<video src={blockSrc} controls class="max-h-[60vh] w-full rounded-[6px]"><track kind="captions" label="Generated video" /></video>
 											{:else if block.type === "audio" && blockSrc}
-												<audio src={blockSrc} controls class="w-full"></audio>
+												<AudioPlayer
+													src={blockSrc}
+													title={generationBlockLabel(block, index)}
+												/>
 											{:else}
 												<pre class="max-h-[40vh] overflow-auto text-[12px] font-mono leading-relaxed text-text-secondary whitespace-pre-wrap break-all">{displaySafeJson(block, { maxStringLength: 12_000 })}</pre>
 											{/if}

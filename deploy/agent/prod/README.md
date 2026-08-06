@@ -22,7 +22,7 @@ vim secrets.yaml
 
 - Agent 作为控制面独立部署
 - 默认 Service 名称：`cohub-agent`
-- Sandbox 通过 `AGENT_WS_BASE_URL` 主动连接 Agent
+- Agent 作为 WebSocket 客户端主动连接各 Space 的 Sandbox
 - 当前脚本会渲染并应用：
   - `configmap.tmpl.yaml`
   - `service.tmpl.yaml`

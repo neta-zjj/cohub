@@ -3,6 +3,16 @@ import type { QQCredentials, QQMessageResponse } from "./types.js";
 const DEFAULT_API_BASE = "https://api.sgroup.qq.com";
 const DEFAULT_TOKEN_BASE = "https://bots.qq.com";
 const TOKEN_REFRESH_AHEAD_MS = 5 * 60_000;
+const QQ_API_TIMEOUT_MS = 15_000;
+const MAX_RETRY_AFTER_MS = 2_147_483_647;
+
+export const parseRetryAfterMs = (value: string | null, now = Date.now()): number | undefined => {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(MAX_RETRY_AFTER_MS, Math.ceil(seconds * 1000));
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, at - now)) : undefined;
+};
 
 export class QQApiError extends Error {
   constructor(
@@ -11,6 +21,7 @@ export class QQApiError extends Error {
     public readonly path: string,
     public readonly bizCode?: number,
     public readonly bizMessage?: string,
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "QQApiError";
@@ -168,6 +179,7 @@ export class QQApiClient {
         "User-Agent": "CohubGateway/1.0 QQBotProvider",
       },
       body: body == null ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(QQ_API_TIMEOUT_MS),
     });
 
     const text = await response.text();
@@ -180,7 +192,15 @@ export class QQApiClient {
         tokenCache.delete(this.credentials.appId.trim());
         return this.request<T>(method, path, body, true);
       }
-      throw new QQApiError(`QQ API ${method} ${path} failed: ${response.status} ${bizMessage ?? text}`, response.status, path, bizCode, bizMessage);
+      const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      throw new QQApiError(
+        `QQ API ${method} ${path} failed: ${response.status} ${bizMessage ?? text}`,
+        response.status,
+        path,
+        bizCode,
+        bizMessage,
+        retryAfterMs,
+      );
     }
     return data as T;
   }
@@ -219,11 +239,19 @@ export class QQApiClient {
         "User-Agent": "CohubGateway/1.0 QQBotProvider",
       },
       body: JSON.stringify({ appId, clientSecret }),
+      signal: AbortSignal.timeout(QQ_API_TIMEOUT_MS),
     });
     const text = await response.text();
     const data = text ? safeJson(text) as Record<string, unknown> : {};
     if (!response.ok) {
-      throw new QQApiError(`QQ token request failed: ${response.status} ${text}`, response.status, "/app/getAppAccessToken");
+      throw new QQApiError(
+        `QQ token request failed: ${response.status} ${text}`,
+        response.status,
+        "/app/getAppAccessToken",
+        undefined,
+        undefined,
+        parseRetryAfterMs(response.headers.get("retry-after")),
+      );
     }
     const token = typeof data.access_token === "string" ? data.access_token : typeof data.accessToken === "string" ? data.accessToken : "";
     const expiresIn = typeof data.expires_in === "number" ? data.expires_in : typeof data.expiresIn === "number" ? data.expiresIn : 7200;

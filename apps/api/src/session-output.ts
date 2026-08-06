@@ -10,6 +10,7 @@ import {
   getProviderMessageRefBySessionMessage,
   getBindingsBySessionId,
 } from "./channels.js";
+import { dispatchSpaceDomainEvent } from "./space-events.js";
 import { db } from "./db/index.js";
 import { spaceChannels } from "@cohub/db";
 import { clearSessionStreamSnapshot } from "./session-stream-snapshot.js";
@@ -164,7 +165,7 @@ const truncateTurnPreview = (text: string | null | undefined) => {
 
 export const dispatchTurnFinalized = async (input: { spaceId: string; sessionId: string; turn: SessionTurnRecord }) => {
   await clearSessionStreamSnapshot({ spaceId: input.spaceId, sessionId: input.sessionId });
-  await dispatchRealtimeEvent({
+  await dispatchSpaceDomainEvent({
     id: randomUUID(),
     timestamp: Date.now(),
     domain: "session",

@@ -1,5 +1,5 @@
 import {
-	type ViewportCanvasContext,
+	type ViewportBoardContext,
 	type ViewportContext,
 	type ViewportFileContext,
 	type ViewportPortContext,
@@ -14,9 +14,8 @@ export type FileViewportObservation = {
 	visibleLines?: ViewportVisibleLines | null;
 };
 
-export type CanvasViewportObservation = {
+export type BoardViewportObservation = {
 	path: string;
-	camera?: ViewportCanvasContext["camera"] | null;
 	visibleRect?: ViewportVisibleRect | null;
 	selectedNodes?: ViewportSelectedNode[] | null;
 };
@@ -28,7 +27,7 @@ export type PortViewportObservation = {
 
 export type ActiveViewportSource =
 	| { kind: "file"; path: string }
-	| { kind: "canvas"; path: string }
+	| { kind: "board"; path: string; boardId?: string | null }
 	| { kind: "port"; port: string; url?: string | null }
 	| null;
 
@@ -66,15 +65,6 @@ function sameSelectedNodes(
 	);
 }
 
-function sameCamera(
-	a: ViewportCanvasContext["camera"] | undefined,
-	b: ViewportCanvasContext["camera"] | undefined,
-) {
-	if (!a && !b) return true;
-	if (!a || !b) return false;
-	return a.x === b.x && a.y === b.y && a.zoom === b.zoom;
-}
-
 function buildFileContext(
 	path: string,
 	visibleLines?: ViewportVisibleLines | null,
@@ -93,23 +83,15 @@ function buildFileContext(
 	};
 }
 
-function buildCanvasContext(
-	path: string,
-	observation?: CanvasViewportObservation | null,
-): ViewportCanvasContext {
+function buildBoardContext(
+	source: { path: string; boardId?: string | null },
+	observation?: BoardViewportObservation | null,
+): ViewportBoardContext {
 	const selectedNodes = observation?.selectedNodes?.filter(Boolean) ?? [];
 	return {
-		kind: "canvas",
-		path,
-		...(observation?.camera
-			? {
-					camera: {
-						x: observation.camera.x,
-						y: observation.camera.y,
-						zoom: observation.camera.zoom,
-					},
-				}
-			: {}),
+		kind: "board",
+		path: source.path,
+		...(source.boardId ? { boardId: source.boardId } : {}),
 		...(observation?.visibleRect
 			? {
 					visibleRect: {
@@ -151,18 +133,42 @@ function isSameActiveSource(
 	return false;
 }
 
+/** Stable id for dismiss / auto-attach; matches `viewportContextId` for live contexts. */
+export function activeViewportSourceId(
+	source: ActiveViewportSource,
+): string | null {
+	if (!source) return null;
+	if (source.kind === "port") return `port:${source.port}`;
+	return `${source.kind}:${source.path}`;
+}
+
+/**
+ * Dismiss sticks until the active source actually changes to another one.
+ * Closing the preview (→ null) keeps dismiss so reopening the same source stays quiet.
+ * Switching A → B drops A's dismiss so returning later can auto-attach again.
+ */
+export function nextDismissedIdsAfterSourceChange(
+	dismissedIds: readonly string[],
+	prevId: string | null,
+	nextId: string | null,
+): readonly string[] {
+	if (!prevId || !nextId || prevId === nextId) return dismissedIds;
+	if (!dismissedIds.includes(prevId)) return dismissedIds;
+	return dismissedIds.filter((id) => id !== prevId);
+}
+
 export function createViewportContextController() {
 	let activeSource = $state.raw<ActiveViewportSource>(null);
 	let fileObservation = $state.raw<FileViewportObservation | null>(null);
-	let canvasObservation = $state.raw<CanvasViewportObservation | null>(null);
+	let boardObservation = $state.raw<BoardViewportObservation | null>(null);
 	let dismissedIds = $state.raw<string[]>([]);
 	/**
 	 * null = live derivation
 	 * array (possibly empty) = frozen send-cycle UI state
 	 */
 	let snapshot = $state.raw<ViewportContext[] | null>(null);
-	let pendingCanvasObservation: CanvasViewportObservation | null = null;
-	let canvasFlushFrame = 0;
+	let pendingBoardObservation: BoardViewportObservation | null = null;
+	let boardFlushFrame = 0;
 
 	const activeContext = $derived.by<ViewportContext | null>(() => {
 		const source = activeSource;
@@ -174,10 +180,10 @@ export function createViewportContextController() {
 					: null;
 			return buildFileContext(source.path, visibleLines);
 		}
-		if (source.kind === "canvas") {
+		if (source.kind === "board") {
 			const observation =
-				canvasObservation?.path === source.path ? canvasObservation : null;
-			return buildCanvasContext(source.path, observation);
+				boardObservation?.path === source.path ? boardObservation : null;
+			return buildBoardContext(source, observation);
 		}
 		return buildPortContext(source.port, source.url);
 	});
@@ -190,19 +196,18 @@ export function createViewportContextController() {
 		return [context];
 	});
 
-	function cancelPendingCanvasFlush() {
-		if (canvasFlushFrame && typeof cancelAnimationFrame === "function") {
-			cancelAnimationFrame(canvasFlushFrame);
+	function cancelPendingBoardFlush() {
+		if (boardFlushFrame && typeof cancelAnimationFrame === "function") {
+			cancelAnimationFrame(boardFlushFrame);
 		}
-		canvasFlushFrame = 0;
-		pendingCanvasObservation = null;
+		boardFlushFrame = 0;
+		pendingBoardObservation = null;
 	}
 
-	function applyCanvasObservation(next: CanvasViewportObservation) {
-		const prev = canvasObservation;
+	function applyBoardObservation(next: BoardViewportObservation) {
+		const prev = boardObservation;
 		if (
 			prev?.path === next.path &&
-			sameCamera(prev.camera ?? undefined, next.camera ?? undefined) &&
 			sameVisibleRect(
 				prev.visibleRect ?? undefined,
 				next.visibleRect ?? undefined,
@@ -214,35 +219,43 @@ export function createViewportContextController() {
 		) {
 			return;
 		}
-		canvasObservation = next;
+		boardObservation = next;
 	}
 
 	function setActiveSource(next: ActiveViewportSource) {
 		if (isSameActiveSource(activeSource, next)) return;
+		const prevId = activeViewportSourceId(activeSource);
+		const nextId = activeViewportSourceId(next);
+		const pruned = nextDismissedIdsAfterSourceChange(
+			dismissedIds,
+			prevId,
+			nextId,
+		);
+		if (pruned !== dismissedIds) dismissedIds = [...pruned];
 		activeSource = next;
 		if (!next) {
 			fileObservation = null;
-			canvasObservation = null;
-			cancelPendingCanvasFlush();
+			boardObservation = null;
+			cancelPendingBoardFlush();
 			return;
 		}
 		if (next.kind === "file") {
 			if (fileObservation?.path !== next.path) fileObservation = null;
-			canvasObservation = null;
-			cancelPendingCanvasFlush();
+			boardObservation = null;
+			cancelPendingBoardFlush();
 			return;
 		}
-		if (next.kind === "canvas") {
-			if (canvasObservation?.path !== next.path) {
-				canvasObservation = null;
-				cancelPendingCanvasFlush();
+		if (next.kind === "board") {
+			if (boardObservation?.path !== next.path) {
+				boardObservation = null;
+				cancelPendingBoardFlush();
 			}
 			fileObservation = null;
 			return;
 		}
 		fileObservation = null;
-		canvasObservation = null;
-		cancelPendingCanvasFlush();
+		boardObservation = null;
+		cancelPendingBoardFlush();
 	}
 
 	function setFileVisibleLines(
@@ -284,39 +297,37 @@ export function createViewportContextController() {
 		fileObservation = next;
 	}
 
-	function setCanvasViewState(
+	function setBoardViewState(
 		path: string,
 		state: {
-			camera?: ViewportCanvasContext["camera"] | null;
 			visibleRect?: ViewportVisibleRect | null;
 			selectedNodes?: ViewportSelectedNode[] | null;
 		},
 	) {
 		if (!path) return;
-		if (activeSource?.kind === "canvas" && activeSource.path !== path) {
+		if (activeSource?.kind === "board" && activeSource.path !== path) {
 			return;
 		}
 
-		pendingCanvasObservation = {
+		pendingBoardObservation = {
 			path,
-			camera: state.camera ?? undefined,
 			visibleRect: state.visibleRect ?? undefined,
 			selectedNodes: state.selectedNodes ?? undefined,
 		};
 
 		// Coalesce pan/zoom bursts to one state write per frame.
-		if (canvasFlushFrame) return;
+		if (boardFlushFrame) return;
 		if (typeof requestAnimationFrame !== "function") {
-			const pending = pendingCanvasObservation;
-			pendingCanvasObservation = null;
-			if (pending) applyCanvasObservation(pending);
+			const pending = pendingBoardObservation;
+			pendingBoardObservation = null;
+			if (pending) applyBoardObservation(pending);
 			return;
 		}
-		canvasFlushFrame = requestAnimationFrame(() => {
-			canvasFlushFrame = 0;
-			const pending = pendingCanvasObservation;
-			pendingCanvasObservation = null;
-			if (pending) applyCanvasObservation(pending);
+		boardFlushFrame = requestAnimationFrame(() => {
+			boardFlushFrame = 0;
+			const pending = pendingBoardObservation;
+			pendingBoardObservation = null;
+			if (pending) applyBoardObservation(pending);
 		});
 	}
 
@@ -326,11 +337,11 @@ export function createViewportContextController() {
 	}
 
 	function takeSendSnapshot(): ViewportContext[] {
-		// Flush any coalesced canvas observation before capturing.
-		if (pendingCanvasObservation) {
-			const pending = pendingCanvasObservation;
-			cancelPendingCanvasFlush();
-			applyCanvasObservation(pending);
+		// Flush any coalesced board observation before capturing.
+		if (pendingBoardObservation) {
+			const pending = pendingBoardObservation;
+			cancelPendingBoardFlush();
+			applyBoardObservation(pending);
 		}
 		// Capture before freezing UI so we don't read the empty send-cycle list.
 		const next =
@@ -348,18 +359,17 @@ export function createViewportContextController() {
 	}
 
 	function restoreAfterFailedSend() {
-		// Return to live derivation; keep dismissed ids for this draft.
+		// Return to live derivation; keep dismissed ids.
 		snapshot = null;
 	}
 
 	function markSendSucceeded() {
+		// Unfreeze composer chips; dismissed sources stay dismissed until source changes.
 		snapshot = null;
-		// New draft may auto-include the active viewport again.
-		dismissedIds = [];
 	}
 
 	function dispose() {
-		cancelPendingCanvasFlush();
+		cancelPendingBoardFlush();
 	}
 
 	return {
@@ -371,7 +381,7 @@ export function createViewportContextController() {
 		},
 		setActiveSource,
 		setFileVisibleLines,
-		setCanvasViewState,
+		setBoardViewState,
 		dismiss,
 		takeSendSnapshot,
 		restoreAfterFailedSend,

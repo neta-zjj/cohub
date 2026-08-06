@@ -260,7 +260,7 @@ $effect(() => {
 </script>
 
 {#if sortedNotices.length > 0}
-	<div class="pointer-events-none fixed right-3 top-[calc(env(safe-area-inset-top)+3.5rem)] z-40 flex w-[calc(100vw-1.5rem)] justify-end sm:right-4 sm:w-[min(560px,calc(100vw-2rem))] lg:absolute lg:right-12 lg:top-4 lg:z-30 lg:w-[calc(100vw-1.5rem)]">
+	<div class="pointer-events-none fixed right-3 top-[calc(env(safe-area-inset-top)+3.5rem)] z-40 flex w-[calc(100vw-1.5rem)] justify-end sm:right-4 sm:w-[min(560px,calc(100vw-2rem))] lg:absolute lg:right-16 lg:top-4 lg:z-30 lg:w-[calc(100vw-1.5rem)]">
 		<section class={`pointer-events-auto overflow-hidden rounded-[9px] border border-border-primary bg-bg-elevated text-text-secondary shadow-[0_16px_36px_rgba(0,0,0,0.14)] transition-shadow duration-150 ${collapsed ? "w-fit" : "w-full max-w-[560px]"}`}>
 			<button
 				type="button"

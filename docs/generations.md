@@ -51,6 +51,8 @@ type GenerationTaskResult = {
 
 `requestId` and `cost` are observed provider fields captured via `generateResult()`. Older completed tasks may omit them.
 
+`meta` is model-owned input and is validated against the model declaration. Cohub request provenance and task context are stored separately and are never forwarded to generation providers.
+
 ## Billing
 
 Generation requests share the platform credit balance with LLM turns.
@@ -153,6 +155,8 @@ parameters:
     default: auto
     enum: [auto, low, medium, high]
 ```
+
+Set `hidden: true` on a declaration to exclude the model from default Web and CLI discovery. Hidden models remain available through exact-ID search, `cohub models show <model>`, direct generation requests, and explicit Limited policies. The models API and SDK continue to return the complete catalog with the `hidden` field, so this is a discovery hint rather than an authorization or runtime availability control.
 
 See the full examples:
 

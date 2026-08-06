@@ -6,8 +6,11 @@ export { VoiceApi, VoiceInputClient, createVoiceInputClient } from "./voice-inpu
 export { UsersApi } from "./apis/users.js";
 export { WorksApi } from "./apis/works.js";
 export { WorkCommerceApi } from "./apis/work-commerce.js";
+export { WorkRealtimeApi, WorkRoom } from "./apis/work-realtime.js";
 export { ReferencesApi } from "./apis/references.js";
 export { ReferralsApi } from "./apis/referrals.js";
+export { buildSpaceInvitePath, buildSpacePath } from "./apis/invitations.js";
+export type { BuildSpaceInvitePathInput, BuildSpacePathInput } from "./apis/invitations.js";
 export type { ReferenceResourceSelector } from "./apis/references.js";
 export { ParentBridgeTransport, PopupBrokerTransport, WorkRuntimeApi, createSlugWorkIdResolver, createWorkRuntime, resolveWorkTransport } from "./work-runtime.js";
 export type { WorkIdResolver, WorkRuntimeModeConfig, WorkRuntimeRequestOptions, WorkRuntimeTransport } from "./work-runtime.js";
@@ -31,18 +34,36 @@ export {
 } from "./http-error.js";
 export { HttpError, joinApiUrl, sanitizeAccessToken } from "./transport.js";
 export {
+  COHUB_SOURCE_HEADER,
+  COHUB_SOURCE_HEADER_NAMES,
+  hasRequestSourceIdentity,
+  isRequestSourceEmpty,
+  isRequestSourceUuid,
+  mergeRequestSourceIntoMeta,
+  normalizeRequestSource,
+  parseRequestSourceFromHeaders,
+  readRequestSourceFromEnv,
+  REQUEST_SOURCE_VIA_MAX_LENGTH,
+  requestSourceToHeaders,
+  resolveRequestSourceChannel,
+} from "@cohub/protocol/provenance";
+export type { RequestSource, RequestSourceVia } from "@cohub/protocol/provenance";
+export {
   GenerationPolicyError,
   assertGenerationRequestAllowedByPolicy,
   decodeGenerationPolicy,
   encodeGenerationPolicy,
+  filterDiscoverableGenerationModels,
   filterGenerationDeclarationsByPolicy,
   findGenerationModelPolicy,
   getAllowedGenerationModelIds,
+  isGenerationModelHidden,
   normalizeGenerationPolicy,
   parseGenerationPolicyFromEnv,
 } from "@cohub/protocol/generation";
 export type {
   GenerationModelPolicy,
+  GenerationModelVisibility,
   GenerationParameterConstraint,
   GenerationPolicy,
   GenerationUsageBilling,
@@ -87,9 +108,53 @@ export type {
   GenerationStreamTurnUpdatedEvent,
 } from "./session-generation-stream.js";
 export * from "./types.js";
-export type { ChannelEnvelope, LabelAssignmentsUpdatedEvent, RealtimeServerEvent } from "@cohub/protocol/realtime";
-export type { SessionEventName, SessionSubscriptionHandlers, SpaceChannelBindingRecord, SpaceEventName, WebSocketConnectionState } from "./apis/spaces.js";
-export type { CreatePublicAssetUploadInput, CreatePublicAssetUploadResponse, PublicAssetMimeType, PublicAssetPurpose, UploadChatAttachmentInput, UploadChatImageAttachmentInput, UploadPublicAssetInput } from "./apis/public-assets.js";
-export type { WorkAuthorizeResponse, WorkCreateInput, WorkDetailResponse, WorkGetResponse, WorkMeta, WorkPresentationMeta, WorkPublicOwnerRecord, WorkPublicSpaceRecord, WorkRecord, WorkResolveResponse, WorkSessionResponse, WorkStatus, WorkTargetType, WorkUpdateInput, WorkVersionRecord, WorkVisibility } from "./apis/works.js";
+export type {
+  BoardAwarenessGesture,
+  BoardAwarenessNodePreview,
+  BoardAwarenessStateUpdate,
+  BoardAwarenessUpdate,
+  ChannelEnvelope,
+  LabelAssignmentsUpdatedEvent,
+  RealtimeServerEvent,
+  RealtimeWorkRecord,
+  RealtimeWorkVersionRecord,
+  WorkVersionPublishedEvent,
+} from "@cohub/protocol/realtime";
+export type {
+  BoardAwarenessUpdatedEvent,
+  BoardEventName,
+  BoardPlaybackChangedEvent,
+  BoardSubscriptionHandlers,
+  BoardTransactionAppliedEvent,
+  BoardTransactionInput,
+  SessionEventName,
+  SessionSubscriptionHandlers,
+  SpaceChannelBindingRecord,
+  SpaceEventName,
+  SpaceTurnListOptions,
+  WebSocketConnectionState,
+} from "./apis/spaces.js";
+export type {
+  RealtimeRoomDescriptor,
+  RealtimeRoomEvent,
+  RealtimeRoomMember,
+} from "@cohub/protocol/realtime";
+export type {
+  WorkRoomAdmissionResponse,
+  WorkRoomCreateInput,
+  WorkRoomEvent,
+  WorkRoomEventMap,
+  WorkRoomPublishResult,
+  WorkRoomState,
+} from "./apis/work-realtime.js";
+export { BoardClient, BoardTransactionError } from "./apis/spaces.js";
+export {
+  BoardPlaybackPolicySchema,
+  parseBoardPlaybackPolicy,
+} from "@cohub/protocol";
+export * from "./board/animation.js";
+export type { CreatePublicAssetUploadInput, CreatePublicAssetUploadResponse, PublicAssetMimeType, PublicAssetPurpose, PublicAssetUploadProgress, PublicAssetUploadProtocol, UploadChatAttachmentInput, UploadChatImageAttachmentInput, UploadPublicAssetInput } from "./apis/public-assets.js";
+export type { WorkAuthorizeResponse, WorkContent, WorkCreateInput, WorkDetailResponse, WorkExtractedPageMeta, WorkGetResponse, WorkMeta, WorkPresentationMeta, WorkPublicOwnerRecord, WorkPublicSpaceRecord, WorkRecord, WorkResolveResponse, WorkSessionResponse, WorkStatus, WorkTargetType, WorkUpdateInput, WorkVersionRecord, WorkVisibility } from "./apis/works.js";
+export type { WorkArtifactDescriptor, WorkBoardArtifactManifest, WorkBoardAsset, WorkContentKind } from "@cohub/protocol";
 export type { WorkCommerceCheckoutStatus, WorkCommerceCreditConsumeResponse, WorkCommerceCreditConsumeStatus, WorkCommerceEntitlement, WorkCommerceEntitlementsResponse, WorkCommerceOrder, WorkCommerceProductResolveResponse, WorkCommercePurchaseResponse } from "./apis/work-commerce.js";
-export type { WorkRuntimeCheckoutState, WorkRuntimeCheckoutStatus, WorkRuntimeContext } from "./work-runtime.js";
+export type { WorkRuntimeCheckoutState, WorkRuntimeCheckoutStatus, WorkRuntimeContext, WorkRuntimeNetaCharacter, WorkRuntimeNetaCharacterPage } from "./work-runtime.js";

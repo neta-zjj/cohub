@@ -1,0 +1,96 @@
+import type {
+	PublicUserPageResponse,
+	WorkDetailResponse,
+} from "@neta-art/cohub";
+import { PUBLIC_API_ORIGIN } from "$env/static/public";
+import type { PublicWorkPath } from "$lib/work-pwa";
+
+function apiUrl(path: string) {
+	const base = (PUBLIC_API_ORIGIN ?? "").replace(/\/$/, "");
+	return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readJson(response: Response): Promise<unknown> {
+	return response.json().catch(() => null);
+}
+
+function asWorkDetail(value: unknown): WorkDetailResponse | null {
+	if (!isRecord(value)) return null;
+	if (!isRecord(value.work) || typeof value.work.id !== "string") return null;
+	if (!isRecord(value.space) || typeof value.space.id !== "string") return null;
+	if (!isRecord(value.owner) || typeof value.owner.userUuid !== "string")
+		return null;
+	return value as WorkDetailResponse;
+}
+
+function asPublicUserPage(value: unknown): PublicUserPageResponse | null {
+	if (!isRecord(value)) return null;
+	if (!isRecord(value.profile) || typeof value.profile.userUuid !== "string")
+		return null;
+	if (!Array.isArray(value.spaces) || !Array.isArray(value.works)) return null;
+	return value as PublicUserPageResponse;
+}
+
+export type PublicApiFailure = {
+	ok: false;
+	status: number;
+	/** True when the work likely exists but the anonymous SSR fetch cannot see it. */
+	needsClientAuth?: boolean;
+};
+
+/**
+ * Public work detail for SSR / manifest.
+ * Web Workers do not talk to Postgres — this always goes through the API.
+ */
+export async function loadPublicWorkDetail(
+	path: PublicWorkPath | null,
+	fetcher: typeof fetch,
+): Promise<{ ok: true; detail: WorkDetailResponse } | PublicApiFailure> {
+	if (!path) return { ok: false, status: 0 };
+	const url = apiUrl(
+		`/api/works/by-slug/${encodeURIComponent(path.username)}/${encodeURIComponent(path.spaceSlug)}/${encodeURIComponent(path.workSlug)}`,
+	);
+	const response = await fetcher(url).catch(() => null);
+	if (!response) return { ok: false, status: 502 };
+	if (response.status === 404) return { ok: false, status: 404 };
+	// Space-visibility works require auth; anonymous SSR cannot complete them.
+	if (response.status === 401 || response.status === 403) {
+		return { ok: false, status: response.status, needsClientAuth: true };
+	}
+	if (!response.ok)
+		return {
+			ok: false,
+			status: response.status >= 500 ? 502 : response.status,
+		};
+	const detail = asWorkDetail(await readJson(response));
+	if (!detail) return { ok: false, status: 502 };
+	return { ok: true, detail };
+}
+
+/** Public profile page payload for SSR. */
+export async function loadPublicUserPage(
+	username: string,
+	fetcher: typeof fetch,
+): Promise<{ ok: true; page: PublicUserPageResponse } | PublicApiFailure> {
+	const url = apiUrl(`/api/users/by-username/${encodeURIComponent(username)}`);
+	const response = await fetcher(url).catch(() => null);
+	if (!response) return { ok: false, status: 502 };
+	if (!response.ok) {
+		return {
+			ok: false,
+			status:
+				response.status === 404
+					? 404
+					: response.status >= 500
+						? 502
+						: response.status,
+		};
+	}
+	const page = asPublicUserPage(await readJson(response));
+	if (!page) return { ok: false, status: 502 };
+	return { ok: true, page };
+}

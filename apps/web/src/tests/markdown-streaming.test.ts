@@ -42,6 +42,29 @@ test("renderMarkdown adds href titles to links without overriding explicit title
 	assert.match(html, /<a href="docs\/readme.md" title="Docs">docs<\/a>/);
 });
 
+test("renderMarkdown escapes source HTML instead of rendering it", async () => {
+	const html = await renderMarkdown(
+		`400 Bad Request\n\n<h1>Bad Request</h1>\n<hr>\n<img src="x" onerror="alert(1)">\n\n- <svg onload="alert(2)">upstream</svg>`,
+	);
+
+	assert.match(html, /&lt;h1&gt;Bad Request&lt;\/h1&gt;/);
+	assert.match(html, /&lt;hr&gt;/);
+	assert.match(html, /&lt;img src="x" onerror="alert\(1\)"&gt;/);
+	assert.match(html, /&lt;svg onload="alert\(2\)"&gt;upstream&lt;\/svg&gt;/);
+	assert.doesNotMatch(html, /<h1>|<hr>|<img\b|<svg\b|<script\b/);
+});
+
+test("renderStreamingMarkdownSplit escapes source HTML in the live tail", async () => {
+	const { stableHtml, tailHtml } = await renderStreamingMarkdownSplit(
+		"<h1>Bad Request</h1>\n\n<img src=x onerror=alert(1)>",
+	);
+	const html = `${stableHtml}${tailHtml}`;
+
+	assert.match(html, /&lt;h1&gt;Bad Request&lt;\/h1&gt;/);
+	assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+	assert.doesNotMatch(html, /<(?:h1|hr|img|svg|script)\b/);
+});
+
 test("renderMarkdown renders mermaid fences as diagram placeholders", async () => {
 	const html = await renderMarkdown(`\`\`\`mermaid
 graph TD
@@ -50,6 +73,7 @@ graph TD
 
 	assert.match(html, /markdown-mermaid/);
 	assert.match(html, /data-mermaid-source=/);
+	assert.match(html, /data-drawer-swipe-ignore/);
 	assert.match(html, /<summary>Source<\/summary>/);
 	assert.doesNotMatch(html, /<pre class="shiki/);
 });

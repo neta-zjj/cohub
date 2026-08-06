@@ -95,6 +95,12 @@ function getFileExtension(name: string) {
 
 export const COMPOSER_ATTACHMENT_ACCEPT = "";
 
+export type ComposerAttachmentUploadStatus =
+	| "ready"
+	| "uploading"
+	| "finalizing"
+	| "failed";
+
 export type ComposerImageAttachment = {
 	kind: "image";
 	id: string;
@@ -104,7 +110,8 @@ export type ComposerImageAttachment = {
 	previewUrl: string;
 	uploadedUrl?: string;
 	size: number;
-	status: "ready" | "uploading" | "failed";
+	status: ComposerAttachmentUploadStatus;
+	progress?: number;
 };
 
 export type ComposerTextAttachment = {
@@ -124,7 +131,8 @@ export type ComposerFileAttachment = {
 	mediaType: string | null;
 	file: File;
 	size: number;
-	status: "ready" | "uploading" | "failed";
+	status: ComposerAttachmentUploadStatus;
+	progress?: number;
 };
 
 export type ComposerAttachment =

@@ -1,39 +1,28 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ModelsConfig } from "@cohub/infra/config-runtime/models";
-
-process.env.DATABASE_URL ??= "postgres://user:pass@localhost:5432/cohub_test";
-process.env.APP_ENCRYPTION_KEY ??= "test-encryption-key";
-process.env.SESSIONS_NAMESPACE ??= "test";
-process.env.REDIS_URL ??= "redis://localhost:6379";
-process.env.WORKSPACE_ROOT ??= "/tmp";
-process.env.SESSIONS_DIR ??= "/tmp";
-process.env.ENV ??= "dev";
+import type { SpaceModListItem } from "@cohub/core/space-mods";
 
 const root = await mkdtemp(join(tmpdir(), "cohub-system-prompt-"));
+const workspaceRoot = join(root, "spaces");
+const checkpointCacheRoot = join(root, "checkpoints");
 process.env.PLATFORM_CONFIG_ROOT = join(root, "configs");
+process.env.WORKSPACE_ROOT = workspaceRoot;
+process.env.CHECKPOINT_CACHE_ROOT = checkpointCacheRoot;
 
 const userId = "11111111-1111-4111-8111-111111111111";
-const secondUserId = "22222222-2222-4222-8222-222222222222";
 const workspace = join(root, "workspace");
 const userConfig = join(process.env.PLATFORM_CONFIG_ROOT, "users", userId);
-const secondUserConfig = join(process.env.PLATFORM_CONFIG_ROOT, "users", secondUserId);
 const platformAgent = join(process.env.PLATFORM_CONFIG_ROOT, "platform", ".cohub");
 
 await mkdir(workspace, { recursive: true });
 await mkdir(userConfig, { recursive: true });
-await mkdir(secondUserConfig, { recursive: true });
 await mkdir(platformAgent, { recursive: true });
 await writeFile(join(platformAgent, "SYSTEM.md"), "You are a Cohub test assistant.");
 await writeFile(join(userConfig, "AGENTS.md"), "Always prefer concise answers.");
-await writeFile(join(secondUserConfig, "AGENTS.md"), "Prefer implementation details.");
 await mkdir(join(userConfig, ".agents", "skills", "owner-skill"), { recursive: true });
-await mkdir(join(secondUserConfig, ".agents", "skills", "actor-skill"), { recursive: true });
 await writeFile(join(userConfig, ".agents", "skills", "owner-skill", "SKILL.md"), "---\nname: owner-skill\ndescription: Owner-only skill\n---\nOwner skill body.");
-await writeFile(join(secondUserConfig, ".agents", "skills", "actor-skill", "SKILL.md"), "---\nname: actor-skill\ndescription: Actor skill should be skipped for non-owner\n---\nActor skill body.");
 await writeFile(join(workspace, "AGENTS.md"), "Project rule: run typecheck.");
 
 const { buildCohubSystemPrompt } = await import("../runtime/system-prompt-builder.js");
@@ -73,6 +62,13 @@ await writeFile(
   "---\nname: test-literal\ndescription: |\n  This is a literal\n  multi-line description.\n---\nLiteral skill body.",
 );
 
+// Skill with disable-model-invocation should be hidden from the model prompt
+await mkdir(join(workspace, ".agents", "skills", "manual-only"), { recursive: true });
+await writeFile(
+  join(workspace, ".agents", "skills", "manual-only", "SKILL.md"),
+  "---\nname: manual-only\ndescription: A side-effecting skill invocable only via /skill:name\ndisable-model-invocation: true\n---\nManual-only skill body.",
+);
+
 const promptWithSkills = await buildCohubSystemPrompt({
   cwd: workspace,
   userId,
@@ -91,68 +87,64 @@ assert.ok(
   !promptWithSkills.includes("<description>></description>") && !promptWithSkills.includes("<description>|</description>"),
   "block scalar indicators should not appear as description text",
 );
+assert.ok(
+  promptWithSkills.includes("test-folded"),
+  "model-invocable skills should appear in the available_skills block",
+);
+assert.ok(
+  !promptWithSkills.includes("manual-only"),
+  "disable-model-invocation skills should be hidden from the available_skills block",
+);
 
-const { createCohubAgentSession } = await import("../runtime/session-runtime.js");
-const { CohubModelRegistry } = await import("../runtime/model-registry.js");
-const { SessionManager } = await import("../runtime/local-session-manager.js");
-const { redis } = await import("../redis.js");
-redis.disconnect();
+const modSpaceId = "22222222-2222-4222-8222-222222222222";
+const liveModRoot = join(workspaceRoot, modSpaceId, "workspace");
+const modSnapshotRoot = join(checkpointCacheRoot, modSpaceId, "latest");
+const liveSkillDir = join(liveModRoot, ".agents", "skills", "shared-mod-skill");
+const snapshotSkillDir = join(modSnapshotRoot, ".agents", "skills", "shared-mod-skill");
+await Promise.all([
+  mkdir(liveSkillDir, { recursive: true }),
+  mkdir(snapshotSkillDir, { recursive: true }),
+  mkdir(join(liveModRoot, ".agents", "skills", "live-only-skill"), { recursive: true }),
+  mkdir(join(modSnapshotRoot, ".cohub"), { recursive: true }),
+  mkdir(join(liveModRoot, ".cohub"), { recursive: true }),
+]);
+await Promise.all([
+  writeFile(join(liveSkillDir, "SKILL.md"), "---\nname: shared-mod-skill\ndescription: Live workspace skill description\n---\nLive workspace body."),
+  writeFile(join(snapshotSkillDir, "SKILL.md"), "---\nname: shared-mod-skill\ndescription: Latest checkpoint skill description\n---\nCheckpoint body."),
+  writeFile(join(liveModRoot, ".agents", "skills", "live-only-skill", "SKILL.md"), "---\nname: live-only-skill\ndescription: Live-only skill description\n---\nLive-only body."),
+  writeFile(join(liveModRoot, "AGENTS.md"), "Live workspace Mod context."),
+  writeFile(join(modSnapshotRoot, "AGENTS.md"), "Latest checkpoint Mod context."),
+  writeFile(join(liveModRoot, ".cohub", "APPEND_SYSTEM.md"), "Live workspace append prompt."),
+  writeFile(join(modSnapshotRoot, ".cohub", "APPEND_SYSTEM.md"), "Latest checkpoint append prompt."),
+]);
 
-const createModelsConfig = (provider: string, modelId: string): ModelsConfig => ({
-  providers: {
-    [provider]: {
-      api: "openai-responses",
-      baseUrl: "https://example.test/v1",
-      apiKey: `${provider.toUpperCase()}_KEY`,
-      models: [{ id: modelId, reasoning: false }],
-    },
-  },
+const spaceMod = {
+  id: "33333333-3333-4333-8333-333333333333",
+  spaceId: "44444444-4444-4444-8444-444444444444",
+  modSpaceId,
+  name: "Shared Mod",
+  mountSlug: "shared-mod",
+  enabled: true,
+  sortOrder: 0,
+  createdBy: userId,
+  createdAt: null,
+  updatedAt: null,
+  modSpaceName: "Shared Mod Space",
+  modSpaceDescription: null,
+  mountPath: "/mods/shared-mod",
+} satisfies SpaceModListItem;
+
+const promptWithMod = await buildCohubSystemPrompt({
+  cwd: workspace,
+  userId,
+  selectedTools: ["read"],
+  spaceMods: [spaceMod],
 });
-
-const firstRegistry = new CohubModelRegistry({ configs: [createModelsConfig("first", "first-model")] });
-const secondRegistry = new CohubModelRegistry({ configs: [createModelsConfig("second", "second-model")] });
-const sessionRoot = await mkdtemp(join(tmpdir(), "cohub-system-prompt-runtime-"));
-try {
-  const sessionManager = SessionManager.create(workspace, join(sessionRoot, "sessions"));
-  sessionManager.newSession({ id: "runtime-identity-test" });
-  const { session } = await createCohubAgentSession({
-    cwd: workspace,
-    userId,
-    spaceOwnerUserId: userId,
-    modelRegistry: firstRegistry,
-    sessionManager,
-    tools: [] as AgentTool[],
-  });
-
-  await session.configureTools([{ name: "read" } as AgentTool]);
-  assert.ok(session.agent.state.systemPrompt.includes("Always prefer concise answers."), "initial prompt should use first user context");
-  assert.ok(session.agent.state.systemPrompt.includes("owner-skill"), "owner prompt should include owner user skills");
-  assert.equal(session.agent.state.model.provider, "first");
-
-  await session.configureRuntimeIdentity({ userId: secondUserId, modelRegistry: secondRegistry });
-
-  assert.ok(session.agent.state.systemPrompt.includes("Prefer implementation details."), "runtime prompt should use actor user context");
-  assert.ok(!session.agent.state.systemPrompt.includes("Always prefer concise answers."), "runtime prompt should drop previous user context");
-  assert.ok(!session.agent.state.systemPrompt.includes("actor-skill"), "non-owner actor prompt should skip user skills");
-  assert.ok(!session.agent.state.systemPrompt.includes("/configs/user/.agents/skills"), "non-owner actor prompt should not expose user skill paths");
-  assert.equal(session.modelRegistry, secondRegistry);
-  assert.equal(session.agent.state.model.provider, "second");
-
-  await session.configureRuntimeIdentity({ userId: secondUserId, spaceOwnerUserId: secondUserId, modelRegistry: secondRegistry });
-  assert.ok(session.agent.state.systemPrompt.includes("actor-skill"), "new owner actor prompt should include user skills after owner refresh");
-
-  await assert.rejects(
-    session.configureRuntimeIdentity({
-      userId: secondUserId,
-      spaceOwnerUserId: secondUserId,
-      modelRegistry: secondRegistry,
-      requestedModel: { provider: "missing", id: "missing-model" },
-    }),
-    /Requested model is not available: missing\/missing-model/,
-  );
-  assert.equal(session.modelRegistry, secondRegistry, "failed identity switch should keep previous registry");
-  assert.equal(session.agent.state.model.provider, "second", "failed identity switch should keep previous model");
-  assert.ok(session.agent.state.systemPrompt.includes("actor-skill"), "failed identity switch should keep previous prompt");
-} finally {
-  await rm(sessionRoot, { recursive: true, force: true });
-}
+assert.ok(promptWithMod.includes("Latest checkpoint skill description"), "should load Mod skills from the latest checkpoint");
+assert.ok(promptWithMod.includes("Latest checkpoint Mod context."), "should load Mod context from the latest checkpoint");
+assert.ok(promptWithMod.includes("Latest checkpoint append prompt."), "should load Mod append prompts from the latest checkpoint");
+assert.ok(promptWithMod.includes("<location>/mods/shared-mod/.agents/skills/shared-mod-skill/SKILL.md</location>"), "should expose the mounted checkpoint skill path");
+assert.ok(!promptWithMod.includes("Live workspace skill description"), "should not load Mod skills from the live workspace");
+assert.ok(!promptWithMod.includes("live-only-skill"), "should not expose live-only Mod skills");
+assert.ok(!promptWithMod.includes("Live workspace Mod context."), "should not load Mod context from the live workspace");
+assert.ok(!promptWithMod.includes("Live workspace append prompt."), "should not load Mod append prompts from the live workspace");

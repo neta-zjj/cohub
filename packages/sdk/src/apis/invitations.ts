@@ -1,6 +1,6 @@
 import type { HttpTransport } from "../transport.js";
 import type {
-  SpaceInvitation,
+  SpaceInvitationListResponse,
   CreateInvitationInput,
   CreateInvitationResponse,
   InvitationDetail,
@@ -14,7 +14,7 @@ export class SpaceInvitationsApi {
   ) {}
 
   list() {
-    return this.transport.request<{ items: SpaceInvitation[] }>(
+    return this.transport.request<SpaceInvitationListResponse>(
       `/api/spaces/${this.spaceId}/invitations`,
     );
   }
@@ -32,7 +32,7 @@ export class SpaceInvitationsApi {
 
   revoke(token: string) {
     return this.transport.request<{ ok: true }>(
-      `/api/spaces/${this.spaceId}/invitations/${token}`,
+      `/api/spaces/${this.spaceId}/invitations/${encodeURIComponent(token)}`,
       { method: "DELETE" },
     );
   }
@@ -44,16 +44,46 @@ export class PublicInviteApi {
 
   get(token: string) {
     return this.transport.request<InvitationDetail>(
-      `/api/invite/${token}`,
+      `/api/invite/${encodeURIComponent(token)}`,
     );
   }
 
   accept(token: string) {
     return this.transport.request<AcceptInvitationResponse>(
-      `/api/invite/${token}/accept`,
+      `/api/invite/${encodeURIComponent(token)}/accept`,
       {
         method: "POST",
       },
     );
   }
+}
+
+export type BuildSpacePathInput = {
+  spaceId: string;
+  ownerUsername?: string | null;
+  spaceSlug?: string | null;
+};
+
+export type BuildSpaceInvitePathInput = BuildSpacePathInput & {
+  inviteCode: string;
+};
+
+function requiredPathSegment(value: string, label: string): string {
+  const segment = typeof value === "string" ? value.trim() : "";
+  if (!segment) throw new TypeError(`${label} is required`);
+  return encodeURIComponent(segment);
+}
+
+export function buildSpacePath(input: BuildSpacePathInput): string {
+  const username = input.ownerUsername?.trim();
+  const slug = input.spaceSlug?.trim();
+  if (username && slug) {
+    return `/${encodeURIComponent(username)}/${encodeURIComponent(slug)}`;
+  }
+  return `/spaces/${requiredPathSegment(input.spaceId, "spaceId")}`;
+}
+
+export function buildSpaceInvitePath(input: BuildSpaceInvitePathInput): string {
+  const inviteCode = requiredPathSegment(input.inviteCode, "inviteCode");
+  return `${buildSpacePath(input)}/join/${inviteCode}`;
 }

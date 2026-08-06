@@ -10,12 +10,14 @@ import {
 import { Check, Copy, ExternalLink, Loader2, Rocket } from "lucide-svelte";
 import Dialog from "$lib/components/Dialog.svelte";
 import { WORK_VIEWER_SCOPE_OPTIONS } from "$lib/features/space/modules/work-utils";
+import { dispatchWorksChanged } from "$lib/features/work/work-realtime";
 import { sdk } from "$lib/sdk";
 import {
 	normalizePublicSlugInput,
 	normalizeUsernameInput,
-	validatePublicSlugInput,
+	validateSpaceSlugInput,
 	validateUsernameInput,
+	validateWorkSlugInput,
 } from "$lib/slug-rules";
 import { authStore } from "$lib/stores/auth.svelte";
 
@@ -67,6 +69,8 @@ const allowedViewerScopes = $state<Record<string, boolean>>({
 	"user.space.list": false,
 	"user.session.list": false,
 	"user.usage.read": false,
+	"neta.character.read": false,
+	"neta.character.favorite": false,
 });
 const missingUsername = $derived(!ownerUsername?.trim());
 const missingSpaceSlug = $derived(!spaceSlug?.trim());
@@ -74,13 +78,13 @@ const usernameValidation = $derived(
 	validateUsernameInput(usernameDraft, { required: missingUsername }),
 );
 const spaceSlugValidation = $derived(
-	validatePublicSlugInput(spaceSlugDraft, {
+	validateSpaceSlugInput(spaceSlugDraft, {
 		required: missingSpaceSlug,
 		label: "Space slug",
 	}),
 );
 const workSlugValidation = $derived(
-	validatePublicSlugInput(slug, { required: true, label: "Work slug" }),
+	validateWorkSlugInput(slug, { required: true, label: "Work slug" }),
 );
 const currentUsername = $derived(
 	ownerUsername?.trim() || usernameValidation.value || "",
@@ -188,7 +192,7 @@ async function ensurePublicAddress() {
 		usernameDraft = nextUsername;
 	}
 	if (missingSpaceSlug) {
-		const { value: nextSpaceSlug, error } = validatePublicSlugInput(
+		const { value: nextSpaceSlug, error } = validateSpaceSlugInput(
 			spaceSlugDraft,
 			{ required: true, label: "Space slug" },
 		);
@@ -235,9 +239,7 @@ async function publish() {
 			});
 			published = (await sdk.works.publishVersion(work.id)).work;
 		}
-		window.dispatchEvent(
-			new CustomEvent("cohub:works-changed", { detail: { spaceId } }),
-		);
+		if (published) dispatchWorksChanged({ spaceId, work: published });
 	} catch (err) {
 		error = err instanceof Error ? err.message : "Publish failed.";
 	} finally {

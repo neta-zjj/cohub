@@ -1,3 +1,4 @@
+import { BOARD_MIME_TYPE, isBoardPath } from "@cohub/protocol";
 import type { SpaceFsFileResponse } from "@neta-art/cohub";
 
 /** Strip parameters (`text/plain; charset=utf-8` → `text/plain`) and lowercase. */
@@ -77,7 +78,12 @@ export function coerceInlineTextFile(
 	}
 	if (file.delivery === "url") return file;
 	if (file.encoding !== "base64" || !file.content) return file;
-	if (!isDotfilePath(file.path) && !isDotfilePath(file.name)) return file;
+	const recoverable =
+		isDotfilePath(file.path) ||
+		isDotfilePath(file.name) ||
+		isBoardPath(file.path) ||
+		isBoardPath(file.name);
+	if (!recoverable) return file;
 
 	try {
 		const binary = atob(file.content);
@@ -87,11 +93,15 @@ export function coerceInlineTextFile(
 		}
 		if (!looksLikeUtf8Text(bytes)) return file;
 		const content = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+		const defaultMime =
+			isBoardPath(file.path) || isBoardPath(file.name)
+				? BOARD_MIME_TYPE
+				: "text/plain";
 		return {
 			...file,
 			kind: "text",
 			encoding: "utf-8",
-			mimeType: file.mimeType ?? "text/plain",
+			mimeType: file.mimeType ?? defaultMime,
 			content,
 		};
 	} catch {

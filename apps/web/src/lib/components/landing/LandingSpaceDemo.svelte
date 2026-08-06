@@ -1,16 +1,14 @@
 <script lang="ts">
-import { Bookmark, Clock, LayoutGrid, MessageSquare } from "lucide-svelte";
 import { onMount } from "svelte";
 
 /**
- * Hero "living Space" visual — a self-playing product micro-demo built
- * entirely from CSS/SVG. No images, no video, no data. A teammate drops a
- * request, you hand it to the agent, and the agent streams a reply while a
- * generated music tile plays — showing people and agents co-creating in one
- * Space across more than one medium.
+ * Hero "living Space" visual — CSS/SVG micro-demo, no network.
+ * Realistic use: teammate asks → you prompt in plain language → agent
+ * edits a file → port preview updates. Floating chips hint checkpoint
+ * save and CLI local↔Space connection (not the main choreography).
  *
- * The conversation is keyed on `cycle`; bumping it remounts the sequence so
- * the choreography loops. Looping is skipped under reduced-motion.
+ * Icons are inline SVG (not lucide) so Tailwind's scanner cannot mis-parse
+ * a multi-name import as a CSS declaration during HMR.
  */
 let cycle = $state(0);
 
@@ -29,12 +27,11 @@ onMount(() => {
 </script>
 
 <div class="relative">
-	<!-- Floating status chips -->
 	<div class="chip chip-save">
 		<span class="cdot" style="background:var(--brand)"></span> checkpoint saved
 	</div>
-	<div class="chip chip-fork">
-		<span class="cdot" style="background:var(--provider-feishu)"></span> forked → new space
+	<div class="chip chip-cli">
+		<span class="cdot" style="background:var(--provider-feishu)"></span> CLI · local ↔ space
 	</div>
 
 	<div class="stage" aria-hidden="true">
@@ -42,56 +39,65 @@ onMount(() => {
 			<span class="tl"></span>
 			<span class="tl"></span>
 			<span class="tl tl-g"></span>
-			<span class="ml-1.5 font-mono text-[12px] text-text-tertiary">game-jam · 3 online</span>
+			<span class="ml-1.5 font-mono text-[12px] text-text-tertiary">sketch-lab · 3 online</span>
 			<span class="ml-auto inline-flex items-center gap-1.5 text-[11px] text-brand">
 				<span class="live-dot h-1.5 w-1.5 rounded-full bg-brand"></span> live
 			</span>
 		</div>
 
 		<div class="grid grid-cols-[44px_1fr] gap-3">
-			<!-- rail -->
 			<div class="flex flex-col gap-2 pt-0.5">
-				<i class="rail-i rail-on" title="Chats"><MessageSquare /></i>
-				<i class="rail-i" title="Saves"><Bookmark /></i>
-				<i class="rail-i" title="Works"><LayoutGrid /></i>
-				<i class="rail-i" title="Scheduled"><Clock /></i>
+				<i class="rail-i rail-on" title="Chats">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+				</i>
+				<i class="rail-i" title="Saves">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" /></svg>
+				</i>
+				<i class="rail-i" title="Works">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="7" x="3" y="3" rx="1" /><rect width="7" height="7" x="14" y="3" rx="1" /><rect width="7" height="7" x="14" y="14" rx="1" /><rect width="7" height="7" x="3" y="14" rx="1" /></svg>
+				</i>
+				<i class="rail-i" title="Scheduled">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
+				</i>
 			</div>
 
-			<!-- conversation -->
 			{#key cycle}
 				<div class="convo">
 					<div class="msg msg-mia">
 						<span class="av av-mia">M</span>
-						<span class="bubble bubble-peer">the boss needs a theme song</span>
+						<span class="bubble bubble-peer">can we darken the start screen?</span>
 					</div>
 
 					<div class="msg msg-u1">
 						<span class="av av-user">You</span>
-						<span class="bubble bubble-user"><span class="typed">@agent make one, ~30s loop</span></span>
+						<span class="bubble bubble-user"
+							><span class="typed">make the start screen dark mode</span></span
+						>
 					</div>
 
 					<div class="msg msg-a1">
 						<span class="av av-agent">C</span>
-						<span class="think">thinking <b></b><b></b><b></b></span>
+						<span class="think">editing files <b></b><b></b><b></b></span>
 					</div>
 
 					<div class="msg msg-a2">
 						<span class="av av-agent invisible">C</span>
 						<span class="bubble w-full text-text-secondary">
+							<span class="tool">✎ edit index.html</span>
 							<span class="stream-line w95"></span>
 							<span class="stream-line w60"></span>
-							<div class="gen">
-								<span class="gen-badge">music · 0:30 loop</span>
-								<div class="wave">
-									<b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b>
+							<div class="preview">
+								<span class="preview-badge">port · preview</span>
+								<div class="preview-ui">
+									<span class="preview-title"></span>
+									<span class="preview-btn"></span>
 								</div>
-								<span class="gen-shimmer"></span>
 							</div>
 						</span>
 					</div>
 
 					<div class="tray">
-						<span class="spin"></span> generating music
+						<span class="spin"></span>
 						<span class="tray-running">running 1</span>
 						<span class="tray-done">✓ done</span>
 					</div>
@@ -109,7 +115,11 @@ onMount(() => {
 		border: 1px solid var(--border-subtle);
 		padding: 18px;
 		background:
-			radial-gradient(120% 100% at 30% 0%, color-mix(in srgb, var(--brand) 7%, transparent), transparent 55%),
+			radial-gradient(
+				120% 100% at 30% 0%,
+				color-mix(in srgb, var(--brand) 7%, transparent),
+				transparent 55%
+			),
 			linear-gradient(180deg, var(--bg-content), var(--bg-surface));
 		box-shadow:
 			0 40px 90px -50px rgba(0, 0, 0, 0.9),
@@ -120,7 +130,11 @@ onMount(() => {
 		position: absolute;
 		inset: 0;
 		pointer-events: none;
-		background: radial-gradient(circle at 50% 120%, color-mix(in srgb, var(--brand) 10%, transparent), transparent 60%);
+		background: radial-gradient(
+			circle at 50% 120%,
+			color-mix(in srgb, var(--brand) 10%, transparent),
+			transparent 60%
+		);
 	}
 
 	.tl {
@@ -148,7 +162,7 @@ onMount(() => {
 		border-color: var(--brand-border);
 		background: var(--brand-muted);
 	}
-	.rail-i :global(svg) {
+	.rail-i svg {
 		width: 18px;
 		height: 18px;
 	}
@@ -196,7 +210,7 @@ onMount(() => {
 		border-radius: 12px;
 		padding: 9px 12px;
 		font-size: 13px;
-		max-width: 88%;
+		max-width: min(92%, 22rem);
 	}
 	.bubble-user {
 		background: color-mix(in srgb, var(--brand) 8%, transparent);
@@ -208,10 +222,13 @@ onMount(() => {
 		color: var(--text-secondary);
 	}
 
+	/* Typewriter: animate max-width, not width — width:Nch leaves trailing empty box
+	   because ch ≠ proportional glyph width. max-width: large → used width = content. */
 	.typed {
 		display: inline-block;
 		overflow: hidden;
 		white-space: nowrap;
+		vertical-align: bottom;
 		border-right: 2px solid var(--brand);
 	}
 
@@ -236,6 +253,17 @@ onMount(() => {
 		animation-delay: 0.4s;
 	}
 
+	.tool {
+		display: inline-flex;
+		margin-bottom: 6px;
+		border-radius: 8px;
+		border: 1px dashed var(--brand-border);
+		background: var(--brand-muted);
+		padding: 4px 8px;
+		font-size: 11px;
+		color: var(--text-tertiary);
+	}
+
 	.stream-line {
 		display: block;
 		height: 8px;
@@ -251,11 +279,9 @@ onMount(() => {
 		max-width: 60%;
 	}
 
-	.gen {
+	.preview {
 		position: relative;
-		margin-top: 2px;
-		display: grid;
-		place-items: center;
+		margin-top: 4px;
 		overflow: hidden;
 		border-radius: 12px;
 		border: 1px solid var(--brand-border);
@@ -263,12 +289,16 @@ onMount(() => {
 		opacity: 0;
 		transform: translateY(8px) scale(0.98);
 		background:
-			radial-gradient(80% 120% at 30% 10%, color-mix(in srgb, var(--brand) 22%, transparent), transparent 60%),
-			linear-gradient(135deg, var(--brand-bg), var(--bg-surface));
+			radial-gradient(
+				80% 120% at 30% 10%,
+				color-mix(in srgb, var(--brand) 12%, transparent),
+				transparent 60%
+			),
+			linear-gradient(160deg, oklch(22% 0.02 250), var(--bg-surface));
 		animation: gen-in 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
 		animation-delay: 5s;
 	}
-	.gen-badge {
+	.preview-badge {
 		position: absolute;
 		left: 10px;
 		top: 9px;
@@ -281,58 +311,27 @@ onMount(() => {
 		background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
 		backdrop-filter: blur(4px);
 	}
-	/* music waveform */
-	.wave {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 3px;
-		height: 46px;
-		padding-inline: 12px;
-	}
-	.wave b {
-		width: 3px;
-		height: 20%;
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--brand) 85%, white 5%);
-		transform-origin: center;
-		animation: eq 1.1s ease-in-out infinite;
-		animation-delay: 5.2s;
-	}
-	.wave b:nth-child(3n) {
-		animation-duration: 0.9s;
-	}
-	.wave b:nth-child(4n) {
-		animation-duration: 1.3s;
-	}
-	.wave b:nth-child(2n) {
-		background: color-mix(in srgb, var(--brand) 55%, var(--bg-elevated));
-	}
-	.wave b:nth-child(1) { animation-delay: 5.2s; }
-	.wave b:nth-child(2) { animation-delay: 5.28s; }
-	.wave b:nth-child(3) { animation-delay: 5.36s; }
-	.wave b:nth-child(4) { animation-delay: 5.44s; }
-	.wave b:nth-child(5) { animation-delay: 5.52s; }
-	.wave b:nth-child(6) { animation-delay: 5.6s; }
-	.wave b:nth-child(7) { animation-delay: 5.68s; }
-	.wave b:nth-child(8) { animation-delay: 5.76s; }
-	.wave b:nth-child(9) { animation-delay: 5.84s; }
-	.wave b:nth-child(10) { animation-delay: 5.92s; }
-	.wave b:nth-child(11) { animation-delay: 6s; }
-	.wave b:nth-child(12) { animation-delay: 6.08s; }
-	.wave b:nth-child(13) { animation-delay: 6.16s; }
-	.wave b:nth-child(14) { animation-delay: 6.24s; }
-	.wave b:nth-child(15) { animation-delay: 6.32s; }
-	.wave b:nth-child(16) { animation-delay: 6.4s; }
-	.wave b:nth-child(17) { animation-delay: 6.48s; }
-	.wave b:nth-child(18) { animation-delay: 6.56s; }
-	.gen-shimmer {
+	.preview-ui {
 		position: absolute;
 		inset: 0;
-		transform: translateX(-100%);
-		background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, white 10%, transparent) 48%, transparent 66%);
-		animation: shimmer 2.6s ease-in-out infinite;
-		animation-delay: 5.5s;
+		display: grid;
+		place-content: center;
+		gap: 10px;
+		justify-items: center;
+	}
+	.preview-title {
+		width: 42%;
+		height: 10px;
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--text-secondary) 35%, transparent);
+	}
+	.preview-btn {
+		width: 72px;
+		height: 24px;
+		border-radius: 8px;
+		background: var(--brand);
+		animation: press 3s ease-in-out infinite;
+		animation-delay: 5.4s;
 	}
 
 	.tray {
@@ -371,7 +370,6 @@ onMount(() => {
 		animation-delay: 5.7s;
 	}
 
-	/* choreography */
 	.msg-mia {
 		opacity: 0;
 		animation: appear 0.4s ease forwards;
@@ -383,10 +381,10 @@ onMount(() => {
 		animation-delay: 1.2s;
 	}
 	.msg-u1 .typed {
-		width: 0;
+		max-width: 0;
 		animation:
-			type 1.5s steps(26) forwards,
-			caret 0.7s step-end 6;
+			type 1.5s steps(31) forwards,
+			caret 0.7s step-end 5;
 		animation-delay: 1.4s, 1.4s;
 	}
 	.msg-a1 {
@@ -402,20 +400,19 @@ onMount(() => {
 	.msg-a2 .stream-line {
 		animation: grow 0.5s ease forwards;
 	}
-	.msg-a2 .stream-line:nth-child(1) {
-		width: 0;
-		animation-delay: 4.3s;
-	}
 	.msg-a2 .stream-line:nth-child(2) {
 		width: 0;
-		animation-delay: 4.55s;
+		animation-delay: 4.4s;
+	}
+	.msg-a2 .stream-line:nth-child(3) {
+		width: 0;
+		animation-delay: 4.65s;
 	}
 
 	.live-dot {
 		animation: pulse 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 	}
 
-	/* floating chips */
 	.chip {
 		position: absolute;
 		z-index: 3;
@@ -428,6 +425,8 @@ onMount(() => {
 		padding: 6px 10px;
 		font-family: var(--font-mono);
 		font-size: 11px;
+		line-height: 1.2;
+		white-space: nowrap;
 		color: var(--text-secondary);
 		box-shadow: 0 12px 30px -14px rgba(0, 0, 0, 0.8);
 		backdrop-filter: blur(6px);
@@ -443,7 +442,7 @@ onMount(() => {
 		right: -10px;
 		animation-delay: 0.2s;
 	}
-	.chip-fork {
+	.chip-cli {
 		bottom: 16%;
 		left: -14px;
 		animation-delay: 1.4s;
@@ -456,7 +455,8 @@ onMount(() => {
 
 	@keyframes type {
 		to {
-			width: 16.5em;
+			/* Ceiling only; inline-block then sizes to the text (no trailing gap). */
+			max-width: 20rem;
 		}
 	}
 	@keyframes caret {
@@ -482,24 +482,6 @@ onMount(() => {
 		to {
 			opacity: 1;
 			transform: none;
-		}
-	}
-	@keyframes shimmer {
-		0% {
-			transform: translateX(-100%);
-		}
-		60%,
-		100% {
-			transform: translateX(100%);
-		}
-	}
-	@keyframes eq {
-		0%,
-		100% {
-			height: 22%;
-		}
-		50% {
-			height: 90%;
 		}
 	}
 	@keyframes blink {
@@ -541,6 +523,16 @@ onMount(() => {
 			transform: translateY(-8px);
 		}
 	}
+	@keyframes press {
+		0%,
+		100% {
+			transform: none;
+		}
+		50% {
+			transform: scale(0.94);
+			filter: brightness(1.15);
+		}
+	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.stage :global(*),
@@ -554,7 +546,7 @@ onMount(() => {
 		.msg-a2,
 		.tray,
 		.tray-done,
-		.gen {
+		.preview {
 			opacity: 1 !important;
 			transform: none !important;
 		}
@@ -562,8 +554,10 @@ onMount(() => {
 			display: none;
 		}
 		.typed {
-			width: 16.5em;
+			width: 31ch;
+			max-width: 100%;
 			border-right-color: transparent;
+			white-space: nowrap;
 		}
 		.stream-line {
 			opacity: 1;
@@ -573,9 +567,6 @@ onMount(() => {
 		}
 		.stream-line.w60 {
 			width: 60%;
-		}
-		.wave b {
-			height: 55%;
 		}
 	}
 </style>

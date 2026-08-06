@@ -9,9 +9,9 @@ import { checkpoints, spaces } from "@cohub/db";
 import { checkpointForkReference, spaceForkReference } from "@cohub/core/references";
 import { enqueueReferences } from "../reference-index-queue.js";
 import { assertDirectoryEmpty, ensureSpaceWorkspaceReady, getSpaceWorkspaceDir, runGit } from "../git.js";
-import { publishSpaceFsChanged } from "../space-events.js";
+import { publishSpaceEvent, publishSpaceFsChanged } from "../space-events.js";
 import { enqueueTask } from "./enqueue.js";
-import { restoreCanvasCheckpointSnapshots } from "../checkpoint/canvas.js";
+import { restoreBoardCheckpointSnapshots } from "../checkpoint/board.js";
 import { restoreWorkspaceFromCheckpoint, restoreSystemRepoFromCheckpoint } from "../checkpoint/restore.js";
 import { ensureCheckpointDirs, getCheckpointLatestSubPath } from "../checkpoint/paths.js";
 import { materializeLatest } from "../checkpoint/materialize.js";
@@ -269,15 +269,24 @@ const createSpaceHandler = async (job: Job) => {
       const { result: aliasResult, duration: aliasDuration } = await timeIt("createCheckpointAlias", () => createCheckpointAlias({ targetSpace: currentSpace, sourceCheckpoint: restoreResult.checkpoint }));
       stageTimings.createCheckpointAlias = aliasDuration;
       currentSpace = aliasResult.space;
-      await progress("restore_canvas_snapshots");
-      const { result: canvasRestoreResult, duration: canvasRestoreDuration } = await timeIt("restoreCanvasCheckpointSnapshots", () => restoreCanvasCheckpointSnapshots({ checkpointId: source.checkpointId, targetSpaceId: currentSpace.id, workspaceDir }));
-      stageTimings.restoreCanvasCheckpointSnapshots = canvasRestoreDuration;
+      await progress("restore_board_snapshots");
+      const { result: boardRestoreResult, duration: boardRestoreDuration } = await timeIt("restoreBoardCheckpointSnapshots", () => restoreBoardCheckpointSnapshots({ checkpointId: source.checkpointId, targetSpaceId: currentSpace.id, workspaceDir }));
+      stageTimings.restoreBoardCheckpointSnapshots = boardRestoreDuration;
       await progress("bootstrap_ready", { checkpointAliasId: aliasResult.alias.id });
       currentSpace = await updateBootstrap({ space: currentSpace, taskRunId, source, status: "ready", stage: "finalize", finishedAt: new Date().toISOString(), stageTimings });
       await publishSpaceFsChanged(currentSpace.id, { source: "bootstrap", resync: true, changes: [] }).catch((error) => logger.warn(`[CreateSpace] Failed to publish bootstrap fs resync for ${currentSpace.id}: ${error instanceof Error ? error.message : String(error)}`));
+      await publishSpaceEvent({
+        type: "space.workspace.ready",
+        spaceId: currentSpace.id,
+        payload: {
+          source,
+          stage: "finalize",
+          checkpointAliasId: aliasResult.alias.id,
+        },
+      }).catch((error) => logger.warn(`[CreateSpace] Failed to publish workspace ready for ${currentSpace.id}: ${error instanceof Error ? error.message : String(error)}`));
       await progress("post_materialization");
       const postStages = await postCheckpointRestore({ targetSpace: currentSpace, sourceCheckpoint: restoreResult.checkpoint, sourceSpaceId: restoreResult.sourceSpace.id });
-      result = { ok: true, spaceId: currentSpace.id, checkpointAliasId: aliasResult.alias.id, commitHash: restoreResult.checkpoint.commitHash, source, stages: { workspaceRestore: { status: "ready", durationMs: restoreDuration }, checkpointAlias: { status: "ready", durationMs: aliasDuration }, canvasRestore: { status: "ready", durationMs: canvasRestoreDuration, count: canvasRestoreResult.count }, ...postStages } };
+      result = { ok: true, spaceId: currentSpace.id, checkpointAliasId: aliasResult.alias.id, commitHash: restoreResult.checkpoint.commitHash, source, stages: { workspaceRestore: { status: "ready", durationMs: restoreDuration }, checkpointAlias: { status: "ready", durationMs: aliasDuration }, boardRestore: { status: "ready", durationMs: boardRestoreDuration, count: boardRestoreResult.count }, ...postStages } };
     } else {
       if (source.type === "git_repo") {
         currentSpace = await updateBootstrap({ space: currentSpace, taskRunId, source, status: "running", stage: "import", stageTimings });
@@ -294,6 +303,15 @@ const createSpaceHandler = async (job: Job) => {
       await progress("bootstrap_ready", { initialCheckpointTaskRunId });
       currentSpace = await updateBootstrap({ space: currentSpace, taskRunId, source, status: "ready", stage: "finalize", finishedAt: new Date().toISOString(), stageTimings, initialCheckpointTaskRunId });
       await publishSpaceFsChanged(currentSpace.id, { source: "bootstrap", resync: true, changes: [] }).catch((error) => logger.warn(`[CreateSpace] Failed to publish bootstrap fs resync for ${currentSpace.id}: ${error instanceof Error ? error.message : String(error)}`));
+      await publishSpaceEvent({
+        type: "space.workspace.ready",
+        spaceId: currentSpace.id,
+        payload: {
+          source,
+          stage: "finalize",
+          initialCheckpointTaskRunId,
+        },
+      }).catch((error) => logger.warn(`[CreateSpace] Failed to publish workspace ready for ${currentSpace.id}: ${error instanceof Error ? error.message : String(error)}`));
       result = { ok: true, spaceId: currentSpace.id, source, initialCheckpointTaskRunId };
     }
 

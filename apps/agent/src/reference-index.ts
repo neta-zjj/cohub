@@ -7,8 +7,8 @@ import { enqueueReferences } from "./reference-index-queue.js";
 type MessageRow = typeof sessionMessages.$inferSelect;
 
 /**
- * Index the references carried by a finalized turn (participant, @mentions,
- * cross-resource tool calls) into resource_references.
+ * Index the references carried by a finalized turn (@mentions, cross-resource
+ * tool calls, agent file access) into resource_references.
  *
  * Takes the turn's messages that the caller has already loaded — a turn's
  * message set can be large, so we never re-query it here. Tool calls are
@@ -23,11 +23,10 @@ export const indexTurnReferences = (input: {
   spaceId: string;
   sessionId: string;
   turnId: string;
-  userUuid: string | null;
   /** All messages of the turn, already loaded by the caller. */
   messages: readonly MessageRow[];
 }): void => {
-  const { spaceId, sessionId, turnId, userUuid, messages } = input;
+  const { spaceId, sessionId, turnId, messages } = input;
 
   const userContent: ContentBlock[] = [];
   const assistantContent: ContentBlock[] = [];
@@ -42,7 +41,6 @@ export const indexTurnReferences = (input: {
     spaceId,
     sessionId,
     turnId,
-    userUuid,
     userContent,
     assistantContent,
   });

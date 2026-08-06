@@ -5,6 +5,8 @@ import type { SessionTurnIntent } from "@cohub/protocol/model";
 import { normalizeContentBlocks } from "../content/normalize.js";
 import type { PromptEnv } from "./prompt-env.js";
 
+const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
 export type PromptSource =
   | "web_app"
   | "public_api"
@@ -77,6 +79,17 @@ export type BackgroundBashTaskPromptContext = {
   } | null;
 };
 
+export type SpaceHookPromptContext = {
+  kind: "space_hook";
+  taskRunId: string;
+  hookPath: string;
+  eventId: string;
+  eventType: string;
+  eventActorUserId?: string | null;
+  /** Shared curated hook env (COHUB_HOOK_*), also used for tool injection. */
+  env?: Record<string, string> | null;
+};
+
 export type ChannelPromptContext = {
   kind: "channel";
   provider: string;
@@ -93,6 +106,7 @@ export type SubmitSessionPromptContext =
   | PublicApiPromptContext
   | ScheduledTaskPromptContext
   | BackgroundBashTaskPromptContext
+  | SpaceHookPromptContext
   | ChannelPromptContext;
 
 export type PromptTemplateUsageMeta = {
@@ -126,6 +140,8 @@ export type SubmitSessionPromptInput = {
   source: PromptSource;
   model?: string | null;
   provider?: string | null;
+  /** Optional thinking level override for this turn. Omit to inherit session default. */
+  thinkingLevel?: string | null;
   generationPolicy?: GenerationPolicy | null;
   accessMode?: PromptAccessMode | null;
   env?: PromptEnv | null;
@@ -145,6 +161,10 @@ export type SubmitSessionPromptHooks = {
     content: ContentBlock[];
     meta: Record<string, unknown>;
   }) => Promise<void>;
+};
+
+export type SubmitSessionPromptOptions = {
+  prevalidatedModel?: { provider: string; model: string };
 };
 
 export type ExpandedPromptTemplate = {
@@ -214,6 +234,7 @@ export type SessionPromptDependencies = {
     turnId: string;
     errorMessage: string;
   }): Promise<unknown>;
+  validatePromptModel?(input: { userId: string; provider: string; model: string }): Promise<boolean>;
   billingUsageGate?: BillingUsageGate;
 };
 
@@ -224,6 +245,15 @@ export class SubmitSessionPromptError extends Error {
   ) {
     super(message);
     this.name = "SubmitSessionPromptError";
+  }
+}
+
+export class ModelUnavailableError extends Error {
+  override name = "ModelUnavailableError";
+  readonly code = "model_unavailable";
+
+  constructor(public readonly provider: string, public readonly model: string) {
+    super(`Requested model is not available: ${provider}/${model}`);
   }
 }
 
@@ -313,12 +343,30 @@ export const submitSessionPrompt = async (
   deps: SessionPromptDependencies,
   input: SubmitSessionPromptInput,
   hooks: SubmitSessionPromptHooks = {},
+  options: SubmitSessionPromptOptions = {},
 ): Promise<SubmitSessionPromptResult> => {
   const userId = input.userId.trim();
   if (!userId) throw new Error("userId is required");
   const clientMessageId = input.clientMessageId.trim();
   if (!clientMessageId) throw new Error("clientMessageId is required");
   if (!Array.isArray(input.content) || input.content.length === 0) throw new Error("content is required");
+
+  const modelProvider = normalizePromptModelProvider(input);
+  const modelPrevalidated = Boolean(
+    modelProvider.model &&
+    modelProvider.provider &&
+    options.prevalidatedModel?.model === modelProvider.model &&
+    options.prevalidatedModel.provider === modelProvider.provider,
+  );
+  if (
+    modelProvider.model &&
+    modelProvider.provider &&
+    !modelPrevalidated &&
+    deps.validatePromptModel &&
+    !(await deps.validatePromptModel({ userId, provider: modelProvider.provider, model: modelProvider.model }))
+  ) {
+    throw new ModelUnavailableError(modelProvider.provider, modelProvider.model);
+  }
 
   if (deps.sandboxRecovery) {
     void Promise.resolve(deps.sandboxRecovery.maybeRecoverForPrompt({
@@ -347,7 +395,7 @@ export const submitSessionPrompt = async (
   const inputIntent = isDirectShellCommand ? "shell_command" : "prompt";
   const turnIntent: SessionTurnIntent = isDirectShellCommand ? "steer" : (input.intent ?? "followup");
   const userMessageId = deps.randomUUID();
-  const modelProvider = normalizePromptModelProvider(input);
+  const requestedThinkingLevel = typeof input.thinkingLevel === "string" && VALID_THINKING_LEVELS.has(input.thinkingLevel.trim()) ? input.thinkingLevel.trim() : undefined;
   const billingDecision: BillingAccessDecision | null = isDirectShellCommand
     ? null
     : (await deps.billingUsageGate?.evaluate({
@@ -372,6 +420,7 @@ export const submitSessionPrompt = async (
     llm: isDirectShellCommand ? false : undefined,
     model: modelProvider.model,
     provider: modelProvider.provider,
+    requestedThinkingLevel,
     promptTemplate,
     skillUsage,
     generationPolicy: input.generationPolicy ?? null,

@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
-import { ApiError, isBillingApiError } from "../lib/billing-api-error.js";
+import { isBillingApiError } from "../lib/billing-api-error.js";
+import { mapWithConcurrency } from "../lib/concurrency.js";
 import { authzDenied, getOptionalAuth, requireValidId, useAuth } from "../lib/middleware.js";
 import { handleWorkCommerceRouteError } from "../lib/commerce-http.js";
 import { hasPermission } from "../permissions.js";
@@ -8,8 +10,8 @@ import {
   createSpaceCommerceSdk,
   createSpaceBusinessBillingOperations,
   getWorkCommerceContextById,
+  loadBoundBenefitKeys,
   loadBusinessCreditBenefits,
-  readBoundBenefitKeys,
   requireSpaceCommerceBusinessKey,
 } from "../lib/space-commerce.js";
 import { serializeProduct, serializeOrder } from "../lib/commerce-serialize.js";
@@ -17,8 +19,21 @@ import { db } from "../db/index.js";
 import { spaces, userProfiles } from "@cohub/db";
 import { eq } from "drizzle-orm";
 import { config } from "../config.js";
+import {
+  isCohubBalanceProductValid,
+  readCohubBalanceDescriptor,
+} from "../lib/space-commerce-balance.js";
+import {
+  createWorkPurchaseIdempotencyKey,
+  normalizePurchaseAttemptId,
+} from "../lib/work-commerce-purchase.js";
 
 const router = new Hono();
+
+/** Public resolve fan-out caps: bound upstream Billing load per request. */
+const RESOLVE_MAX_PRODUCT_KEYS = 20;
+const RESOLVE_MAX_PRODUCT_KEY_LENGTH = 128;
+const RESOLVE_BILLING_CONCURRENCY = 4;
 
 async function getPublishedWorkOrDeny(workId: string, userUuid?: string | null) {
   const work = await getWorkCommerceContextById(workId);
@@ -54,11 +69,17 @@ router.post("/works/:id/commerce/products/resolve", async (c) => {
     ? [...new Set(body.productKeys.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))]
     : [];
   if (requested.length === 0) return c.json({ message: "productKeys is required" }, 400);
+  if (requested.length > RESOLVE_MAX_PRODUCT_KEYS) {
+    return c.json({ message: `productKeys must contain at most ${RESOLVE_MAX_PRODUCT_KEYS} items` }, 400);
+  }
+  if (requested.some((key) => key.length > RESOLVE_MAX_PRODUCT_KEY_LENGTH)) {
+    return c.json({ message: `productKeys entries must be at most ${RESOLVE_MAX_PRODUCT_KEY_LENGTH} characters` }, 400);
+  }
   try {
     const businessKey = await requireSpaceCommerceBusinessKey(resolved.work.spaceId);
     const sdk = await createSpaceCommerceSdk();
     const [products, creditBenefitsMap] = await Promise.all([
-      Promise.all(requested.map(async (productKey) => {
+      mapWithConcurrency(requested, RESOLVE_BILLING_CONCURRENCY, async (productKey) => {
         try {
           const product = await sdk.admin.products.get({ business_key: businessKey, product_key: productKey });
           if (product.status !== "active" || product.visibility !== "public" || product.billing_type !== "one_time") return null;
@@ -67,19 +88,35 @@ router.post("/works/:id/commerce/products/resolve", async (c) => {
           if (isBillingApiError(error) && error.status === 404) return null;
           throw error;
         }
-      })),
-      await loadBusinessCreditBenefits({ sdk, businessKey }),
+      }),
+      loadBusinessCreditBenefits({ sdk, businessKey }),
     ]);
     const visibleProducts = products.filter(
       (item): item is NonNullable<typeof item> => Boolean(item),
     );
+    const boundKeysByProduct = await mapWithConcurrency(
+      visibleProducts,
+      RESOLVE_BILLING_CONCURRENCY,
+      (item) => loadBoundBenefitKeys({ sdk, businessKey, productKey: item.key }),
+    );
     const serializedProducts = [];
-    for (const item of visibleProducts) {
-      const boundKeys = await readBoundBenefitKeys(item);
+    for (const [index, item] of visibleProducts.entries()) {
+      const boundKeys = boundKeysByProduct[index] ?? [];
       const boundCredits = boundKeys
         .map((key) => creditBenefitsMap.get(key))
         .filter((b): b is NonNullable<typeof b> => Boolean(b));
-      serializedProducts.push(serializeProduct(item, boundCredits));
+      const balance = readCohubBalanceDescriptor(item);
+      if (balance && !isCohubBalanceProductValid({
+        productKey: item.key,
+        productAmountMinor: Number(item.amount ?? item.unit_amount ?? 0),
+        productCurrency: item.currency,
+        balance,
+        benefit: creditBenefitsMap.get(balance.benefitKey),
+        boundBenefitKeys: boundKeys,
+      })) {
+        continue;
+      }
+      serializedProducts.push(serializeProduct(item, boundCredits, balance));
     }
     return c.json({
       products: serializedProducts,
@@ -184,9 +221,21 @@ router.post("/works/:id/commerce/purchase", async (c) => {
   const resolved = await getPublishedWorkOrDeny(workId, user.uuid);
   if ("error" in resolved) return c.json({ message: resolved.error }, 404);
   if ((resolved.work.workVisibility ?? "public") === "space" && !(await hasPermission(user, "space.view", { spaceId: resolved.work.spaceId }))) return authzDenied(c);
-  const body = await c.req.json().catch(() => null) as { productKey?: unknown } | null;
+  const body = await c.req.json().catch(() => null) as {
+    productKey?: unknown;
+    purchaseAttemptId?: unknown;
+  } | null;
   const productKey = typeof body?.productKey === "string" ? body.productKey.trim() : "";
   if (!productKey) return c.json({ message: "productKey is required" }, 400);
+  const rawPurchaseAttemptId = body?.purchaseAttemptId ?? c.req.header("Idempotency-Key");
+  const purchaseAttemptId = rawPurchaseAttemptId === undefined
+    ? randomUUID()
+    : normalizePurchaseAttemptId(rawPurchaseAttemptId);
+  if (!purchaseAttemptId) {
+    return c.json({
+      message: "purchaseAttemptId must be 1-128 chars of [a-zA-Z0-9_-]",
+    }, 400);
+  }
   try {
     const businessKey = await requireSpaceCommerceBusinessKey(resolved.work.spaceId);
     const sdk = await createSpaceCommerceSdk();
@@ -194,27 +243,74 @@ router.post("/works/:id/commerce/purchase", async (c) => {
     if (product.status !== "active" || product.visibility !== "public" || product.billing_type !== "one_time") {
       return c.json({ message: "product is not available" }, 400);
     }
+    const amountMinor = Number(product.amount ?? product.unit_amount ?? 0);
+    const balance = readCohubBalanceDescriptor(product);
+    if (balance) {
+      let balanceBenefit = null;
+      try {
+        const benefit = await sdk.admin.benefits.get({
+          business_key: businessKey,
+          benefit_key: balance.benefitKey,
+        });
+        if (benefit.type === "credits") balanceBenefit = benefit;
+      } catch (error) {
+        if (!isBillingApiError(error) || error.status !== 404) throw error;
+      }
+      const boundBenefitKeys = await loadBoundBenefitKeys({
+        sdk,
+        businessKey,
+        productKey: product.key,
+      });
+      if (!isCohubBalanceProductValid({
+        productKey: product.key,
+        productAmountMinor: amountMinor,
+        productCurrency: product.currency,
+        balance,
+        benefit: balanceBenefit,
+        boundBenefitKeys,
+      })) {
+        return c.json({ message: "Cohub Balance configuration is invalid" }, 409);
+      }
+    }
     const workUrl = await resolvePublicWorkUrl({
       spaceId: resolved.work.spaceId,
       workSlug: resolved.work.workSlug,
     });
     if (!workUrl) return c.json({ message: "work public url is unavailable" }, 409);
     const provisionalRedirects = buildWorkCheckoutReturnUrls({ workUrl });
-    const result = await sdk.admin.orders.create({
-      business_key: businessKey,
-      external_user_id: user.uuid,
-      product_key: product.key,
-      billing_reason: "purchase",
-      success_redirect_url: provisionalRedirects.successRedirectUrl,
-      failed_redirect_url: provisionalRedirects.failedRedirectUrl,
-      cancel_redirect_url: provisionalRedirects.cancelRedirectUrl,
-      metadata: {
-        source: "cohub",
-        source_type: "work",
-        cohub_space_id: resolved.work.spaceId,
-        cohub_work_id: resolved.work.workId,
+    const result = await sdk.admin.orders.create(
+      {
+        business_key: businessKey,
+        external_user_id: user.uuid,
+        product_key: product.key,
+        billing_reason: "purchase",
+        success_redirect_url: provisionalRedirects.successRedirectUrl,
+        failed_redirect_url: provisionalRedirects.failedRedirectUrl,
+        cancel_redirect_url: provisionalRedirects.cancelRedirectUrl,
+        metadata: {
+          source: "cohub",
+          source_type: "work",
+          cohub_space_id: resolved.work.spaceId,
+          cohub_work_id: resolved.work.workId,
+          cohub_purchase_attempt_id: purchaseAttemptId,
+          cohub_purchase_idempotency_version: "work-purchase-v1",
+          ...(balance ? {
+            cohub_balance_amount_minor: balance.amountMinor,
+            cohub_balance_benefit_key: balance.benefitKey,
+            cohub_balance_policy_version: balance.policyVersion,
+            cohub_balance_owner_gross_amount_minor: amountMinor - balance.amountMinor,
+          } : {}),
+        },
       },
-    });
+      {
+        idempotencyKey: createWorkPurchaseIdempotencyKey({
+          workId: resolved.work.workId,
+          buyerUserUuid: user.uuid,
+          productKey: product.key,
+          purchaseAttemptId,
+        }),
+      },
+    );
     return c.json({ checkout: {
       providerKey: result.checkout?.provider_key ?? null,
       checkoutUrl: result.checkout?.checkout_url ?? null,

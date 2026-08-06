@@ -5,6 +5,10 @@ import { db } from "./db/index.js";
 import { userProfiles } from "@cohub/db";
 import { getLogtoUser, updateLogtoUserProfile } from "./logto-management.js";
 import { createLogger } from "@cohub/infra/logging";
+import {
+  parseUsername,
+  validatePublicIdentifierAssignment,
+} from "@cohub/protocol/public-identifiers";
 
 
 const logger = createLogger({ serviceName: "cohub-api" });
@@ -16,7 +20,7 @@ export type PublicUserProfile = {
 };
 
 export type UserProfile = PublicUserProfile & {
-  logtoUserId: string;
+  logtoUserId?: string;
   syncedAt: string;
 };
 
@@ -26,6 +30,10 @@ export class UsernameConflictError extends Error {
 
 export class UsernameClearError extends Error {
   override name = "UsernameClearError";
+}
+
+export class UsernameReservedError extends Error {
+  override name = "UsernameReservedError";
 }
 
 export class LogtoUserRequiredError extends Error {
@@ -40,34 +48,6 @@ type UserProfileFields = {
 };
 
 type UserProfileRow = typeof userProfiles.$inferSelect;
-
-const USERNAME_REGEX = /^(?!-)(?!.*--)[a-z0-9-]{1,39}(?<!-)$/;
-const RESERVED_USERNAMES = new Set([
-  "api",
-  "auth",
-  "admin",
-  "assets",
-  "callback",
-  "explore",
-  "favicon.ico",
-  "invite",
-  "login",
-  "logout",
-  "new",
-  "org",
-  "pricing",
-  "referrals",
-  "settings",
-  "sessions",
-  "spaces",
-  "static",
-  "trending",
-  "u",
-  "user",
-  "users",
-  "teams",
-  "work-auth",
-]);
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -92,23 +72,21 @@ const emailLocalPart = (value: string | null) => {
 const fallbackDisplayName = (userUuid: string) => userUuid.replaceAll("-", "").slice(0, 8);
 
 const USERNAME_MAX_LENGTH = 39;
+const DEFAULT_USERNAME_REGEX = /^[a-z][a-z0-9]*$/;
 const DEFAULT_USERNAME_SUFFIX_ATTEMPTS = 8;
 /** Inclusive range for conflict suffixes — wide space so common email locals rarely retry. */
 const DEFAULT_USERNAME_SUFFIX_MIN = 1_000;
 const DEFAULT_USERNAME_SUFFIX_MAX = 1_000_000; // 1000..999999
 const DEFAULT_USERNAME_ALLOCATE_ROUNDS = 3;
 
-/** Slugify a raw string into a username-shaped base (may still be reserved). */
+/** Slugify a raw string into a base accepted by both Cohub and Logto. */
 export function slugifyUsernameBase(value: string): string | null {
   const slug = value
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, USERNAME_MAX_LENGTH)
-    .replace(/-+$/g, "");
-  if (!slug || !USERNAME_REGEX.test(slug)) return null;
+    .replace(/[^a-z0-9]+/g, "")
+    .slice(0, USERNAME_MAX_LENGTH);
+  if (!slug || !DEFAULT_USERNAME_REGEX.test(slug)) return null;
   return slug;
 }
 
@@ -120,19 +98,25 @@ export function usernameBaseFromEmail(email: string | null | undefined): string 
   return slugifyUsernameBase(local);
 }
 
+function normalizeAssignableUsername(value: string): string | null {
+  return validatePublicIdentifierAssignment("username", value).value;
+}
+
 function uuidUsernameFallback(userUuid: string): string {
   const compact = userUuid.replaceAll("-", "").toLowerCase();
-  // `u-` prefix stays clear of the reserved exact name `user`.
-  return normalizeUsername(`u-${compact.slice(0, 12)}`) ?? `u-${compact.slice(0, 12)}`.slice(0, USERNAME_MAX_LENGTH);
+  // The letter prefix satisfies Logto's first-character requirement.
+  return normalizeAssignableUsername(`u${compact.slice(0, 12)}`) ?? `u${compact.slice(0, 12)}`.slice(0, USERNAME_MAX_LENGTH);
 }
 
 function withRandomSuffix(base: string): string | null {
   const suffix = String(randomInt(DEFAULT_USERNAME_SUFFIX_MIN, DEFAULT_USERNAME_SUFFIX_MAX));
-  const maxBaseLen = USERNAME_MAX_LENGTH - 1 - suffix.length;
+  const maxBaseLen = USERNAME_MAX_LENGTH - suffix.length;
   if (maxBaseLen < 1) return null;
-  const trimmed = base.slice(0, maxBaseLen).replace(/-+$/g, "");
+  const trimmed = base.slice(0, maxBaseLen);
   if (!trimmed) return null;
-  return normalizeUsername(`${trimmed}-${suffix}`);
+  const candidate = `${trimmed}${suffix}`;
+  if (!DEFAULT_USERNAME_REGEX.test(candidate)) return null;
+  return normalizeAssignableUsername(candidate);
 }
 
 /** Build a wide candidate set: bare email base (if allowed), then random suffixes, then uuid fallback. */
@@ -144,7 +128,7 @@ export function buildDefaultUsernameCandidates(input: {
   const candidates: string[] = [];
   const base = usernameBaseFromEmail(input.email ?? null);
   if (base) {
-    const bare = normalizeUsername(base);
+    const bare = normalizeAssignableUsername(base);
     if (bare) candidates.push(bare);
     const suffixCount = input.randomSuffixCount ?? DEFAULT_USERNAME_SUFFIX_ATTEMPTS;
     for (let i = 0; i < suffixCount; i += 1) {
@@ -155,7 +139,7 @@ export function buildDefaultUsernameCandidates(input: {
 
   candidates.push(uuidUsernameFallback(input.userUuid));
   for (let i = 0; i < 4; i += 1) {
-    const candidate = withRandomSuffix(`u-${input.userUuid.replaceAll("-", "").slice(0, 8)}`);
+    const candidate = withRandomSuffix(`u${input.userUuid.replaceAll("-", "").toLowerCase().slice(0, 8)}`);
     if (candidate) candidates.push(candidate);
   }
 
@@ -186,12 +170,19 @@ function isLogtoUsernameConflict(error: unknown): boolean {
 }
 
 export function normalizeUsername(value: string | null | undefined): string | null {
-  if (value === null || value === undefined) return null;
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return null;
-  if (!USERNAME_REGEX.test(normalized)) return null;
-  if (RESERVED_USERNAMES.has(normalized)) return null;
-  return normalized;
+  return parseUsername(value);
+}
+
+export function resolveSyncedUsername(
+  candidate: string | null | undefined,
+  historicalUsername: string | null | undefined,
+): string | null {
+  const username = normalizeUsername(candidate);
+  if (!username) return null;
+  if (username === normalizeUsername(historicalUsername)) return username;
+  return validatePublicIdentifierAssignment("username", username).reason === "reserved"
+    ? null
+    : username;
 }
 
 export function validateUsername(value: unknown) {
@@ -250,6 +241,18 @@ export function normalizeUserProfile(input: {
     displayName: displayName.slice(0, 120),
     avatarUrl,
     source,
+  };
+}
+
+function normalizeSyncedUserProfile(input: {
+  userUuid: string;
+  source: Record<string, unknown>;
+  historicalUsername?: string | null;
+}): UserProfileFields {
+  const fields = normalizeUserProfile(input);
+  return {
+    ...fields,
+    username: resolveSyncedUsername(fields.username, input.historicalUsername),
   };
 }
 
@@ -360,12 +363,17 @@ async function commitUsernameToLogto(input: {
   userUuid: string;
   logtoUserId: string;
   username: string;
+  historicalUsername?: string | null;
 }): Promise<UserProfileFields> {
   await updateLogtoUserProfile(input.logtoUserId, { username: input.username });
   const updated = await getLogtoUser(input.logtoUserId);
-  const fields = normalizeUserProfile({ userUuid: input.userUuid, source: updated });
+  const fields = normalizeSyncedUserProfile({
+    userUuid: input.userUuid,
+    source: updated,
+    historicalUsername: input.historicalUsername,
+  });
   if (!fields.username) {
-    throw new Error("Logto accepted username update but returned empty username");
+    throw new Error("Logto accepted username update but returned an invalid username");
   }
   return fields;
 }
@@ -381,17 +389,19 @@ async function assignDefaultUsernameViaLogto(input: {
   userUuid: string;
   logtoUserId: string;
   fields: UserProfileFields;
+  stored: UserProfile | null;
 }): Promise<UserProfileFields> {
   if (input.fields.username) return input.fields;
 
-  // Prefer promoting a previously cached local username into Logto (still SoT write-first).
-  const stored = await getStoredUserProfile(input.userUuid);
+  // Promote only a username cached under the same verified Logto identity.
+  const stored = input.stored?.logtoUserId === input.logtoUserId ? input.stored : null;
   if (stored?.username) {
     try {
       return await commitUsernameToLogto({
         userUuid: input.userUuid,
         logtoUserId: input.logtoUserId,
         username: stored.username,
+        historicalUsername: stored.username,
       });
     } catch (error) {
       if (!isLogtoUsernameConflict(error)) {
@@ -460,73 +470,146 @@ async function assignDefaultUsernameViaLogto(input: {
     : new UsernameConflictError("unable to allocate a default username");
 }
 
-export async function ensureCurrentUserProfile(user: AuthUser): Promise<UserProfile> {
-  const logtoUserId = typeof user.sub === "string" && user.sub.trim() ? user.sub.trim() : null;
+export function resolveTrustedLogtoUserId(input: {
+  userUuid: string;
+  tokenLogtoUserId?: string | null;
+  storedLogtoUserId?: string | null;
+}): string | null {
+  const tokenLogtoUserId = input.tokenLogtoUserId?.trim();
+  if (tokenLogtoUserId) return tokenLogtoUserId;
 
-  // No Logto principal → cannot mint a username (Logto is SoT). Mirror stored profile only.
-  if (!logtoUserId) {
-    const stored = await getStoredUserProfile(user.uuid);
-    if (stored) return stored;
+  const storedLogtoUserId = input.storedLogtoUserId?.trim();
+  if (!storedLogtoUserId || storedLogtoUserId === input.userUuid) return null;
+  return storedLogtoUserId;
+}
 
-    return await upsertUserProfile({
-      userUuid: user.uuid,
-      logtoUserId: user.uuid,
-      fields: normalizeUserProfile({ userUuid: user.uuid, source: sourceFromAuthUser(user) }),
-    });
-  }
+function transientUserProfile(user: AuthUser, stored: UserProfile | null): UserProfile {
+  const fields = normalizeUserProfile({ userUuid: user.uuid, source: sourceFromAuthUser(user) });
+  return {
+    userUuid: user.uuid,
+    // Without a verified Logto identity, local username data is not authoritative.
+    username: null,
+    displayName: stored?.displayName ?? fields.displayName,
+    avatarUrl: stored?.avatarUrl ?? fields.avatarUrl,
+    syncedAt: stored?.syncedAt ?? new Date().toISOString(),
+  };
+}
 
+async function syncUserProfileFromLogto(input: {
+  user: AuthUser;
+  logtoUserId: string;
+  stored: UserProfile | null;
+}): Promise<UserProfile> {
+  const stored = input.stored?.logtoUserId === input.logtoUserId ? input.stored : null;
   let logtoUser: Record<string, unknown>;
   try {
-    logtoUser = await getLogtoUser(logtoUserId);
+    logtoUser = await getLogtoUser(input.logtoUserId);
   } catch (error) {
-    logger.warn("[user-profile] Failed to refresh current user from Logto, using stored profile when available:", error);
-    const stored = await getStoredUserProfile(user.uuid);
+    logger.warn("[user-profile] Failed to refresh current user from Logto, using stored profile when available:", {
+      userUuid: input.user.uuid,
+      logtoUserId: input.logtoUserId,
+      error,
+    });
     if (stored) return stored;
 
-    // No SoT and no cache: store non-username fields only — never invent a username here.
+    // A verified user token established this binding even when Logto is temporarily unavailable.
     return await upsertUserProfile({
-      userUuid: user.uuid,
-      logtoUserId,
+      userUuid: input.user.uuid,
+      logtoUserId: input.logtoUserId,
       fields: mergeAuthEmailIntoFields(
-        user,
-        normalizeUserProfile({ userUuid: user.uuid, source: sourceFromAuthUser(user) }),
+        input.user,
+        normalizeSyncedUserProfile({
+          userUuid: input.user.uuid,
+          source: sourceFromAuthUser(input.user),
+        }),
       ),
     });
   }
 
   let fields = mergeAuthEmailIntoFields(
-    user,
-    normalizeUserProfile({ userUuid: user.uuid, source: logtoUser }),
+    input.user,
+    normalizeSyncedUserProfile({
+      userUuid: input.user.uuid,
+      source: logtoUser,
+      historicalUsername: stored?.username,
+    }),
   );
 
-  // Hot path: Logto already has username → just sync local cache, no allocation.
   if (!fields.username) {
     try {
       // Write Logto first; only then mirror into local. Never invent local-only.
       fields = await assignDefaultUsernameViaLogto({
-        userUuid: user.uuid,
-        logtoUserId,
+        userUuid: input.user.uuid,
+        logtoUserId: input.logtoUserId,
         fields,
+        stored,
       });
     } catch (error) {
-      // Logto write failed → do not invent or keep a diverging local-only handle.
-      // Preserve an existing local cache only for this response; do not overwrite
-      // it with username=null (that would discard recovery data for a later retry).
       logger.warn("[user-profile] Default username assignment failed; not writing local-only username:", {
-        userUuid: user.uuid,
+        userUuid: input.user.uuid,
         error,
       });
-      const stored = await getStoredUserProfile(user.uuid);
       if (stored) return stored;
-      // No cache yet: store non-username fields from Logto so /api/me still works.
+      // No matching cache yet: store non-username fields from Logto so /api/me still works.
     }
   }
 
   return await upsertUserProfile({
-    userUuid: user.uuid,
-    logtoUserId,
+    userUuid: input.user.uuid,
+    logtoUserId: input.logtoUserId,
     fields,
   });
+}
+
+/**
+ * Ensure a profile through either a verified user token or a previously verified binding.
+ * Principals without either identity return a transient profile and never create a guessed binding.
+ */
+export async function ensureCurrentUserProfile(user: AuthUser): Promise<UserProfile> {
+  const stored = await getStoredUserProfile(user.uuid);
+  const tokenLogtoUserId = typeof user.sub === "string" && user.sub.trim() ? user.sub.trim() : null;
+  const logtoUserId = resolveTrustedLogtoUserId({
+    userUuid: user.uuid,
+    tokenLogtoUserId,
+    storedLogtoUserId: stored?.logtoUserId,
+  });
+
+  if (!logtoUserId) return transientUserProfile(user, stored);
+  if (!tokenLogtoUserId && stored?.username) return stored;
+
+  return await syncUserProfileFromLogto({ user, logtoUserId, stored });
+}
+
+/** Ensure a durable profile exists before creating resources owned by the user. */
+export async function ensurePersistedCurrentUserProfile(user: AuthUser): Promise<UserProfile> {
+  const profile = await ensureCurrentUserProfile(user);
+  if (!profile.logtoUserId) {
+    throw new LogtoUserRequiredError("profile provisioning requires user sign-in");
+  }
+  return profile;
+}
+
+/** Ensure a profile for a resource owner, optionally using a verified actor identity hint. */
+export async function ensureUserProfileByUuid(
+  userUuid: string,
+  actor?: AuthUser | null,
+): Promise<UserProfile | null> {
+  const ownerActor = actor?.uuid === userUuid ? actor : null;
+  const stored = await getStoredUserProfile(userUuid);
+  const tokenLogtoUserId = typeof ownerActor?.sub === "string" && ownerActor.sub.trim()
+    ? ownerActor.sub.trim()
+    : null;
+  const logtoUserId = resolveTrustedLogtoUserId({
+    userUuid,
+    tokenLogtoUserId,
+    storedLogtoUserId: stored?.logtoUserId,
+  });
+
+  if (!logtoUserId) return null;
+  if (!tokenLogtoUserId && stored?.username) return stored;
+
+  const user = ownerActor ?? ({ uuid: userUuid } as AuthUser);
+  return await syncUserProfileFromLogto({ user, logtoUserId, stored });
 }
 
 export async function updateCurrentUserProfile(user: AuthUser, input: { displayName?: string; avatarUrl?: string | null; username?: string | null }) {
@@ -534,7 +617,11 @@ export async function updateCurrentUserProfile(user: AuthUser, input: { displayN
   // actor uuid, so fall back to the stored profile's logtoUserId for those cases.
   const logtoUserIdFromToken = typeof user.sub === "string" && user.sub.trim() ? user.sub.trim() : null;
   const storedProfile = await getStoredUserProfile(user.uuid);
-  const logtoUserId = logtoUserIdFromToken ?? storedProfile?.logtoUserId ?? null;
+  const logtoUserId = resolveTrustedLogtoUserId({
+    userUuid: user.uuid,
+    tokenLogtoUserId: logtoUserIdFromToken,
+    storedLogtoUserId: storedProfile?.logtoUserId,
+  });
   if (!logtoUserId) throw new LogtoUserRequiredError("profile updates require user sign-in");
 
   const username = input.username === undefined ? undefined : normalizeUsername(input.username);
@@ -542,9 +629,17 @@ export async function updateCurrentUserProfile(user: AuthUser, input: { displayN
     throw new Error("invalid username");
   }
 
+  const trustedStoredProfile = storedProfile?.logtoUserId === logtoUserId ? storedProfile : null;
   const previousLogtoUser = await getLogtoUser(logtoUserId);
   const previousFields = normalizeUserProfile({ userUuid: user.uuid, source: previousLogtoUser });
-  const previousUsername = storedProfile?.username ?? previousFields.username;
+  const previousUsername = trustedStoredProfile?.username ?? previousFields.username;
+  if (
+    username &&
+    username !== trustedStoredProfile?.username &&
+    validatePublicIdentifierAssignment("username", username).reason === "reserved"
+  ) {
+    throw new UsernameReservedError("This username is reserved.");
+  }
   if (input.username !== undefined && !username && previousUsername) {
     throw new UsernameClearError("username cannot be cleared once set");
   }
@@ -566,10 +661,24 @@ export async function updateCurrentUserProfile(user: AuthUser, input: { displayN
 
   try {
     const updated = await getLogtoUser(logtoUserId);
+    const rawUpdatedFields = normalizeUserProfile({ userUuid: user.uuid, source: updated });
+    let updatedFields = normalizeSyncedUserProfile({
+      userUuid: user.uuid,
+      source: updated,
+      historicalUsername: trustedStoredProfile?.username,
+    });
+    if (rawUpdatedFields.username && !updatedFields.username) {
+      updatedFields = await assignDefaultUsernameViaLogto({
+        userUuid: user.uuid,
+        logtoUserId,
+        fields: updatedFields,
+        stored: trustedStoredProfile,
+      });
+    }
     return await upsertUserProfile({
       userUuid: user.uuid,
       logtoUserId,
-      fields: normalizeUserProfile({ userUuid: user.uuid, source: updated }),
+      fields: updatedFields,
     });
   } catch (error) {
     await updateLogtoUserProfile(logtoUserId, {

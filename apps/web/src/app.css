@@ -81,9 +81,9 @@ body.sidebar-resizing iframe {
 	pointer-events: none;
 }
 
-.panel-shell--collapsed {
+.panel-shell.panel-shell--collapsed {
 	pointer-events: none;
-	border-color: transparent !important;
+	border-color: transparent;
 }
 
 /* Fixed content width so text/layout never reflow mid-animation. */
@@ -110,25 +110,25 @@ body.sidebar-resizing iframe {
 	transition-delay: 0ms;
 }
 
-.panel-shell:not(.panel-shell--collapsed) > .panel-shell-inner > .panel-shell-fade,
+.panel-shell:not(.panel-shell--collapsed)
+	> .panel-shell-inner
+	> .panel-shell-fade,
 .panel-shell:not(.panel-shell--collapsed) > .panel-shell-fade {
 	opacity: 1;
 	/* Width expands first; content fades in slightly delayed. */
 	transition-delay: 100ms;
 }
 
-body.sidebar-resizing .panel-shell,
-body.sidebar-resizing .panel-shell-fade,
-body.sidebar-resizing .workspace-preview-pane {
-	transition: none !important;
-}
-
 @media (prefers-reduced-motion: reduce) {
 	.panel-shell,
-	.panel-shell-fade,
-	.workspace-preview-pane {
-		transition: none !important;
+	.panel-shell-fade {
+		transition: none;
 	}
+}
+
+body.sidebar-resizing .panel-shell,
+body.sidebar-resizing .panel-shell-fade {
+	transition: none;
 }
 
 *::-webkit-scrollbar {
@@ -186,6 +186,19 @@ body.sidebar-resizing .workspace-preview-pane {
 /* Lock body scroll when drawer is open */
 body.drawer-open {
 	overflow: hidden;
+}
+
+/*
+ Touch/pen resource drag in progress. Selection and the iOS long-press callout
+ both fight a long-press gesture, so they are suppressed for the duration.
+ Scroll suppression itself is handled by the drag controller's non-passive
+ touchmove listener, which is the only thing that reliably stops an inner
+ scroll container.
+*/
+body.pointer-dragging {
+	user-select: none;
+	-webkit-user-select: none;
+	-webkit-touch-callout: none;
 }
 
 /*
@@ -668,13 +681,13 @@ body.drawer-open {
 
 .markdown-content .markdown-audio {
 	width: min(100%, 31.2rem);
-	padding: 0.75rem;
-	border: 1px solid var(--border-subtle);
-	border-radius: 0.75rem;
-	background: var(--bg-surface-muted, var(--bg-surface));
 }
 
 .markdown-content .markdown-audio > audio {
+	width: 100%;
+}
+
+.markdown-content .markdown-audio .markdown-audio-mount {
 	width: 100%;
 }
 
@@ -1085,8 +1098,9 @@ body.drawer-open {
 .markdown-content td {
 	min-width: min(9rem, 52vw);
 	max-width: 24rem;
-	border: 1px solid var(--border-subtle);
-	padding: 0.5rem 0.75rem;
+	border: none;
+	border-bottom: 1px solid var(--border-subtle);
+	padding: 0.6rem 0.75rem;
 	text-align: left;
 	vertical-align: top;
 	white-space: normal;
@@ -1105,17 +1119,24 @@ body.drawer-open {
 }
 
 .markdown-content th {
-	background: var(--bg-hover);
-	color: var(--text-primary);
-	font-weight: 600;
+	background: transparent;
+	color: var(--text-tertiary);
+	font-size: 0.85em;
+	font-weight: 500;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
 }
 
 .markdown-content td {
 	color: var(--text-secondary);
 }
 
-.markdown-content tr:nth-child(even) td {
-	background: color-mix(in srgb, var(--bg-hover) 45%, transparent);
+.markdown-content tbody tr {
+	transition: background-color 120ms ease;
+}
+
+.markdown-content tbody tr:hover td {
+	background: color-mix(in srgb, var(--bg-hover) 50%, transparent);
 }
 
 @media (max-width: 640px) {
@@ -1127,6 +1148,7 @@ body.drawer-open {
 	.markdown-content table td {
 		min-width: min(7.5rem, 62vw);
 		max-width: 16rem;
+		padding: 0.5rem 0.6rem;
 	}
 
 	.markdown-content .markdown-mermaid-canvas {
@@ -1154,6 +1176,7 @@ body.drawer-open {
 .markdown-content pre {
 	border: 1px solid var(--border-subtle);
 	border-radius: 0.75rem;
+	background: var(--bg-code, var(--bg-surface));
 	overflow-x: auto;
 	touch-action: pan-x pan-y;
 }

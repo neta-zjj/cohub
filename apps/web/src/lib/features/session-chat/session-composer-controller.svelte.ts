@@ -43,17 +43,53 @@ export function createSessionComposerController() {
 	function setUploading(kind: "file" | "image") {
 		attachments = attachments.map((attachment) =>
 			attachment.kind === kind
-				? { ...attachment, status: "uploading" as const }
+				? { ...attachment, status: "uploading" as const, progress: 0 }
+				: attachment,
+		);
+	}
+
+	function setAttachmentUploadProgress(id: string, progress: number) {
+		const normalizedProgress = Math.round(Math.max(0, Math.min(100, progress)));
+		const current = attachments.find(
+			(
+				attachment,
+			): attachment is ComposerFileAttachment | ComposerImageAttachment =>
+				(attachment.kind === "file" || attachment.kind === "image") &&
+				attachment.id === id,
+		);
+		if (
+			!current ||
+			(current.status === "uploading" &&
+				current.progress === normalizedProgress)
+		)
+			return;
+		attachments = attachments.map((attachment) =>
+			attachment === current
+				? {
+						...attachment,
+						status: "uploading" as const,
+						progress: normalizedProgress,
+					}
+				: attachment,
+		);
+	}
+
+	function setAttachmentFinalizing(id: string) {
+		attachments = attachments.map((attachment) =>
+			(attachment.kind === "file" || attachment.kind === "image") &&
+			attachment.id === id
+				? { ...attachment, status: "finalizing" as const, progress: 100 }
 				: attachment,
 		);
 	}
 
 	function setUploadedImageUrls(imageUrls: Map<string, string>) {
 		attachments = attachments.map((attachment) =>
-			attachment.kind === "image"
+			attachment.kind === "image" && imageUrls.has(attachment.id)
 				? {
 						...attachment,
-						status: "ready" as const,
+						status: "finalizing" as const,
+						progress: 100,
 						uploadedUrl: imageUrls.get(attachment.id) ?? attachment.uploadedUrl,
 					}
 				: attachment,
@@ -76,7 +112,7 @@ export function createSessionComposerController() {
 	function markAttachmentUploadsFailed() {
 		attachments = attachments.map((attachment) =>
 			attachment.kind === "file" || attachment.kind === "image"
-				? { ...attachment, status: "failed" as const }
+				? { ...attachment, status: "failed" as const, progress: undefined }
 				: attachment,
 		);
 	}
@@ -217,6 +253,8 @@ export function createSessionComposerController() {
 		setError,
 		setAttachments,
 		setUploading,
+		setAttachmentUploadProgress,
+		setAttachmentFinalizing,
 		setUploadedImageUrls,
 		clearDraft,
 		restoreDraft,

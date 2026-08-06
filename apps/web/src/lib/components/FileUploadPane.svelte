@@ -1,5 +1,7 @@
 <script lang="ts">
-import { AlertCircle, Check, Upload, X } from "lucide-svelte";
+import { AlertCircle, Check, RefreshCw, Upload, X } from "lucide-svelte";
+import { onDestroy } from "svelte";
+import UploadProgress from "$lib/components/UploadProgress.svelte";
 import { uploadSpaceEntries } from "$lib/space-upload";
 import type { LocalUploadEntry } from "$lib/upload-entries";
 
@@ -8,7 +10,14 @@ type UploadItem = {
 	relativePath: string;
 	id: string;
 	status: "pending" | "uploading" | "importing" | "done" | "error";
+	progress?: number;
 	error?: string;
+};
+
+type QueuedUploadBatch = {
+	entries: LocalUploadEntry[];
+	signature: string;
+	targetDir: string;
 };
 
 const {
@@ -31,17 +40,18 @@ const {
 
 let items = $state<UploadItem[]>([]);
 
-let pending = $derived(items.filter((i) => i.status === "pending"));
-let uploading = $derived(items.filter((i) => i.status === "uploading"));
 let importing = $derived(items.filter((i) => i.status === "importing"));
-let done = $derived(items.filter((i) => i.status === "done"));
 let failed = $derived(items.filter((i) => i.status === "error"));
 const totalCount = $derived(items.length);
 const totalBytes = $derived(items.reduce((s, i) => s + i.file.size, 0));
 let uploadedBytes = $state(0);
-let importedFiles = $state(0);
-let stage = $state<"idle" | "uploading" | "importing" | "done" | "error">(
-	"idle",
+let uploadController = $state<AbortController | null>(null);
+let closeTimer: ReturnType<typeof setTimeout> | null = null;
+let stage = $state<
+	"idle" | "preparing" | "uploading" | "importing" | "done" | "error"
+>("idle");
+const progressPercent = $derived(
+	totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : 100,
 );
 
 function formatSize(bytes: number): string {
@@ -53,11 +63,35 @@ function formatSize(bytes: number): string {
 }
 
 let lastSignature = $state("");
+let activeBatchId = $state("");
+let activeTargetDir = $state("");
+let queuedBatches = $state<QueuedUploadBatch[]>([]);
 
 function effectiveEntries() {
 	return entries.length > 0
 		? entries
 		: files.map((file) => ({ file, relativePath: file.name }));
+}
+
+function startBatch(
+	uploadEntries: LocalUploadEntry[],
+	signature: string,
+	uploadTargetDir: string,
+) {
+	if (closeTimer) clearTimeout(closeTimer);
+	const previousController = uploadController;
+	const batchId = crypto.randomUUID();
+	activeBatchId = batchId;
+	activeTargetDir = uploadTargetDir;
+	previousController?.abort();
+	lastSignature = signature;
+	items = uploadEntries.map((entry) => ({
+		file: entry.file,
+		relativePath: entry.relativePath,
+		id: crypto.randomUUID(),
+		status: "pending" as const,
+	}));
+	void uploadAll(batchId, uploadTargetDir);
 }
 
 function processNewFiles() {
@@ -68,15 +102,24 @@ function processNewFiles() {
 				`${entry.relativePath}:${entry.file.size}:${entry.file.lastModified}`,
 		)
 		.join("|");
-	if (uploadEntries.length === 0 || signature === lastSignature) return;
-	lastSignature = signature;
-	items = uploadEntries.map((entry) => ({
-		file: entry.file,
-		relativePath: entry.relativePath,
-		id: crypto.randomUUID(),
-		status: "pending" as const,
-	}));
-	void uploadAll();
+	if (
+		uploadEntries.length === 0 ||
+		(signature === lastSignature && targetDir === activeTargetDir)
+	)
+		return;
+	if (stage === "importing") {
+		const duplicate = queuedBatches.some(
+			(batch) => batch.signature === signature && batch.targetDir === targetDir,
+		);
+		if (!duplicate) {
+			queuedBatches = [
+				...queuedBatches,
+				{ entries: uploadEntries, signature, targetDir },
+			];
+		}
+		return;
+	}
+	startBatch(uploadEntries, signature, targetDir);
 }
 
 // React to file changes
@@ -86,45 +129,67 @@ $effect(() => {
 	queueMicrotask(() => processNewFiles());
 });
 
-async function uploadAll() {
+async function uploadAll(batchId: string, uploadTargetDir: string) {
+	if (activeBatchId !== batchId) return;
+	const controller = new AbortController();
+	const batchEntries = items.map((item) => ({
+		file: item.file,
+		relativePath: item.relativePath,
+	}));
+	uploadController = controller;
 	try {
-		stage = "uploading";
+		stage = "preparing";
 		uploadedBytes = 0;
-		importedFiles = 0;
 		await uploadSpaceEntries({
 			spaceId,
-			targetDir,
-			entries: items.map((item) => ({
-				file: item.file,
-				relativePath: item.relativePath,
-			})),
+			targetDir: uploadTargetDir,
+			entries: batchEntries,
+			signal: controller.signal,
 			onProgress: (progress) => {
+				if (activeBatchId !== batchId) return;
 				stage = progress.stage;
 				uploadedBytes = progress.uploadedBytes;
-				importedFiles = progress.importedFiles;
-				items = items.map((item, index) => ({
-					...item,
-					status:
-						progress.stage === "done" || index < progress.importedFiles
-							? "done"
-							: progress.stage === "importing"
-								? "importing"
-								: item.status === "done"
-									? "done"
-									: "uploading",
-				}));
+				items = items.map((item, index) => {
+					if (progress.stage === "done")
+						return { ...item, status: "done", progress: 100 };
+					if (progress.stage === "importing")
+						return { ...item, status: "importing", progress: 100 };
+					if (progress.stage === "preparing")
+						return { ...item, status: "pending", progress: undefined };
+					if (index < progress.completedFiles)
+						return { ...item, status: "done", progress: 100 };
+					if (index === progress.activeFileIndex) {
+						const itemProgress =
+							item.file.size > 0
+								? Math.round(
+										(progress.activeFileUploadedBytes / item.file.size) * 100,
+									)
+								: 100;
+						return { ...item, status: "uploading", progress: itemProgress };
+					}
+					return { ...item, status: "pending", progress: undefined };
+				});
 			},
 		});
+		if (activeBatchId !== batchId) return;
 		stage = "done";
 		items = items.map((item) => ({ ...item, status: "done" }));
 		onComplete?.();
-		setTimeout(() => {
-			onClose?.();
-			items = [];
-			lastSignature = "";
-			importedFiles = 0;
+		const [nextBatch, ...remainingBatches] = queuedBatches;
+		if (nextBatch) {
+			queuedBatches = remainingBatches;
+			startBatch(nextBatch.entries, nextBatch.signature, nextBatch.targetDir);
+			return;
+		}
+		closeTimer = setTimeout(() => {
+			if (activeBatchId === batchId) handleReset();
 		}, 1600);
 	} catch (error) {
+		if (activeBatchId !== batchId) return;
+		if (error instanceof Error && error.name === "AbortError") {
+			if (items.length > 0) handleReset();
+			return;
+		}
 		stage = "error";
 		const message = error instanceof Error ? error.message : "Upload failed";
 		items = items.map((item) =>
@@ -132,42 +197,87 @@ async function uploadAll() {
 				? item
 				: { ...item, status: "error", error: message },
 		);
+	} finally {
+		if (uploadController === controller) uploadController = null;
 	}
 }
 
-function handleDismiss() {
+function handleReset() {
+	if (closeTimer) clearTimeout(closeTimer);
+	closeTimer = null;
 	onClose?.();
 	items = [];
 	lastSignature = "";
+	activeBatchId = "";
+	activeTargetDir = "";
+	queuedBatches = [];
 	stage = "idle";
 	uploadedBytes = 0;
-	importedFiles = 0;
 }
+
+function handleDismiss() {
+	if (stage === "preparing" || stage === "uploading") {
+		uploadController?.abort();
+	}
+	handleReset();
+}
+
+function handleRetry() {
+	const batchId = crypto.randomUUID();
+	activeBatchId = batchId;
+	void uploadAll(batchId, activeTargetDir);
+}
+
+onDestroy(() => {
+	if (closeTimer) clearTimeout(closeTimer);
+	activeBatchId = "";
+	queuedBatches = [];
+	items = [];
+	uploadController?.abort();
+});
 </script>
 
 {#if open && items.length > 0}
   <div class="upload-pane">
     <div class="header">
       <span class="title">
-        {#if uploading.length > 0 || pending.length > 0}
-          Uploading files…
+        {#if stage === "preparing"}
+          Preparing upload…
+        {:else if stage === "uploading"}
+          Uploading files · {progressPercent}%
         {:else if importing.length > 0 || stage === "importing"}
-          Importing files…
+          Finalizing files…
         {:else if failed.length > 0}
-          Upload complete · {failed.length} failed
+          Upload failed · {failed.length} file{failed.length !== 1 ? 's' : ''}
         {:else}
           Upload complete
         {/if}
       </span>
-      <button class="close-btn" type="button" onclick={handleDismiss} title="Close">
-        <X class="w-3.5 h-3.5" />
-      </button>
+      {#if stage !== "importing"}
+        <div class="header-actions">
+          {#if stage === "error"}
+            <button class="close-btn" type="button" onclick={handleRetry} title="Retry upload" aria-label="Retry upload">
+              <RefreshCw class="w-3.5 h-3.5" />
+            </button>
+          {/if}
+          <button class="close-btn" type="button" onclick={handleDismiss} title={stage === "preparing" || stage === "uploading" ? "Cancel upload" : "Close"} aria-label={stage === "preparing" || stage === "uploading" ? "Cancel upload" : "Close"}>
+            <X class="w-3.5 h-3.5" />
+          </button>
+        </div>
+      {/if}
     </div>
+
+    {#if stage !== "error"}
+      <UploadProgress value={stage === "uploading" || stage === "done" ? progressPercent : null} label={stage === "importing" ? "Finalizing files" : "File upload progress"} />
+    {/if}
 
     <div class="list">
       {#each items as item (item.id)}
         <div class="item" class:error={item.status === "error"}>
           <span class="name">{item.relativePath}</span>
+          {#if item.status === "uploading" && item.progress !== undefined}
+            <span class="percent">{item.progress}%</span>
+          {/if}
           {#if item.status === "error"}
             <AlertCircle class="w-3.5 h-3.5 shrink-0 text-error-soft" />
           {:else if item.status === "done"}
@@ -180,7 +290,7 @@ function handleDismiss() {
     </div>
 
     <div class="footer">
-      {totalCount} file{totalCount !== 1 ? 's' : ''} · {formatSize(stage === "uploading" ? uploadedBytes : totalBytes)} / {formatSize(totalBytes)}{#if stage === "importing"} · {importedFiles}/{totalCount} imported{/if}
+      {totalCount} file{totalCount !== 1 ? 's' : ''} · {formatSize(stage === "uploading" ? uploadedBytes : stage === "preparing" ? 0 : totalBytes)} / {formatSize(totalBytes)}{#if queuedBatches.length > 0} · {queuedBatches.length} queued{/if}
     </div>
   </div>
 {/if}
@@ -194,7 +304,7 @@ function handleDismiss() {
     max-height: 320px;
     background: var(--bg-primary);
     border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    border-radius: 8px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
     z-index: 50;
     display: flex;
@@ -211,9 +321,20 @@ function handleDismiss() {
   }
 
   .title {
+    min-width: 0;
+    overflow: hidden;
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 2px;
   }
 
   .close-btn {
@@ -263,6 +384,12 @@ function handleDismiss() {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .percent {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
   }
 
   .footer {

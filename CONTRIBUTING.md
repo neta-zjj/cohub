@@ -25,8 +25,10 @@ pnpm build
 - Copy `deploy/**/values.example.yaml` to `values.yaml` for local deploy experiments.
 - Billing is optional. Leave `TALESOFAI_BILLING_*` unset to run with billing disabled.
 
-## Pull requests
+## Changes
 
-1. Describe the problem and the approach.
-2. Note any follow-up work.
-3. Ensure lint and typecheck pass.
+This repository ships directly on `main` (no long-lived feature branches).
+
+1. Keep changes small and focused.
+2. Describe the problem and the approach in the commit message.
+3. Ensure lint and typecheck pass before pushing.

@@ -58,6 +58,7 @@ const createWebSdk = (options: Partial<CohubClientOptions> = {}) => {
 		setStoredAuthToken: options.setStoredAuthToken ?? setAuthToken,
 		clearStoredAuthToken: options.clearStoredAuthToken ?? clearAuthToken,
 		...options,
+		requestSource: options.requestSource ?? { via: "web" },
 		fetch: createBillingAwareFetch(baseFetch),
 		websocket: {
 			url: PUBLIC_GATEWAY_ORIGIN ?? undefined,

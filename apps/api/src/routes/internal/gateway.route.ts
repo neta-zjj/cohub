@@ -1,14 +1,15 @@
 import { context, trace, SpanStatusCode } from "@opentelemetry/api";
+import { boards, works } from "@cohub/db";
 import { createLogger } from "@cohub/infra/logging";
 import { getTracer, extractTrace } from "@cohub/infra/tracing/propagator";
-import { gatewayInboundEventSchema, type GatewayInboundEvent } from "@cohub/protocol/gateway";
+import { GATEWAY_ATTACHMENT_MAX_BYTES, gatewayInboundEventSchema, type GatewayInboundEvent } from "@cohub/protocol/gateway";
 import { parseRealtimeRoom } from "@cohub/protocol/realtime";
 import { dispatchSpacePresenceUpdated } from "../../realtime-events.js";
 import { getSpacePresenceSnapshot } from "../../space-presence.js";
 import { Hono } from "hono";
 import { bindAllActiveSpaceChannelsToGateway, handleInboundEvent, resolveChannelInboundForEventWithLock } from "../../channels.js";
 import { hasPermission } from "../../permissions.js";
-import { ensureInternalRequest, getOptionalAuth, requireValidId } from "../../lib/middleware.js";
+import { ensureInternalRequest, getOptionalAuth, getWorkSessionPrincipal, requireValidId } from "../../lib/middleware.js";
 import { getSpaceById } from "../../space-sessions.js";
 import { getSpaceSandboxBySpaceId, updateSpaceSandbox } from "../../space-sandboxes.js";
 import { normalizeSandboxLifecycleStatus, normalizeSandboxRuntimeStatus } from "@cohub/sandbox-controller";
@@ -18,15 +19,15 @@ import {
   consumePublicAssetUploadQuota,
   createInternalPublicAssetUploadPlan,
   isAllowedPublicAssetDownloadUrl,
-  resolvePublicAssetDownloadUrlForInternal,
 } from "../../public-asset-storage.js";
+import { UserUploadConfigError } from "../../user-upload-storage.js";
 import {
   beginSpaceUploadComplete,
   buildSpaceUploadObjectKey,
   cancelSpaceUploadComplete,
   consumeSpaceUploadQuota,
-  createInternalPresignedPutUrl,
   createPresignedGetUrl,
+  createPresignedPutUrl,
   createSpaceUploadId,
   deleteSpaceUploadManifest,
   getSpaceUploadManifest,
@@ -35,7 +36,9 @@ import {
   type SpaceUploadManifestEntry,
 } from "../../space-upload-storage.js";
 import { enqueueSandboxUploadFilesJob } from "../../sandbox-bash-queue.js";
-import { config } from "../../config.js";
+import { db } from "../../db/index.js";
+import { eq } from "drizzle-orm";
+import { getWorkRoomById, serializeWorkRoom, verifyWorkRoomTicket } from "../../work-realtime-rooms.js";
 
 const logger = createLogger({ serviceName: "cohub-api" });
 const tracer = getTracer("cohub-api");
@@ -63,7 +66,7 @@ const attachmentPlanErrorResponse = (error: unknown) => {
     const status = error.message.includes("too large") ? 413 : 400;
     return { status, body: { message: error.message } };
   }
-  if (error instanceof PublicAssetConfigError) {
+  if (error instanceof PublicAssetConfigError || error instanceof UserUploadConfigError) {
     return { status: 503, body: { message: "public asset storage is not configured" } };
   }
   return null;
@@ -135,6 +138,28 @@ router.post("/authorize-realtime-rooms", async (c) => {
       continue;
     }
 
+    if (parsed.kind === "room") {
+      rejected.push({ room, code: "FORBIDDEN", message: "Work rooms require room admission" });
+      continue;
+    }
+
+    if (parsed.kind === "board") {
+      const [board] = await db
+        .select({ spaceId: boards.spaceId })
+        .from(boards)
+        .where(eq(boards.id, parsed.id))
+        .limit(1);
+      const allowed = board
+        ? await hasPermission(user, "file.view", { spaceId: board.spaceId }).catch((error) => {
+            logger.warn("[RealtimeRooms] failed to authorize Board room", { room, userId: user.uuid, error });
+            return false;
+          })
+        : false;
+      if (allowed) accepted.push(normalizedRoom);
+      else rejected.push({ room, code: "FORBIDDEN", message: "Missing Board view permission" });
+      continue;
+    }
+
     const allowed = await hasPermission(user, "space.view", { spaceId: parsed.id }).catch((error) => {
       logger.warn("[RealtimeRooms] failed to authorize room", { room, userId: user.uuid, error });
       return false;
@@ -147,6 +172,88 @@ router.post("/authorize-realtime-rooms", async (c) => {
   }
 
   return c.json({ ok: true, rooms: accepted, rejected });
+});
+
+router.post("/authorize-work-room", async (c) => {
+  const forbidden = ensureInternalRequest(c);
+  if (forbidden) return forbidden;
+
+  const principal = getWorkSessionPrincipal(c);
+  if (!principal) return c.json({ ok: false, message: "a Work session is required" }, 403);
+  const body = await c.req.json<{ roomId?: string; ticket?: string }>().catch(() => null);
+  const roomId = typeof body?.roomId === "string" ? body.roomId.trim() : "";
+  const ticket = typeof body?.ticket === "string" ? body.ticket.trim() : "";
+  const ticketPayload = ticket ? verifyWorkRoomTicket(ticket) : null;
+  if (!requireValidId(roomId) || !ticketPayload || ticketPayload.roomId !== roomId) {
+    return c.json({ ok: false, message: "invalid room admission" }, 403);
+  }
+  if (
+    ticketPayload.workId !== principal.workId ||
+    ticketPayload.userUuid !== principal.userUuid ||
+    principal.spaceId.length === 0
+  ) return c.json({ ok: false, message: "invalid room admission" }, 403);
+
+  const room = await getWorkRoomById(roomId);
+  if (!room || room.workId !== principal.workId) {
+    return c.json({ ok: false, message: "room not found" }, 404);
+  }
+  const [work] = await db.select({ status: works.status, spaceId: works.spaceId })
+    .from(works)
+    .where(eq(works.id, principal.workId))
+    .limit(1);
+  if (work?.status !== "published" || work.spaceId !== principal.spaceId) {
+    return c.json({ ok: false, message: "work is unavailable" }, 403);
+  }
+
+  return c.json({
+    ok: true,
+    room: serializeWorkRoom(room),
+    participantId: ticketPayload.participantId,
+    userKey: ticketPayload.userKey,
+  });
+});
+
+router.post("/authorize-board-awareness", async (c) => {
+  const forbidden = ensureInternalRequest(c);
+  if (forbidden) return forbidden;
+
+  const user = getOptionalAuth(c);
+  if (!user) return c.json({ ok: false, message: "authentication is required" }, 401);
+
+  const body = await c.req.json<{
+    boardId?: string;
+    spaceId?: string;
+    permission?: "view" | "edit";
+  }>().catch(() => null);
+  const boardId = typeof body?.boardId === "string" ? body.boardId.trim() : "";
+  const spaceId = typeof body?.spaceId === "string" ? body.spaceId.trim() : "";
+  const permission = body?.permission === "edit" ? "edit" : "view";
+  if (!requireValidId(boardId) || !requireValidId(spaceId)) {
+    return c.json({ ok: false, message: "valid boardId and spaceId are required" }, 400);
+  }
+
+  const [board] = await db
+    .select({ spaceId: boards.spaceId })
+    .from(boards)
+    .where(eq(boards.id, boardId))
+    .limit(1);
+  if (!board || board.spaceId !== spaceId) {
+    return c.json({ ok: false, message: "board not found" }, 404);
+  }
+
+  const requiredPermission = permission === "edit" ? "file.edit" : "file.view";
+  const allowed = await hasPermission(user, requiredPermission, { spaceId }).catch((error) => {
+    logger.warn("[BoardAwareness] failed to authorize update", {
+      boardId,
+      spaceId,
+      permission,
+      userId: user.uuid,
+      error,
+    });
+    return false;
+  });
+  if (!allowed) return c.json({ ok: false, message: `missing ${requiredPermission} permission` }, 403);
+  return c.json({ ok: true, boardId, spaceId, permission });
 });
 
 // POST /internal/gateway/local-sandbox/authorize
@@ -318,7 +425,7 @@ router.post("/attachments/plan", async (c) => {
     for (const file of files) {
       if (!/^[a-zA-Z0-9_-]{1,80}$/.test(file.id) || seenFileIds.has(file.id)) return c.json({ message: "file ids must be unique safe strings" }, 400);
       seenFileIds.add(file.id);
-      if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > 100 * 1024 * 1024) return c.json({ message: "file too large" }, 413);
+      if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > GATEWAY_ATTACHMENT_MAX_BYTES) return c.json({ message: "file too large" }, 413);
       const relativePath = safeUploadPath(file.relativePath?.trim() || file.name);
       if (!relativePath) return c.json({ message: "invalid upload path" }, 400);
       if (seenRelativePaths.has(relativePath)) return c.json({ message: "duplicate upload path" }, 400);
@@ -358,7 +465,7 @@ router.post("/attachments/plan", async (c) => {
   }
   const filePlans = fileEntries.map((file) => {
     if (!file.objectKey) throw new Error("upload objectKey is required");
-    const signed = createInternalPresignedPutUrl(file.objectKey, file.mimeType);
+    const signed = createPresignedPutUrl(file.objectKey, file.mimeType);
     return { id: file.id, name: file.name, relativePath: file.relativePath, objectKey: file.objectKey, uploadUrl: signed.uploadUrl, uploadHeaders: signed.headers, expiresAt: signed.expiresAt };
   });
 
@@ -423,7 +530,7 @@ router.post("/attachments/materialize", async (c) => {
       if (!relativePath) return c.json({ message: "invalid upload path" }, 400);
       if (seenPaths.has(relativePath)) return c.json({ message: "duplicate upload path" }, 400);
       seenPaths.add(relativePath);
-      if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > 100 * 1024 * 1024) {
+      if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > GATEWAY_ATTACHMENT_MAX_BYTES) {
         return c.json({ message: "file too large" }, 413);
       }
       if (typeof file.downloadUrl !== "string" || !isAllowedPublicAssetDownloadUrl(file.downloadUrl)) {
@@ -437,7 +544,7 @@ router.post("/attachments/materialize", async (c) => {
         name: relativePath.split("/").at(-1) ?? file.name,
         size: file.size,
         mimeType: file.mimeType ?? null,
-        downloadUrl: resolvePublicAssetDownloadUrlForInternal(file.downloadUrl) ?? file.downloadUrl,
+        downloadUrl: file.downloadUrl,
       });
     }
 
@@ -526,15 +633,12 @@ router.post("/attachments/complete", async (c) => {
         const rawUrl = entry.downloadUrl
           ? entry.downloadUrl
           : createPresignedGetUrl(entry.objectKey as string).downloadUrl;
-        const downloadUrl = entry.downloadUrl
-          ? (resolvePublicAssetDownloadUrlForInternal(rawUrl) ?? rawUrl)
-          : rawUrl;
         return {
           relativePath: entry.relativePath,
           name: entry.name,
           size: entry.size,
           mimeType: entry.mimeType,
-          downloadUrl,
+          downloadUrl: rawUrl,
         };
       }),
     });

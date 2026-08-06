@@ -78,17 +78,21 @@ Agent 通过 Redis 与其他服务通信：
 - agent
   - mountPath: `/space-storage`
   - `WORKSPACE_ROOT=/space-storage/{SPACE_STORAGE_SUBPATH}`
+  - 只读挂载 `/checkpoint-cache`
+  - `CHECKPOINT_CACHE_ROOT=/checkpoint-cache`
   - 另挂 session 持久化目录：`/sessions`
 
 ### Agent 运行时目录
 
 - `WORKSPACE_ROOT=/space-storage/{SPACE_STORAGE_SUBPATH}`
+- `CHECKPOINT_CACHE_ROOT=/checkpoint-cache`
 - `SESSIONS_DIR=/sessions`
 
 推荐目录布局：
 
 ```txt
 /space-storage/{spaceId}/workspace
+/checkpoint-cache/{modSpaceId}/latest
 /sessions/spaces/{spaceId}/...
 ```
 

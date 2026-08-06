@@ -1,3 +1,4 @@
+import { BOARD_EXTENSION, BOARD_MIME_TYPE } from "@cohub/protocol";
 import type { SpaceFsChange } from "@cohub/protocol/fs";
 import { shouldUseFsCdnCache } from "./policy.js";
 import type { FsCdnWarmFileJob, FsCdnWarmReason } from "./types.js";
@@ -17,6 +18,7 @@ export const mimeByExt: Record<string, string> = {
   ".markdown": "text/markdown",
   ".json": "application/json",
   ".jsonl": "application/x-ndjson",
+  [BOARD_EXTENSION]: BOARD_MIME_TYPE,
   ".js": "text/javascript",
   ".mjs": "text/javascript",
   ".cjs": "text/javascript",

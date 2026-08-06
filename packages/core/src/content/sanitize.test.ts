@@ -31,4 +31,3 @@ assert.equal(sanitizePostgresJsonValue("a\u0000b"), "ab");
 assert.equal(sanitizePostgresJsonValue("broken high \ud83d"), "broken high �");
 assert.equal(sanitizePostgresJsonValue("broken low \ude00"), "broken low �");
 assert.equal(sanitizePostgresJsonValue("normal emoji 😀"), "normal emoji 😀");
-console.log("sanitizePostgresJsonValue tests passed");

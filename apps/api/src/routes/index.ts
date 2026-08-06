@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import healthRouter from "./health.route.js";
 import modelsRouter from "./models.route.js";
+import modelsStatusRouter from "./models-status.route.js";
 import meRouter from "./me.route.js";
+import meLabelsRouter from "./me-labels.route.js";
 import channelsRouter from "./channels.route.js";
 import spacesRouter from "./spaces/index.js";
 import sessionsRouter from "./sessions.route.js";
@@ -29,10 +31,12 @@ import previewRouter from "./preview.route.js";
 const router = new Hono();
 
 router.route("/", healthRouter);
+router.route("/api/models/status", modelsStatusRouter);
 router.route("/api/models", modelsRouter);
 router.route("/api/prompts", promptsRouter);
 router.route("/api/skills", skillsRouter);
 router.route("/api/me", meRouter);
+router.route("/api/me", meLabelsRouter);
 router.route("/api/channels", channelsRouter);
 router.route("/api/spaces", spacesRouter);
 router.route("/api/sessions", sessionsRouter);

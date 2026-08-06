@@ -9,7 +9,9 @@
       "@cohub/db": ["../db/src/index.ts"],
       "@cohub/db/schema": ["../db/src/index.ts"],
       "@cohub/db/schema-v2": ["../db/src/schema-v2.ts"],
+      "@cohub/protocol": ["../protocol/src/index.ts"],
       "@cohub/protocol/core": ["../protocol/src/core/index.ts"],
+      "@cohub/protocol/provenance": ["../protocol/src/provenance.ts"],
       "@cohub/protocol/generation": ["../protocol/src/generation/index.ts"],
       "@cohub/sandbox-controller": ["../sandbox-controller/src/index.ts"]
     }

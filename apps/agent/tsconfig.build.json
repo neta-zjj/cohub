@@ -46,8 +46,14 @@
       "@cohub/infra/bullmq": [
         "../../packages/infra/dist/bullmq/index.d.ts"
       ],
+      "@cohub/infra/space-hooks": [
+        "../../packages/infra/dist/space-hooks/index.d.ts"
+      ],
       "@cohub/infra/config-runtime/models": [
         "../../packages/infra/dist/config-runtime/models.d.ts"
+      ],
+      "@cohub/infra/config-runtime/skills": [
+        "../../packages/infra/dist/config-runtime/skills.d.ts"
       ],
       "@cohub/infra/tracing/propagator": [
         "../../packages/infra/dist/tracing/propagator.d.ts"
@@ -81,6 +87,9 @@
       ],
       "@cohub/core/sessions": [
         "../../packages/core/dist/sessions/index.d.ts"
+      ],
+      "@cohub/core/hooks": [
+        "../../packages/core/dist/hooks/index.d.ts"
       ],
       "@cohub/core/sessions/prompt": [
         "../../packages/core/dist/sessions/prompt.d.ts"

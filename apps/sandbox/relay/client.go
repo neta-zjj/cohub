@@ -9,8 +9,10 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sync"
@@ -37,8 +39,9 @@ type Options struct {
 	// SpaceID identifies the space this sandbox serves.
 	SpaceID string
 	// Server serves each opened data channel.
-	Server SessionServer
-	Logger *slog.Logger
+	Server       SessionServer
+	OnRegistered func()
+	Logger       *slog.Logger
 }
 
 // control frames exchanged on the control channel. Kept intentionally small and
@@ -52,12 +55,14 @@ type controlFrame struct {
 	Token   string          `json:"token,omitempty"`
 	Channel string          `json:"channel,omitempty"`
 	Message string          `json:"message,omitempty"`
+	Status  int             `json:"status,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 const (
 	controlPingInterval = 20 * time.Second
 	dialTimeout         = 15 * time.Second
+	configRetryDelay    = 5 * time.Minute
 )
 
 var reconnectDelays = []time.Duration{
@@ -75,6 +80,19 @@ type Client struct {
 	opts Options
 	mu   sync.Mutex
 	conn *websocket.Conn // active control connection, nil when disconnected
+}
+
+type relayConfigError struct {
+	status int
+	err    error
+}
+
+func (e *relayConfigError) Error() string {
+	return fmt.Sprintf("relay configuration rejected with HTTP %d: %v", e.status, e.err)
+}
+
+func (e *relayConfigError) Unwrap() error {
+	return e.err
 }
 
 func NewClient(opts Options) *Client {
@@ -126,7 +144,8 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 		start := time.Now()
-		if err := c.connectControl(ctx); err != nil && ctx.Err() == nil {
+		err := c.connectControl(ctx)
+		if err != nil && ctx.Err() == nil {
 			opts.Logger.Warn("relay control connection ended", slog.String("error", err.Error()))
 		}
 		// A connection that stayed up for a while resets the backoff.
@@ -137,6 +156,12 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 		delay := reconnectDelays[min(attempt, len(reconnectDelays)-1)]
+		var configErr *relayConfigError
+		if errors.As(err, &configErr) {
+			delay = configRetryDelay
+		} else {
+			delay = delay/2 + time.Duration(rand.Int63n(int64(delay/2)+1))
+		}
 		attempt++
 		select {
 		case <-ctx.Done():
@@ -157,10 +182,13 @@ func (c *Client) connectControl(ctx context.Context) error {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(dialCtx, controlURL(opts.RelayURL), &websocket.DialOptions{
+	conn, response, err := websocket.Dial(dialCtx, controlURL(opts.RelayURL), &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + opts.Token}},
 	})
 	if err != nil {
+		if response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+			return &relayConfigError{status: response.StatusCode, err: err}
+		}
 		return fmt.Errorf("dial control: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "closing")
@@ -176,16 +204,25 @@ func (c *Client) connectControl(ctx context.Context) error {
 	defer cancelLoop()
 	c.setConn(conn)
 	defer c.setConn(nil)
-	go controlPingLoop(ctx, conn, opts.Logger)
+	pingErr := make(chan error, 1)
+	go controlPingLoop(ctx, conn, cancelLoop, pingErr)
 
 	for {
 		var frame controlFrame
 		if err := wsjson.Read(ctx, conn, &frame); err != nil {
-			return fmt.Errorf("read control: %w", err)
+			select {
+			case err := <-pingErr:
+				return fmt.Errorf("ping control: %w", err)
+			default:
+				return fmt.Errorf("read control: %w", err)
+			}
 		}
 		switch frame.Type {
 		case "registered":
 			opts.Logger.Info("relay registered", slog.String("spaceId", opts.SpaceID))
+			if opts.OnRegistered != nil {
+				opts.OnRegistered()
+			}
 		case "open":
 			if frame.Channel == "" {
 				opts.Logger.Warn("relay open without channel id")
@@ -193,7 +230,11 @@ func (c *Client) connectControl(ctx context.Context) error {
 			}
 			go openDataChannel(ctx, opts, frame.Channel)
 		case "error":
-			return fmt.Errorf("relay rejected connection: %s", frame.Message)
+			err := fmt.Errorf("relay rejected connection: %s", frame.Message)
+			if frame.Status == 0 || (frame.Status >= 400 && frame.Status < 500) {
+				return &relayConfigError{status: frame.Status, err: err}
+			}
+			return err
 		case "ping":
 			_ = wsjson.Write(ctx, conn, controlFrame{Type: "pong"})
 		case "pong":
@@ -204,7 +245,7 @@ func (c *Client) connectControl(ctx context.Context) error {
 	}
 }
 
-func controlPingLoop(ctx context.Context, conn *websocket.Conn, logger *slog.Logger) {
+func controlPingLoop(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc, result chan<- error) {
 	ticker := time.NewTicker(controlPingInterval)
 	defer ticker.Stop()
 	for {
@@ -213,7 +254,11 @@ func controlPingLoop(ctx context.Context, conn *websocket.Conn, logger *slog.Log
 			return
 		case <-ticker.C:
 			if err := wsjson.Write(ctx, conn, controlFrame{Type: "ping"}); err != nil {
-				logger.Debug("relay control ping failed", slog.String("error", err.Error()))
+				select {
+				case result <- err:
+				default:
+				}
+				cancel()
 				return
 			}
 		}

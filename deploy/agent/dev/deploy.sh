@@ -33,10 +33,13 @@ IMAGE=${OVERRIDE_IMAGE:-$(get_value "image")}
 ENV=$(get_value "env")
 LOG_LEVEL=$(get_value "logLevel")
 WORKSPACE_ROOT=$(get_value "workspaceRoot")
+CHECKPOINT_CACHE_ROOT=$(get_value "checkpointCacheRoot")
 SESSIONS_DIR=$(get_value "sessionsDir")
 PLATFORM_CONFIG_ROOT=$(get_value "platformConfigRoot")
 SPACE_STORAGE_PVC=$(get_value "spaceStoragePvc")
+CHECKPOINT_CACHE_PVC=$(get_value "checkpointCachePvc")
 WORKSPACE_SUBPATH=$(get_value "workspaceSubpath")
+CHECKPOINT_CACHE_SUBPATH=$(get_value "checkpointCacheSubpath")
 SESSIONS_SUBPATH=$(get_value "sessionsSubpath")
 CONFIGS_SUBPATH=$(get_value "configsSubpath")
 SESSIONS_NAMESPACE=$(get_value "sessionsNamespace")
@@ -48,6 +51,9 @@ TURN_OBJECT_S3_BUCKET=$(get_value "TURN_OBJECT_S3_BUCKET")
 TURN_OBJECT_S3_TIMEOUT_MS=$(get_value "TURN_OBJECT_S3_TIMEOUT_MS")
 TURN_OBJECT_S3_MAX_ATTEMPTS=$(get_value "TURN_OBJECT_S3_MAX_ATTEMPTS")
 TURN_OBJECT_CDN_BASE_URL=$(get_value "TURN_OBJECT_CDN_BASE_URL")
+PUBLIC_ASSET_CDN_BASE_URL=$(get_value "PUBLIC_ASSET_CDN_BASE_URL")
+CHAT_ATTACHMENT_PUBLIC_BASE_URL=$(get_value "CHAT_ATTACHMENT_PUBLIC_BASE_URL")
+PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS=$(get_value "PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS")
 REPLICAS=$(get_value "replicas")
 MAX_UNAVAILABLE=$(get_value "maxUnavailable")
 MAX_SURGE=$(get_value "maxSurge")
@@ -74,10 +80,13 @@ require_value "port" "$PORT"
 require_value "image" "$IMAGE"
 require_value "env" "$ENV"
 require_value "workspaceRoot" "$WORKSPACE_ROOT"
+require_value "checkpointCacheRoot" "$CHECKPOINT_CACHE_ROOT"
 require_value "sessionsDir" "$SESSIONS_DIR"
 require_value "platformConfigRoot" "$PLATFORM_CONFIG_ROOT"
 require_value "spaceStoragePvc" "$SPACE_STORAGE_PVC"
+require_value "checkpointCachePvc" "$CHECKPOINT_CACHE_PVC"
 require_value "workspaceSubpath" "$WORKSPACE_SUBPATH"
+require_value "checkpointCacheSubpath" "$CHECKPOINT_CACHE_SUBPATH"
 require_value "sessionsSubpath" "$SESSIONS_SUBPATH"
 require_value "configsSubpath" "$CONFIGS_SUBPATH"
 require_value "sessionsNamespace" "$SESSIONS_NAMESPACE"
@@ -89,6 +98,9 @@ require_value "TURN_OBJECT_S3_BUCKET" "$TURN_OBJECT_S3_BUCKET"
 require_value "TURN_OBJECT_S3_TIMEOUT_MS" "$TURN_OBJECT_S3_TIMEOUT_MS"
 require_value "TURN_OBJECT_S3_MAX_ATTEMPTS" "$TURN_OBJECT_S3_MAX_ATTEMPTS"
 require_value "TURN_OBJECT_CDN_BASE_URL" "$TURN_OBJECT_CDN_BASE_URL"
+require_value "PUBLIC_ASSET_CDN_BASE_URL" "$PUBLIC_ASSET_CDN_BASE_URL"
+require_value "CHAT_ATTACHMENT_PUBLIC_BASE_URL" "$CHAT_ATTACHMENT_PUBLIC_BASE_URL"
+require_value "PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS" "$PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS"
 require_value "replicas" "$REPLICAS"
 require_value "maxUnavailable" "$MAX_UNAVAILABLE"
 require_value "maxSurge" "$MAX_SURGE"
@@ -129,6 +141,7 @@ sed -i.bak \
   -e "s|{{ENV}}|${ENV}|g" \
   -e "s|{{LOG_LEVEL}}|${LOG_LEVEL:-info}|g" \
   -e "s|{{WORKSPACE_ROOT}}|${WORKSPACE_ROOT}|g" \
+  -e "s|{{CHECKPOINT_CACHE_ROOT}}|${CHECKPOINT_CACHE_ROOT}|g" \
   -e "s|{{SESSIONS_DIR}}|${SESSIONS_DIR}|g" \
   -e "s|{{SESSIONS_NAMESPACE}}|${SESSIONS_NAMESPACE}|g" \
   -e "s|{{AGENT_WORKER_CONCURRENCY}}|${AGENT_WORKER_CONCURRENCY}|g" \
@@ -140,8 +153,13 @@ sed -i.bak \
   -e "s|{{TURN_OBJECT_S3_TIMEOUT_MS}}|${TURN_OBJECT_S3_TIMEOUT_MS}|g" \
   -e "s|{{TURN_OBJECT_S3_MAX_ATTEMPTS}}|${TURN_OBJECT_S3_MAX_ATTEMPTS}|g" \
   -e "s|{{TURN_OBJECT_CDN_BASE_URL}}|${TURN_OBJECT_CDN_BASE_URL}|g" \
+  -e "s|{{PUBLIC_ASSET_CDN_BASE_URL}}|${PUBLIC_ASSET_CDN_BASE_URL}|g" \
+  -e "s|{{CHAT_ATTACHMENT_PUBLIC_BASE_URL}}|${CHAT_ATTACHMENT_PUBLIC_BASE_URL}|g" \
+  -e "s|{{PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS}}|${PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS}|g" \
   -e "s|{{SPACE_STORAGE_PVC}}|${SPACE_STORAGE_PVC}|g" \
+  -e "s|{{CHECKPOINT_CACHE_PVC}}|${CHECKPOINT_CACHE_PVC}|g" \
   -e "s|{{WORKSPACE_SUBPATH}}|${WORKSPACE_SUBPATH}|g" \
+  -e "s|{{CHECKPOINT_CACHE_SUBPATH}}|${CHECKPOINT_CACHE_SUBPATH}|g" \
   -e "s|{{SESSIONS_SUBPATH}}|${SESSIONS_SUBPATH}|g" \
   -e "s|{{CONFIGS_SUBPATH}}|${CONFIGS_SUBPATH}|g" \
   rendered/configmap.yaml rendered/deployment.yaml

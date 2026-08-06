@@ -1,7 +1,7 @@
 import { Redis } from "ioredis";
 import { config } from "./config.js";
 
-export const redisCommandClient = new Redis(config.redisUrl);
+export const redisCommandClient = new Redis(config.redisUrl, { disableClientInfo: true });
 
 export const isRedisReady = async () => {
   try {

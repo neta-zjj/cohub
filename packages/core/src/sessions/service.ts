@@ -7,7 +7,7 @@ import type { SessionTurnIntent } from "@cohub/protocol/model";
 import { sessionTurnSegments, sessionTurns, spaceSessions, spaces } from "@cohub/db";
 import { sanitizePostgresJsonValue } from "../content/sanitize.js";
 import { addSessionParticipantMeta, initializeSessionParticipantsMeta } from "./session-meta.js";
-import { submitSessionPrompt, type ExpandedPromptTemplate, type ExpandedSkillCommand, expandPromptContent, type SubmitSessionPromptHooks, type SubmitSessionPromptInput } from "./prompt.js";
+import { submitSessionPrompt, type ExpandedPromptTemplate, type ExpandedSkillCommand, expandPromptContent, type SubmitSessionPromptHooks, type SubmitSessionPromptInput, type SubmitSessionPromptOptions } from "./prompt.js";
 
 export type PromptTemplateService = {
   expand(text: string, options?: { userId?: string | null; spaceId?: string | null }): Promise<ExpandedPromptTemplate | null>;
@@ -87,6 +87,7 @@ export function createSessionServices(input: {
   promptTemplateService: PromptTemplateService;
   skillService?: SkillService;
   billingUsageGate?: BillingUsageGate;
+  validatePromptModel?: (input: { userId: string; provider: string; model: string }) => Promise<boolean>;
   sandboxRecovery?: {
     maybeRecoverForPrompt(input: {
       spaceId: string;
@@ -108,6 +109,7 @@ export function createSessionServices(input: {
   const injectTrace = input.injectTrace ?? (() => ({}));
   const getRequestId = input.getRequestId ?? (() => null);
   const logger = input.logger ?? console;
+  const skillService = input.skillService;
 
   async function ensureRootSessionTurnSegment(sessionId: string) {
     await input.db.insert(sessionTurnSegments).values({
@@ -296,18 +298,23 @@ export function createSessionServices(input: {
     });
   }
 
-  async function submitPrompt(promptInput: SubmitSessionPromptInput, hooks: SubmitSessionPromptHooks = {}) {
+  async function submitPrompt(
+    promptInput: SubmitSessionPromptInput,
+    hooks: SubmitSessionPromptHooks = {},
+    options: SubmitSessionPromptOptions = {},
+  ) {
     return submitSessionPrompt({
       randomUUID,
       expandPromptTemplate: ({ text, userId, spaceId }) => input.promptTemplateService.expand(text, { userId, spaceId }),
-      expandSkillCommand: input.skillService
-        ? ({ text, userId, spaceId }) => input.skillService!.expand(text, { userId, spaceId })
+      expandSkillCommand: skillService
+        ? ({ text, userId, spaceId }) => skillService.expand(text, { userId, spaceId })
         : undefined,
       createSessionTurn,
       enqueueSpacePrompt,
       failSessionTurn,
+      validatePromptModel: input.validatePromptModel,
       billingUsageGate: input.billingUsageGate,
-    }, promptInput, hooks);
+    }, promptInput, hooks, options);
   }
 
   async function expandSessionPromptContent(promptInput: {
@@ -317,8 +324,8 @@ export function createSessionServices(input: {
   }) {
     return expandPromptContent({
       expandPromptTemplate: ({ text, userId, spaceId }) => input.promptTemplateService.expand(text, { userId, spaceId }),
-      expandSkillCommand: input.skillService
-        ? ({ text, userId, spaceId }) => input.skillService!.expand(text, { userId, spaceId })
+      expandSkillCommand: skillService
+        ? ({ text, userId, spaceId }) => skillService.expand(text, { userId, spaceId })
         : undefined,
     }, promptInput);
   }

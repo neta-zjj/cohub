@@ -80,7 +80,14 @@ spec:
             - name: space-storage
               mountPath: /configs
               subPath: {{CONFIGS_SUBPATH}}
+            - name: checkpoint-cache
+              mountPath: {{CHECKPOINT_CACHE_ROOT}}
+              subPath: {{CHECKPOINT_CACHE_SUBPATH}}
+              readOnly: true
       volumes:
         - name: space-storage
           persistentVolumeClaim:
             claimName: {{SPACE_STORAGE_PVC}}
+        - name: checkpoint-cache
+          persistentVolumeClaim:
+            claimName: {{CHECKPOINT_CACHE_PVC}}

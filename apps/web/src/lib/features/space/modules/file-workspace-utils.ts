@@ -1,10 +1,21 @@
 import type { SpaceFsEntry, SpaceFsFileResponse } from "@neta-art/cohub";
-import { isTextFileResponse } from "$lib/space-file-text";
+import { isTextFileResponse, normalizeMime } from "$lib/space-file-text";
 import type { SpaceFsNode } from "$lib/space-fs";
 
 export const isMarkdownPath = (path: string) => /\.md$/i.test(path);
 
 export const isHtmlPath = (path: string) => /\.html?$/i.test(path);
+
+export const isPdfPath = (path: string) => /\.pdf$/i.test(path);
+
+export const isPdfFile = (
+	file: Pick<SpaceFsFileResponse, "path" | "mimeType"> | null | undefined,
+) =>
+	Boolean(
+		file &&
+			(normalizeMime(file.mimeType) === "application/pdf" ||
+				isPdfPath(file.path)),
+	);
 
 export const hasRenderedFilePreview = (file: SpaceFsFileResponse) =>
 	isTextFileResponse(file) &&

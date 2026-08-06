@@ -1,10 +1,10 @@
 <script lang="ts">
 import {
+	AtSign,
 	Bookmark,
 	Bot,
 	GitFork,
 	LayoutGrid,
-	MessageSquare,
 	SquareStack,
 } from "lucide-svelte";
 
@@ -13,32 +13,32 @@ const concepts = [
 	{
 		icon: SquareStack,
 		title: "Space",
-		body: "A live, isolated environment holding conversations, files, drafts, and outputs — where people and agents work together.",
+		body: "Where people and agents work together — chats, files, previews, and experiments in one place.",
 	},
 	{
 		icon: Bookmark,
 		title: "Checkpoint",
-		body: "An immutable snapshot saved from a Space. Preserve a meaningful moment; share, fork, or restore it later.",
+		body: "A saved snapshot of a Space. Share it, fork from it, or come back to it later.",
+	},
+	{
+		icon: AtSign,
+		title: "@space",
+		body: "The agent pulls another Space in as context for this turn. You stay put — not a hunt for a different agent.",
 	},
 	{
 		icon: GitFork,
 		title: "Fork",
-		body: "Branch a checkpoint into a brand-new Space, fully loaded with its files and state. Never start from zero.",
+		body: "Start a new Space from a Checkpoint, with its files and state already loaded.",
 	},
 	{
 		icon: LayoutGrid,
-		title: "Works",
-		body: "Publish files, a directory site, or a running port as a shareable Work — public on the web, no login needed.",
+		title: "Live Work",
+		body: "A public app from a file, site, or port that exposes Space capabilities. Visitors can authorize actions back to the Space.",
 	},
 	{
 		icon: Bot,
 		title: "Agent",
-		body: "The active collaborator inside a Space. It reasons, calls tools, edits files, and generates media alongside you.",
-	},
-	{
-		icon: MessageSquare,
-		title: "Channel",
-		body: "An external entry point — Discord, Telegram, Feishu, WeChat — connected straight to a Space, both ways.",
+		body: "Works inside the Space with you — tools, files, and media generation.",
 	},
 ];
 </script>

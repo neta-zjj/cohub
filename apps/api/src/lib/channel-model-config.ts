@@ -24,6 +24,7 @@ type SpaceRow = InferSelectModel<typeof spaces>;
 export type ChannelModelSelection = {
   provider: string;
   id: string;
+  thinkingLevel?: string | null;
 };
 
 export type ResolvedChannelModelSelection = ChannelModelSelection & {
@@ -71,7 +72,9 @@ export function normalizeChannelModelConfig(value: unknown): ChannelModelSelecti
   const record = value as Record<string, unknown>;
   const provider = typeof record.provider === "string" ? record.provider.trim() : "";
   const id = typeof record.id === "string" ? record.id.trim() : "";
-  return provider && id ? { provider, id } : null;
+  if (!provider || !id) return null;
+  const thinkingLevel = typeof record.thinkingLevel === "string" && record.thinkingLevel.trim() ? record.thinkingLevel.trim() : null;
+  return thinkingLevel ? { provider, id, thinkingLevel } : { provider, id };
 }
 
 export function getRecord(value: unknown): Record<string, unknown> | null {

@@ -147,7 +147,7 @@ func buildRuntime(
 	hostname string,
 	fsSink func(protocol.FSChangedPayload),
 	portsSink func(protocol.PortsChangedPayload),
-) (*ws.Server, func()) {
+) (*ws.Server, func(), func()) {
 	processManager := process.NewManager(logger)
 	dispatcher := rpc.NewDispatcher(cfg, processManager, logger)
 	server := ws.NewServer(cfg, dispatcher, processManager, reporter, state, hostname, logger)
@@ -160,6 +160,7 @@ func buildRuntime(
 	}
 
 	var closers []func()
+	requestFSResync := func() {}
 	if watcher, err := filewatch.Start(cfg.WorkspaceDir, logger, func(batch filewatch.Batch) {
 		fsSink(protocol.FSChangedPayload{
 			Seq:     batch.Seq,
@@ -169,6 +170,7 @@ func buildRuntime(
 	}); err != nil {
 		logger.Warn("file watcher disabled", slog.String("error", err.Error()))
 	} else {
+		requestFSResync = watcher.RequestResync
 		closers = append(closers, func() { watcher.Close() })
 		logger.Info("file watcher started", slog.String("workspaceDir", cfg.WorkspaceDir))
 	}
@@ -190,7 +192,7 @@ func buildRuntime(
 		for _, close := range closers {
 			close()
 		}
-	}
+	}, requestFSResync
 }
 
 func runCloud(logger *slog.Logger, cfg env.Config) {
@@ -199,8 +201,9 @@ func runCloud(logger *slog.Logger, cfg env.Config) {
 	hostname, _ := os.Hostname()
 	reporter := report.NewClient(cfg, hostname)
 
-	server, closeWatchers := buildRuntime(logger, cfg, state, reporter, hostname, nil, nil)
+	server, closeWatchers, _ := buildRuntime(logger, cfg, state, reporter, hostname, nil, nil)
 	defer closeWatchers()
+	server.SetFSResyncOnAttach(true)
 
 	initialMeta := map[string]interface{}{
 		"hostname":     hostname,
@@ -310,11 +313,13 @@ func runLocal(logger *slog.Logger, spaceID, root, relayURL string) {
 	// Create the relay client first so the runtime's watchers can publish
 	// fs.changed / ports.changed over the control channel (kept off data
 	// sessions to avoid double-publishing; the gateway republishes them).
+	requestFSResync := func() {}
 	client := relay.NewClient(relay.Options{
-		RelayURL: cfg.RelayURL,
-		Token:    cfg.RelayToken,
-		SpaceID:  cfg.SpaceID,
-		Logger:   logger,
+		RelayURL:     cfg.RelayURL,
+		Token:        cfg.RelayToken,
+		SpaceID:      cfg.SpaceID,
+		OnRegistered: func() { requestFSResync() },
+		Logger:       logger,
 	})
 
 	fsSink := func(payload protocol.FSChangedPayload) {
@@ -324,8 +329,9 @@ func runLocal(logger *slog.Logger, spaceID, root, relayURL string) {
 		client.PublishEvent("ports.changed", payload)
 	}
 
-	server, closeWatchers := buildRuntime(logger, cfg, state, nil, hostname, fsSink, portsSink)
+	server, closeWatchers, watcherResync := buildRuntime(logger, cfg, state, nil, hostname, fsSink, portsSink)
 	defer closeWatchers()
+	requestFSResync = watcherResync
 	client.SetServer(server)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

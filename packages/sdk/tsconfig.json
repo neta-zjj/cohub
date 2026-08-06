@@ -3,6 +3,7 @@
   "compilerOptions": {
     "noEmit": true,
     "ignoreDeprecations": "6.0",
+    "types": ["node"],
     "paths": {
       "@cohub/protocol": ["../protocol/src/index.ts"],
       "@cohub/protocol/core": ["../protocol/src/core/index.ts"],
@@ -14,7 +15,10 @@
       "@cohub/protocol/task": ["../protocol/src/task/index.ts"],
       "@cohub/protocol/fs": ["../protocol/src/fs/index.ts"],
       "@cohub/protocol/generation": ["../protocol/src/generation/index.ts"],
-      "@cohub/protocol/ports": ["../protocol/src/ports/index.ts"]
+      "@cohub/protocol/ports": ["../protocol/src/ports/index.ts"],
+      "@cohub/protocol/provenance": ["../protocol/src/provenance.ts"],
+      "@cohub/protocol/board-document": ["../protocol/src/board-document.ts"],
+      "@cohub/protocol/board-constants": ["../protocol/src/board-constants.ts"]
     }
   },
   "include": ["src"]

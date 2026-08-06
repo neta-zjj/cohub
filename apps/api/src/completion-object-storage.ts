@@ -54,6 +54,7 @@ export type CompletionArchiveRecord = {
   systemPrompt: string;
   request: {
     messages: unknown;
+    contextFallbacks?: unknown;
     temperature?: number | null;
     maxTokens?: number | null;
     thinkingLevel?: string | null;

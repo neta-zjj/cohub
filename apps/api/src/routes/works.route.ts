@@ -4,16 +4,36 @@ import { spaces, works, workVersions, workViewerGrants, userProfiles } from "@co
 import { createWorkAssetPublicUrl, deleteWorkAssetsByObjectKey, isConfiguredWorkAssetPublicUrl } from "../work-asset-storage.js";
 import { publishWorkAssetInWorker, type WorkPublishAssetJobResult } from "../work-publish-asset-queue.js";
 import type { Permission } from "@cohub/core/permissions";
+import { materializeHtmlPageMeta, mergeWorkPageMeta } from "@cohub/core/works";
 import { db } from "../db/index.js";
-import { authzDenied, getOptionalAuth, getSpacePublicProfile, requireValidId, useAuth } from "../lib/middleware.js";
+import {
+  authzDenied,
+  getOptionalAuth,
+  getSpacePublicProfile,
+  getWorkSessionPrincipal,
+  requireValidId,
+  useAuth,
+  type AuthUser,
+} from "../lib/middleware.js";
 import { hasPermission } from "../permissions.js";
 import { createWorkSessionToken, WORK_SESSION_TTL_SECONDS } from "../work-sessions.js";
 import { getSandboxPublicEndpoints } from "../sandbox-public-network.js";
+import type { WorkArtifactDescriptor, WorkContentKind } from "@cohub/protocol";
 import { SANDBOX_PUBLIC_PORTS } from "@cohub/protocol/ports";
+import type { RealtimeWorkRecord, RealtimeWorkVersionRecord } from "@cohub/protocol/realtime";
 import { createLogger } from "@cohub/infra/logging";
 import { billingOperations, COHUB_BILLING_FEATURES } from "@cohub/billing";
 import { featureGateResponse } from "../lib/feature-gate.js";
 import { createWorkPublicUrl } from "../lib/work-public-url.js";
+import { applyRequestSourceToMeta, getRequestSource } from "../lib/request-source.js";
+import { dispatchWorkVersionPublished } from "../work-events.js";
+import { ensureUserProfileByUuid } from "../user-profiles.js";
+import {
+  createWorkRoom,
+  createWorkRoomAdmission,
+  getWorkRoomByCode,
+  WorkRoomError,
+} from "../work-realtime-rooms.js";
 
 const logger = createLogger({ serviceName: "cohub-api" });
 const router = new Hono();
@@ -22,6 +42,9 @@ const WORK_STATUSES = new Set(["published", "disabled"]);
 const WORK_VISIBILITIES = new Set(["public", "space"]);
 const TARGET_TYPES = new Set(["file", "directory", "port"]);
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,78}[a-z0-9])?$/;
+/** Public work payloads are safe to edge/browser cache briefly. */
+const PUBLIC_WORK_HTTP_CACHE = "public, max-age=60, stale-while-revalidate=300";
+const PRIVATE_WORK_HTTP_CACHE = "private, no-store";
 const SANDBOX_PUBLIC_PORT_SET = new Set<number>(SANDBOX_PUBLIC_PORTS as readonly number[]);
 const ALLOWED_WORK_SCOPES = new Set<Permission>(["space.view", "session.view", "file.view", "taskrun.view"]);
 const ALLOWED_VIEWER_SCOPES = new Set<Permission>([
@@ -31,6 +54,8 @@ const ALLOWED_VIEWER_SCOPES = new Set<Permission>([
   "user.space.list",
   "user.session.list",
   "user.usage.read",
+  "neta.character.read",
+  "neta.character.favorite",
 ]);
 
 
@@ -84,21 +109,30 @@ const workHideCohubBarRequiredResponse = (c: Context) =>
     title: "Upgrade to hide the Cohub bar",
     conversionMessage: "Hiding the Cohub bar is available on Pro and Max.",
   });
-async function getMissingPublicWorkIdentity(spaceId: string) {
+async function getWorkPublicIdentity(spaceId: string) {
   const [row] = await db
-    .select({ spaceSlug: spaces.slug, ownerUsername: userProfiles.username })
+    .select({
+      ownerUserUuid: spaces.userUuid,
+      spaceSlug: spaces.slug,
+      ownerUsername: userProfiles.username,
+    })
     .from(spaces)
     .leftJoin(userProfiles, eq(userProfiles.userUuid, spaces.userUuid))
     .where(eq(spaces.id, spaceId))
     .limit(1);
   return {
+    ownerUserUuid: row?.ownerUserUuid ?? null,
     ownerUsername: row?.ownerUsername?.trim() || null,
     spaceSlug: row?.spaceSlug?.trim() || null,
   };
 }
 
-async function ensureWorkPublicIdentity(c: Context, spaceId: string) {
-  const identity = await getMissingPublicWorkIdentity(spaceId);
+async function ensureWorkPublicIdentity(c: Context, spaceId: string, actor: AuthUser) {
+  let identity = await getWorkPublicIdentity(spaceId);
+  if (!identity.ownerUsername && identity.ownerUserUuid) {
+    await ensureUserProfileByUuid(identity.ownerUserUuid, actor);
+    identity = await getWorkPublicIdentity(spaceId);
+  }
   const missingOwner = !identity.ownerUsername;
   const missingSpaceSlug = !identity.spaceSlug;
   if (!missingOwner && !missingSpaceSlug) return null;
@@ -138,14 +172,14 @@ const isAllowedWorkContentUrl = (url: string, kind: "asset" | "port") => {
   }
 };
 
-const serializeWork = (work: typeof works.$inferSelect) => ({
+const serializeWork = (work: typeof works.$inferSelect): RealtimeWorkRecord => ({
   id: work.id,
   spaceId: work.spaceId,
   userUuid: work.userUuid,
   slug: work.slug,
-  status: work.status,
-  visibility: work.visibility ?? "public",
-  targetType: work.targetType,
+  status: work.status as RealtimeWorkRecord["status"],
+  visibility: (work.visibility ?? "public") as RealtimeWorkRecord["visibility"],
+  targetType: work.targetType as RealtimeWorkRecord["targetType"],
   targetRef: work.targetRef,
   assetKey: work.assetKey,
   currentVersionId: work.currentVersionId,
@@ -153,19 +187,21 @@ const serializeWork = (work: typeof works.$inferSelect) => ({
   publishedAt: work.publishedAt?.toISOString() ?? null,
   workScopes: work.workScopes ?? [],
   allowedViewerScopes: work.allowedViewerScopes ?? [],
-  meta: work.meta ?? null,
+  meta: getWorkMeta(work.meta),
   createdAt: work.createdAt?.toISOString() ?? null,
   updatedAt: work.updatedAt?.toISOString() ?? null,
 });
 
-const serializeWorkVersion = (version: typeof workVersions.$inferSelect) => ({
+const serializeWorkVersion = (version: typeof workVersions.$inferSelect): RealtimeWorkVersionRecord => ({
   id: version.id,
   workId: version.workId,
   version: version.version,
-  targetType: version.targetType,
+  targetType: version.targetType as RealtimeWorkVersionRecord["targetType"],
   targetRef: version.targetRef,
   assetKey: version.assetKey,
-  meta: version.meta ?? null,
+  contentKind: version.contentKind as WorkContentKind,
+  artifact: isRecord(version.artifact) ? version.artifact as WorkArtifactDescriptor : null,
+  meta: getWorkMeta(version.meta),
   createdAt: version.createdAt?.toISOString() ?? null,
 });
 
@@ -180,12 +216,57 @@ class WorkAssetPublishError extends Error {
   }
 }
 
-async function writeWorkAsset(input: { spaceId: string; slug: string; targetType: string; targetRef: string; status: string }) {
+type WrittenWorkAsset = {
+  assetKey: string;
+  artifact: WorkArtifactDescriptor;
+  extracted: ReturnType<typeof materializeHtmlPageMeta> | null;
+};
+
+async function writeWorkAsset(input: {
+  spaceId: string;
+  slug: string;
+  targetType: string;
+  targetRef: string;
+  status: string;
+}): Promise<WrittenWorkAsset | null> {
   const { spaceId, slug, targetType, targetRef, status } = input;
   if (status !== "published" || (targetType !== "file" && targetType !== "directory")) return null;
   const result = await publishWorkAssetInWorker({ spaceId, slug, targetType, targetRef });
   if (!result.ok) throw new WorkAssetPublishError(result);
-  return result.assetKey;
+  const extracted = result.extracted
+    ? materializeHtmlPageMeta(
+        {
+          title: result.extracted.title,
+          description: result.extracted.description,
+          icon: result.extracted.icon,
+          image: result.extracted.image,
+          lang: result.extracted.lang ?? null,
+          themeColor: result.extracted.themeColor ?? null,
+          sourcePath: result.extracted.sourcePath,
+        },
+        result.assetKey,
+        createWorkAssetPublicUrl,
+      )
+    : null;
+  return {
+    assetKey: result.assetKey,
+    // An older worker returns no descriptor; every publish it can perform is an
+    // HTML page or site, so `web` reconstructs it faithfully.
+    artifact: result.artifact ?? {
+      kind: "web",
+      mimeType: "text/html",
+      sizeBytes: result.sizeBytes,
+      fileCount: result.fileCount ?? 1,
+    },
+    extracted,
+  };
+}
+
+function withPublishedPageMeta(input: {
+  baseMeta: WorkMeta | null | undefined;
+  extracted: WrittenWorkAsset["extracted"];
+}) {
+  return mergeWorkPageMeta(input.baseMeta, input.extracted ?? undefined);
 }
 
 function workAssetErrorResponse(c: Context, error: unknown, context: { spaceId: string; targetType: string; targetRef: string }) {
@@ -205,18 +286,52 @@ async function cleanupWorkAssets(assetKey: string | null | undefined, context: {
   }
 }
 
-const getWorkContent = (input: { spaceId: string; targetType: string; targetRef: string; assetKey: string | null }) => {
+const getWorkContent = (input: {
+  spaceId: string;
+  targetType: string;
+  targetRef: string;
+  assetKey: string | null;
+  contentKind: string;
+  artifact: Record<string, unknown> | null;
+}) => {
   if (input.targetType === "port") {
     const portRef = normalizePortRef(input.targetRef);
     if (!portRef) return null;
     const url = getSandboxPublicEndpoints(input.spaceId)[portRef]?.url;
     if (!url || !isAllowedWorkContentUrl(url, "port")) return null;
-    return { url, targetType: "port" as const, port: portRef };
+    return { kind: "port" as const, url, targetType: "port" as const, port: portRef };
   }
   if (!input.assetKey) return null;
   const url = createWorkAssetPublicUrl(input.assetKey);
   if (!isAllowedWorkContentUrl(url, "asset")) return null;
-  return { url, targetType: input.targetType, path: input.targetRef };
+  if (input.contentKind === "board" && input.artifact?.kind === "board") {
+    return {
+      kind: "board" as const,
+      url,
+      targetType: "file" as const,
+      path: input.targetRef,
+      boardId: String(input.artifact.boardId),
+      boardVersion: Number(input.artifact.boardVersion),
+    };
+  }
+  if (input.contentKind === "file" && input.artifact?.kind === "file") {
+    return {
+      kind: "file" as const,
+      url,
+      targetType: "file" as const,
+      path: input.targetRef,
+      name: String(input.artifact.name),
+      mimeType: typeof input.artifact.mimeType === "string" ? input.artifact.mimeType : null,
+      sizeBytes: Number(input.artifact.sizeBytes),
+      sha256: String(input.artifact.sha256),
+    };
+  }
+  return {
+    kind: "web" as const,
+    url,
+    targetType: input.targetType as "file" | "directory",
+    path: input.targetRef,
+  };
 };
 
 async function getPublishedWorkContent(work: typeof works.$inferSelect) {
@@ -228,6 +343,8 @@ async function getPublishedWorkContent(work: typeof works.$inferSelect) {
     targetType: version.targetType,
     targetRef: version.targetRef,
     assetKey: version.assetKey,
+    contentKind: version.contentKind,
+    artifact: version.artifact,
   });
 }
 
@@ -253,6 +370,11 @@ router.get("/by-slug/:username/:spaceSlug/:workSlug", async (c) => {
   if (!row.owner.username || !row.space.slug) return c.json({ message: "work public identity is incomplete" }, 409);
   if (requiresSpaceWorkAccess(row.work) && !(await hasPermission(user, "space.view", { spaceId: row.space.id }))) return authzDenied(c);
 
+  // Public works are anonymous-readable; space works depend on the caller.
+  c.header(
+    "Cache-Control",
+    requiresSpaceWorkAccess(row.work) ? PRIVATE_WORK_HTTP_CACHE : PUBLIC_WORK_HTTP_CACHE,
+  );
   return c.json({
     work: serializeWork(row.work),
     space: { id: row.space.id, slug: row.space.slug, name: row.space.name, userUuid: row.space.userUuid, publicProfile: getSpacePublicProfile(row.space) },
@@ -344,9 +466,6 @@ router.post("/", async (c) => {
   const targetType = typeof body?.targetType === "string" ? body.targetType : "";
   let targetRef = typeof body?.targetRef === "string" ? body.targetRef.trim() : "";
   if (!TARGET_TYPES.has(targetType) || !targetRef) return c.json({ message: "target is invalid" }, 400);
-  if (targetType === "file" && !/\.html?$/i.test(targetRef)) {
-    return c.json({ message: "only HTML files can be published as work" }, 400);
-  }
   if (targetType === "port") {
     const portRef = normalizePortRef(targetRef);
     if (!portRef) return c.json({ message: "port is invalid" }, 400);
@@ -360,10 +479,9 @@ router.post("/", async (c) => {
   }
   const status = typeof body?.status === "string" ? body.status : "published";
   const visibility = typeof body?.visibility === "string" ? body.visibility : "public";
-  const identityError = await ensureWorkPublicIdentity(c, spaceId);
+  const identityError = await ensureWorkPublicIdentity(c, spaceId, user);
   if (identityError) return identityError;
   const meta = getWorkMeta(body?.meta);
-  const versionMeta = getWorkMeta(body?.versionMeta);
   const presentationError = await ensureWorkPresentationAllowed(c, { userId: user.uuid, meta });
   if (presentationError) return presentationError;
   const now = new Date();
@@ -371,15 +489,21 @@ router.post("/", async (c) => {
   const [existingWork] = await db.select().from(works).where(and(eq(works.spaceId, spaceId), eq(works.slug, slug))).limit(1);
   if (existingWork) return c.json({ message: "slug already exists" }, 409);
 
-  let assetKey: string | null = null;
+  let written: WrittenWorkAsset | null = null;
   try {
-    assetKey = await writeWorkAsset({ spaceId, slug, targetType, targetRef, status });
+    written = await writeWorkAsset({ spaceId, slug, targetType, targetRef, status });
   } catch (error) {
     return workAssetErrorResponse(c, error, { spaceId, targetType, targetRef });
   }
+  const assetKey = written?.assetKey ?? null;
+  const pageMeta = withPublishedPageMeta({ baseMeta: meta, extracted: written?.extracted ?? null });
+  const versionMeta = withPublishedPageMeta({
+    baseMeta: applyRequestSourceToMeta(c, null),
+    extracted: written?.extracted ?? null,
+  });
 
   try {
-    const work = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const [createdWork] = await tx.insert(works).values({
         spaceId,
         userUuid: user.uuid,
@@ -393,31 +517,50 @@ router.post("/", async (c) => {
         publishedAt: status === "published" ? now : null,
         workScopes: normalizeScopes(body?.workScopes, ALLOWED_WORK_SCOPES),
         allowedViewerScopes: normalizeScopes(body?.allowedViewerScopes, ALLOWED_VIEWER_SCOPES),
-        meta,
+        meta: pageMeta,
       }).returning();
       if (!createdWork) return null;
-      if (status !== "published") return createdWork;
+      if (status !== "published") return { work: createdWork, version: null };
       const [version] = await tx.insert(workVersions).values({
         workId: createdWork.id,
         version: 1,
         targetType,
         targetRef,
         assetKey,
+        contentKind: written?.artifact.kind ?? "web",
+        artifact: written?.artifact ?? null,
         meta: versionMeta,
         createdAt: now,
       }).returning();
       if (!version) throw new Error("failed to create work version");
       const [updatedWork] = await tx.update(works).set({ currentVersionId: version.id }).where(eq(works.id, createdWork.id)).returning();
-      return updatedWork ?? createdWork;
+      return { work: updatedWork ?? createdWork, version };
     }).catch((error: unknown) => {
       if (isWorkSlugConflict(error)) return null;
       throw error;
     });
-    if (!work) {
+    if (!result) {
       await cleanupWorkAssets(assetKey, { workId: "new", spaceId, reason: "create_slug_conflict" });
       return c.json({ message: "slug already exists" }, 409);
     }
-    return c.json({ work: serializeWork(work) }, 201);
+    const serializedWork = serializeWork(result.work);
+    if (result.version) {
+      const serializedVersion = serializeWorkVersion(result.version);
+      await dispatchWorkVersionPublished({
+        work: serializedWork,
+        version: serializedVersion,
+        previousVersionId: null,
+        actorUserId: user.uuid,
+        source: getRequestSource(c),
+      }).catch((error) => {
+        logger.warn("[works] failed to dispatch work.version.published", {
+          workId: result.work.id,
+          version: result.version?.version,
+          error,
+        });
+      });
+    }
+    return c.json({ work: serializedWork }, 201);
   } catch (error) {
     await cleanupWorkAssets(assetKey, { workId: "new", spaceId, reason: "create_failed" });
     throw error;
@@ -428,7 +571,7 @@ async function updateWork(
   c: Context,
   current: typeof works.$inferSelect,
   body: Record<string, unknown> | null,
-  actorUserId: string,
+  actor: AuthUser,
 ) {
   const nextSlug = typeof body?.slug === "string" ? body.slug.trim().toLowerCase() : current.slug;
   if (!SLUG_RE.test(nextSlug)) return c.json({ message: "slug must use lowercase letters, numbers, hyphens, or underscores" }, 400);
@@ -439,9 +582,6 @@ async function updateWork(
   const nextTargetType = typeof body?.targetType === "string" ? body.targetType : current.targetType;
   let nextTargetRef = typeof body?.targetRef === "string" ? body.targetRef.trim() : current.targetRef;
   if (!TARGET_TYPES.has(nextTargetType) || !nextTargetRef) return c.json({ message: "target is invalid" }, 400);
-  if (nextTargetType === "file" && !/\.html?$/i.test(nextTargetRef)) {
-    return c.json({ message: "only HTML files can be published as work" }, 400);
-  }
   if (nextTargetType === "port") {
     const portRef = normalizePortRef(nextTargetRef);
     if (!portRef) return c.json({ message: "port is invalid" }, 400);
@@ -458,10 +598,10 @@ async function updateWork(
     return c.json({ message: "publish a version to publish this work" }, 409);
   }
   const nextVisibility = typeof body?.visibility === "string" ? body.visibility : (current.visibility ?? "public");
-  const identityError = await ensureWorkPublicIdentity(c, current.spaceId);
+  const identityError = await ensureWorkPublicIdentity(c, current.spaceId, actor);
   if (identityError) return identityError;
   const nextMeta = "meta" in (body ?? {}) ? getWorkMeta(body?.meta) : getWorkMeta(current.meta);
-  const presentationError = await ensureWorkPresentationAllowed(c, { userId: actorUserId, meta: nextMeta });
+  const presentationError = await ensureWorkPresentationAllowed(c, { userId: actor.uuid, meta: nextMeta });
   if (presentationError) return presentationError;
 
   const assetKey = nextStatus === "published" ? current.assetKey : null;
@@ -495,13 +635,13 @@ async function updateWork(
 async function publishWorkVersion(
   c: Context,
   current: typeof works.$inferSelect,
-  options?: { meta?: WorkMeta | null },
+  options: { actor: AuthUser; meta?: WorkMeta | null },
 ) {
-  const identityError = await ensureWorkPublicIdentity(c, current.spaceId);
+  const identityError = await ensureWorkPublicIdentity(c, current.spaceId, options.actor);
   if (identityError) return identityError;
-  let assetKey: string | null = null;
+  let written: WrittenWorkAsset | null = null;
   try {
-    assetKey = await writeWorkAsset({
+    written = await writeWorkAsset({
       spaceId: current.spaceId,
       slug: current.slug,
       targetType: current.targetType,
@@ -511,6 +651,15 @@ async function publishWorkVersion(
   } catch (error) {
     return workAssetErrorResponse(c, error, { spaceId: current.spaceId, targetType: current.targetType, targetRef: current.targetRef });
   }
+  const assetKey = written?.assetKey ?? null;
+  const versionMeta = withPublishedPageMeta({
+    baseMeta: options?.meta ?? null,
+    extracted: written?.extracted ?? null,
+  });
+  const workMeta = withPublishedPageMeta({
+    baseMeta: getWorkMeta(current.meta),
+    extracted: written?.extracted ?? null,
+  });
 
   try {
     const result = await db.transaction(async (tx) => {
@@ -518,7 +667,10 @@ async function publishWorkVersion(
       const [versionedWork] = await tx.update(works).set({
         latestVersion: sql`${works.latestVersion} + 1`,
         updatedAt: now,
-      }).where(eq(works.id, current.id)).returning({ latestVersion: works.latestVersion });
+      }).where(eq(works.id, current.id)).returning({
+        latestVersion: works.latestVersion,
+        previousVersionId: works.currentVersionId,
+      });
       if (!versionedWork) throw new Error("failed to reserve work version");
       const [version] = await tx.insert(workVersions).values({
         workId: current.id,
@@ -526,7 +678,9 @@ async function publishWorkVersion(
         targetType: current.targetType,
         targetRef: current.targetRef,
         assetKey,
-        meta: options?.meta ?? null,
+        contentKind: written?.artifact.kind ?? "web",
+        artifact: written?.artifact ?? null,
+        meta: versionMeta,
         createdAt: now,
       }).returning();
       if (!version) throw new Error("failed to create work version");
@@ -536,12 +690,28 @@ async function publishWorkVersion(
         currentVersionId: version.id,
         latestVersion: versionedWork.latestVersion,
         publishedAt: current.publishedAt ?? now,
+        meta: workMeta,
         updatedAt: now,
       }).where(eq(works.id, current.id)).returning();
       if (!work) throw new Error("failed to publish work version");
-      return { work, version };
+      return { work, version, previousVersionId: versionedWork.previousVersionId };
     });
-    return c.json({ work: serializeWork(result.work), version: serializeWorkVersion(result.version) });
+    const serializedWork = serializeWork(result.work);
+    const serializedVersion = serializeWorkVersion(result.version);
+    await dispatchWorkVersionPublished({
+      work: serializedWork,
+      version: serializedVersion,
+      previousVersionId: result.previousVersionId,
+      actorUserId: options.actor.uuid,
+      source: getRequestSource(c),
+    }).catch((error) => {
+      logger.warn("[works] failed to dispatch work.version.published", {
+        workId: result.work.id,
+        version: result.version.version,
+        error,
+      });
+    });
+    return c.json({ work: serializedWork, version: serializedVersion });
   } catch (error) {
     try {
       await cleanupWorkAssets(assetKey, { workId: current.id, spaceId: current.spaceId, reason: "publish_failed" });
@@ -562,7 +732,7 @@ router.patch("/:id", async (c) => {
   if (!(await hasPermission(user, "space.edit", { spaceId: current.spaceId }))) return authzDenied(c);
 
   const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
-  return updateWork(c, current, body, user.uuid);
+  return updateWork(c, current, body, user);
 });
 
 router.get("/:id/versions", async (c) => {
@@ -585,9 +755,8 @@ router.post("/:id/versions", async (c) => {
   const work = await getWorkById(id);
   if (!work) return c.json({ message: "work not found" }, 404);
   if (!(await hasPermission(user, "space.edit", { spaceId: work.spaceId }))) return authzDenied(c);
-  const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
-  const meta = body && "meta" in body ? getWorkMeta(body.meta) : null;
-  return publishWorkVersion(c, work, { meta });
+  const meta = applyRequestSourceToMeta(c, null);
+  return publishWorkVersion(c, work, { actor: user, meta });
 });
 
 router.delete("/:id", async (c) => {
@@ -604,6 +773,69 @@ router.delete("/:id", async (c) => {
     await tx.delete(works).where(eq(works.id, work.id));
   });
   return c.json({ ok: true });
+});
+
+const workRoomErrorResponse = (c: Context, error: unknown) => {
+  if (!(error instanceof WorkRoomError)) return c.json({ message: "failed to create realtime room" }, 503);
+  if (error.code === "ROOM_QUOTA_EXCEEDED") return c.json({ code: error.code, message: error.message }, 429);
+  const status = error.code === "ROOM_CODE_TAKEN" ? 409 : 400;
+  return c.json({ code: error.code, message: error.message }, status);
+};
+
+const getPublishedWorkForRoom = async (c: Context, workId: string) => {
+  const principal = getWorkSessionPrincipal(c);
+  if (!principal || principal.workId !== workId) return null;
+  const work = await getWorkById(workId);
+  if (work?.status !== "published" || work.spaceId !== principal.spaceId) return null;
+  return { principal, work };
+};
+
+router.post("/:id/realtime/rooms", async (c) => {
+  const id = c.req.param("id");
+  if (!requireValidId(id)) return c.json({ message: "work not found" }, 404);
+  const context = await getPublishedWorkForRoom(c, id);
+  if (!context) return authzDenied(c);
+  const body = await c.req.json().catch(() => null) as {
+    code?: unknown;
+    expiresInSeconds?: unknown;
+    maxParticipants?: unknown;
+    seatPerUser?: unknown;
+  } | null;
+  try {
+    const room = await createWorkRoom({
+      workId: id,
+      code: body?.code,
+      expiresInSeconds: body?.expiresInSeconds,
+      maxParticipants: body?.maxParticipants,
+      seatPerUser: body?.seatPerUser,
+    });
+    return c.json(createWorkRoomAdmission({
+      workId: id,
+      userUuid: context.principal.userUuid,
+      room,
+    }));
+  } catch (error) {
+    return workRoomErrorResponse(c, error);
+  }
+});
+
+router.post("/:id/realtime/rooms/join", async (c) => {
+  const id = c.req.param("id");
+  if (!requireValidId(id)) return c.json({ message: "work not found" }, 404);
+  const context = await getPublishedWorkForRoom(c, id);
+  if (!context) return authzDenied(c);
+  const body = await c.req.json().catch(() => null) as { code?: unknown } | null;
+  const room = await getWorkRoomByCode(id, body?.code);
+  if (!room || room.workId !== id) return c.json({ code: "ROOM_NOT_FOUND", message: "room not found" }, 404);
+  try {
+    return c.json(createWorkRoomAdmission({
+      workId: id,
+      userUuid: context.principal.userUuid,
+      room,
+    }));
+  } catch (error) {
+    return workRoomErrorResponse(c, error);
+  }
 });
 
 router.post("/:id/session", async (c) => {

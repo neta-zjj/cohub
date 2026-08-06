@@ -6,8 +6,7 @@
     <title>Cohub</title>
     <meta name="application-name" content="Cohub" />
     <meta name="apple-mobile-web-app-title" content="Cohub" />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/pwa/icon-192x192.png" />
+    <!-- Favicons are set per-route (Work pages use Work icons; others use shell defaults). -->
     <script>
       (() => {
         var segments = location.pathname.split('/').filter(Boolean);
@@ -27,7 +26,7 @@
           light: '#F8F8FA',
           'solarized-dark': '#002B36',
           'solarized-light': '#FDF6E3',
-          'neta-studio': '#131216'
+          'neta-studio': '#1A191A'
         };
         var stored = localStorage.getItem('cohub-theme');
         var resolved;

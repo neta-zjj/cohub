@@ -233,6 +233,30 @@ function resolveTurnFooterPhase(streaming: {
 	return null;
 }
 
+/**
+ * Resolve the `createdAt` for the live streaming preview.
+ *
+ * The timeline is rebuilt on every stream chunk, so stamping the preview with
+ * `new Date()` at render time makes its displayed time keep advancing with the
+ * client clock even when the stream has stalled. Prefer the server-side emit
+ * time of the latest chunk: it advances with the stream yet freezes between
+ * chunks, reflecting when the agent last produced content. Fall back to the
+ * generation start time, then render time as a last resort.
+ */
+function resolveStreamingPreviewCreatedAt(
+	streaming:
+		| { lastPatchAt?: number | null; startedAt?: number | null }
+		| null
+		| undefined,
+	fallback: string,
+): string {
+	const time = streaming?.lastPatchAt ?? streaming?.startedAt;
+	if (typeof time === "number" && Number.isFinite(time)) {
+		return new Date(time).toISOString();
+	}
+	return fallback;
+}
+
 export function buildTurnTimelineItems(input: {
 	sessionId: string | null;
 	turns: SessionTurnRecord[];
@@ -249,6 +273,8 @@ export function buildTurnTimelineItems(input: {
 		runtimeProvider?: string | null;
 		runtimeModel?: string | null;
 		finalizedPreview?: boolean;
+		lastPatchAt?: number | null;
+		startedAt?: number | null;
 	} | null;
 }): TimelineItem[] {
 	const renderCreatedAt = new Date().toISOString();
@@ -442,7 +468,10 @@ export function buildTurnTimelineItems(input: {
 					text:
 						effectiveBlocks.find((block) => block.type === "text")?.text ?? "",
 					sequence: fallbackSequence + 1,
-					createdAt: renderCreatedAt,
+					createdAt: resolveStreamingPreviewCreatedAt(
+						input.streaming,
+						renderCreatedAt,
+					),
 					meta: { messageKind: "assistant_streaming_preview" },
 				},
 			});

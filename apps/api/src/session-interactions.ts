@@ -24,6 +24,7 @@ export type ResolvedInboundInteraction = {
   clientMessageId: string;
   model?: string;
   provider?: string;
+  thinkingLevel?: string | null;
   inboundRef?: SessionInteractionInboundRef | null;
 };
 
@@ -56,6 +57,7 @@ export const executeSessionInteraction = async (input: ResolvedInboundInteractio
     source: input.source,
     model: input.model ?? null,
     provider: input.provider ?? null,
+    thinkingLevel: input.thinkingLevel ?? null,
     context,
   }, {
     beforeEnqueue: async ({ turnId, userMessageId }) => {

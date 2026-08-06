@@ -12,6 +12,8 @@ import { getSessionDomainServices } from "../session-services.js";
 import { createLogger } from "@cohub/infra/logging";
 import { db } from "../db.js";
 import { dispatchLabelAssignmentsUpdated } from "../label-events.js";
+import { UnrecoverableError } from "bullmq";
+import { validatePromptModel } from "../models.js";
 
 const MAX_TASK_SOURCE_LENGTH = 255;
 
@@ -39,13 +41,14 @@ function sanitizeTaskPromptAuth(auth: PromptAuthContext | null | undefined, inpu
 const sendMessageHandler = async (job: import("bullmq").Job, context?: { taskRunId: string }) => {
   const payload = job.data as TaskPayload;
   const spaceId = payload.spaceId;
-  const { content, sessionId, title, source: payloadSource, model, provider, clientMessageId, generationPolicy, accessMode, intent, labelIds, auth, env } = (payload.data ?? {}) as {
+  const { content, sessionId, title, source: payloadSource, model, provider, thinkingLevel, clientMessageId, generationPolicy, accessMode, intent, labelIds, auth, env } = (payload.data ?? {}) as {
     content?: ContentBlock[];
     sessionId?: string;
     title?: string;
     source?: unknown;
     model?: string;
     provider?: string;
+    thinkingLevel?: string | null;
     clientMessageId?: string;
     generationPolicy?: GenerationPolicy | null;
     accessMode?: PromptAccessMode | null;
@@ -65,6 +68,11 @@ const sendMessageHandler = async (job: import("bullmq").Job, context?: { taskRun
   if (!taskRunId) throw new Error("taskRunId is required for send_message task");
 
   const promptEnv = parsePromptEnv(env);
+  const modelId = model?.trim();
+  const providerId = provider?.trim() || "cohub";
+  if (modelId && !(await validatePromptModel({ userId, provider: providerId, model: modelId }))) {
+    throw new UnrecoverableError(`Requested model is not available: ${providerId}/${modelId}`);
+  }
   const source = normalizeTaskSource(payloadSource);
   const targetSessionId = sessionId?.trim() || null;
   const createdSession = targetSessionId ? null : await sessionPromptService.registerCronjobSession(spaceId, { source, title: title ?? null, userUuid: userId });
@@ -94,6 +102,7 @@ const sendMessageHandler = async (job: import("bullmq").Job, context?: { taskRun
     source,
     model: model ?? null,
     provider: provider ?? null,
+    thinkingLevel: thinkingLevel ?? null,
     generationPolicy: generationPolicy ?? null,
     accessMode: accessMode ?? "full_access",
     env: promptEnv,

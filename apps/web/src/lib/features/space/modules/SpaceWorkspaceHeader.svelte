@@ -82,28 +82,16 @@ export type SpaceWorkspaceHeaderActions = {
 	labelHeaderResource: (anchorEl?: HTMLElement | null) => void | Promise<void>;
 	insertHeaderReference: () => void;
 	toggleRightSidebar: () => void | Promise<void>;
-	exitImmersivePreview?: () => void | Promise<void>;
 };
-
-type HeaderPresentation = "default" | "immersive";
 
 type Props = {
 	context: SpaceWorkspaceHeaderContext;
 	sessionRename: SessionRenameState;
 	resourceActions: ResourceActionState;
 	actions: SpaceWorkspaceHeaderActions;
-	presentation?: HeaderPresentation;
 };
 
-let {
-	context,
-	sessionRename,
-	resourceActions,
-	actions,
-	presentation = "default",
-}: Props = $props();
-
-const immersive = $derived(presentation === "immersive");
+let { context, sessionRename, resourceActions, actions }: Props = $props();
 let sessionRenameInputEl: HTMLInputElement | null = $state(null);
 let resourceActionsRootEl: HTMLElement | null = $state(null);
 let sessionRenameFocused = $state(false);
@@ -240,7 +228,7 @@ function handleSessionRenameKeydown(event: KeyboardEvent) {
 			type="button"
 			class="header-action-btn"
 			onclick={() => runAction(actions.toggleRightSidebar)}
-			title={context.rightSidebarCollapsed ? "Show files" : "Hide files"}
+			title={context.rightSidebarCollapsed ? "Show files (Ctrl+Alt+→ / ⌃⌥→)" : "Hide files (Ctrl+Alt+→ / ⌃⌥→)"}
 			aria-label={context.rightSidebarCollapsed ? "Show files" : "Hide files"}
 		>
 			{#if context.rightSidebarCollapsed}
@@ -252,8 +240,7 @@ function handleSessionRenameKeydown(event: KeyboardEvent) {
 	{/if}
 {/snippet}
 
-{#if !immersive}
-	<ColumnHeader>
+<ColumnHeader>
 		{#snippet left()}
 			<div class="flex min-w-0 items-center gap-1.5 overflow-hidden">
 				<button
@@ -330,7 +317,6 @@ function handleSessionRenameKeydown(event: KeyboardEvent) {
 			{@render HeaderActions()}
 		{/snippet}
 	</ColumnHeader>
-{/if}
 
 <style>
 

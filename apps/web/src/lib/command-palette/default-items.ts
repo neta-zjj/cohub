@@ -109,6 +109,7 @@ function spaceToDefaultItem(
 		updatedAt,
 		source: "default",
 		localScore: score.score,
+		isPinned: space.isPinned ?? false,
 		typePriorityScore: currentSpaceId === space.id ? 0.93 : 0.88,
 		...score,
 	};

@@ -43,5 +43,3 @@ assert.deepEqual(
   }),
   { action: "none", reason: "not_due" },
 );
-
-console.log("idle-check-reschedule.test.ts: ok");

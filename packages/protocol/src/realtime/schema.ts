@@ -1,10 +1,12 @@
 import { z } from "zod";
 import type { ContentBlock } from "../core/content.js";
 import type { RealtimeCompactFrame, RealtimeEnvelope, RealtimeRoom } from "./types.js";
+import { REALTIME_ROOM_EVENT_NAME_PATTERN } from "./types.js";
+import { BoardAwarenessClientPayloadSchema } from "./board-awareness.js";
 export type * from "./types.js";
 
 const contentBlockMetaSchema = z.record(z.string(), z.unknown());
-const realtimeRoomSchema = z.string().regex(/^(space|user):[^:]+$/);
+const realtimeRoomSchema = z.string().regex(/^(space|user|board|room):[^:]+$/);
 
 export const contentBlockSchema = z.discriminatedUnion("type", [
   z.object({
@@ -87,19 +89,7 @@ export const wsClientEventSchema = z.discriminatedUnion("type", [
       content: z.array(contentBlockSchema).min(1),
       model: z.string().optional(),
       provider: z.string().optional(),
-    }),
-  }),
-  z.object({
-    type: z.literal("canvas.tx"),
-    requestId: z.string().optional(),
-    payload: z.object({
-      spaceId: z.string().uuid(),
-      documentId: z.string().min(1),
-      txId: z.string().min(1),
-      baseVersion: z.number().nullable().optional(),
-      clientId: z.string().nullable().optional(),
-      undoGroupId: z.string().nullable().optional(),
-      ops: z.array(z.record(z.string(), z.unknown())).min(1),
+      thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     }),
   }),
   z.object({
@@ -108,6 +98,39 @@ export const wsClientEventSchema = z.discriminatedUnion("type", [
     payload: z.object({
       spaceId: z.string().uuid(),
       meta: z.record(z.string(), z.unknown()).nullable().optional(),
+    }),
+  }),
+  z.object({
+    type: z.literal("board.awareness.update"),
+    requestId: z.string().optional(),
+    payload: BoardAwarenessClientPayloadSchema,
+  }),
+  z.object({
+    type: z.literal("realtime.room.join"),
+    requestId: z.string().optional(),
+    payload: z.object({ roomId: z.string().uuid(), ticket: z.string().min(1) }),
+  }),
+  z.object({
+    type: z.literal("realtime.room.publish"),
+    requestId: z.string().optional(),
+    payload: z.object({
+      roomId: z.string().uuid(),
+      event: z.string().regex(REALTIME_ROOM_EVENT_NAME_PATTERN),
+      data: z.unknown(),
+      clientEventId: z.string().max(128).optional(),
+    }),
+  }),
+  z.object({
+    type: z.literal("realtime.room.leave"),
+    requestId: z.string().optional(),
+    payload: z.object({ roomId: z.string().uuid() }),
+  }),
+  z.object({
+    type: z.literal("realtime.room.presence.update"),
+    requestId: z.string().optional(),
+    payload: z.object({
+      roomId: z.string().uuid(),
+      presence: z.record(z.string(), z.unknown()).nullable(),
     }),
   }),
   z.object({
@@ -125,7 +148,7 @@ export const wsClientEventSchema = z.discriminatedUnion("type", [
 export const realtimeEnvelopeSchema = z.object({
   id: z.string(),
   timestamp: z.number(),
-  domain: z.enum(["system", "session", "space", "label"]),
+  domain: z.enum(["system", "session", "space", "label", "room"]),
   type: z.string(),
   requestId: z.string().nullable().optional(),
   spaceId: z.string().nullable().optional(),

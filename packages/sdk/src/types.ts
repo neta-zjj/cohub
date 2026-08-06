@@ -5,7 +5,14 @@ import type {
   SessionTurnIndexItem,
   SessionTurnRecord,
   SessionTurnSegmentRecord,
+  SpaceTurnAuthorFilter as ProtocolSpaceTurnAuthorFilter,
+  SpaceTurnListItem as ProtocolSpaceTurnListItem,
+  SpaceTurnsResponse as ProtocolSpaceTurnsResponse,
 } from "@cohub/protocol/model";
+import type {
+  ModelStatusEntry,
+  ModelStatusResponse,
+} from "@cohub/protocol/model/status";
 import type {
   ChannelConfig,
   ChannelHealth,
@@ -26,6 +33,35 @@ import type {
   PublicGenerationDeclaration,
 } from "@cohub/protocol/generation";
 import type { MessageRecord } from "@cohub/protocol/model";
+import type { ModelThinkingLevel } from "@cohub/protocol";
+
+export type {
+  BoardAssetRef,
+  BoardBootstrap,
+  BoardCapabilities,
+  BoardCapability,
+  BoardClip,
+  BoardCreateInput,
+  BoardDeleteReason,
+  BoardDiagnostic,
+  BoardEffect,
+  BoardInspectInput,
+  BoardKeyframe,
+  BoardManifest,
+  BoardNodeInput,
+  BoardNodeRecord,
+  BoardOperation,
+  BoardPlaybackCommand,
+  BoardPlaybackPolicy,
+  BoardPlaybackSnapshot,
+  BoardRecord,
+  BoardRenderCost,
+  BoardSequence,
+  BoardTarget,
+  BoardTransaction,
+  BoardValidationResult,
+  SpaceStartupResponse,
+} from "@cohub/protocol";
 
 export type {
   ChannelConfig,
@@ -35,6 +71,10 @@ export type {
   DiscordChannelConfig,
   FeishuChannelConfig,
 } from "@cohub/protocol/gateway/types";
+
+export type SpaceTurnAuthorFilter = ProtocolSpaceTurnAuthorFilter;
+export type SpaceTurnListItem = ProtocolSpaceTurnListItem;
+export type SpaceTurnsResponse = ProtocolSpaceTurnsResponse;
 
 export type ApiError = {
   message: string;
@@ -76,6 +116,8 @@ export type PublicUserWorkItem = {
   id: string;
   slug: string;
   title: string;
+  description?: string | null;
+  icon?: string | null;
   spaceSlug: string;
   spaceName: string;
   publicUrl: string;
@@ -276,6 +318,11 @@ export type SpaceCommerceProduct = {
     validity: string | null;
     creditBenefits: SpaceCommerceProductCreditBenefit[];
   };
+  cohubBalance: {
+    amountUsd: number;
+    amountMinor: number;
+    policyVersion: string;
+  } | null;
   isDefaultPlan: boolean;
 };
 
@@ -491,6 +538,8 @@ export type {
   GenerationUsageBilling,
   ListGenerationModelsResponse,
   PublicGenerationDeclaration,
+  ModelStatusEntry,
+  ModelStatusResponse,
 };
 
 export type SpaceFsEntry = {
@@ -543,14 +592,34 @@ export type SpaceFsWriteFileInput = {
   path: string;
   content: string;
   encoding: SpaceFsEncoding;
+  expected?: {
+    mtimeMs: number;
+    size: number;
+  };
+  mutationId?: string;
 };
-export type SpaceFsMoveInput = { fromPath: string; toPath: string };
+export type SpaceFsMoveInput = {
+  fromPath: string;
+  toPath: string;
+  mutationId?: string;
+};
+export type SpaceFsCreateDirectoryInput = {
+  path: string;
+  mutationId?: string;
+};
+export type SpaceFsDeleteNodeInput = {
+  path: string;
+  recursive?: boolean;
+  mutationId?: string;
+};
 export type SpaceFsUploadEntry = {
   path: string;
   name: string;
   size: number;
   mimeType: string | null;
   mtimeMs: number;
+  /** Whether this upload created the file rather than replacing it. */
+  created?: boolean;
 };
 export type SpaceFsUploadError = {
   name: string;
@@ -560,6 +629,8 @@ export type SpaceFsUploadError = {
 export type SpaceFsUploadResponse = {
   uploaded: SpaceFsUploadEntry[];
   errors: SpaceFsUploadError[];
+  /** Workspace-relative directories created while materializing the upload. */
+  createdDirs?: string[];
 };
 export type SpaceFsUploadPlanEntryInput = {
   id: string;
@@ -692,6 +763,8 @@ export type SpaceRecord = {
   access?: SpaceAccess;
   accessLevel?: "minimal";
   ownerProfile?: Pick<UserProfile, "userUuid" | "username" | "displayName" | "avatarUrl"> | null;
+  /** Whether the viewer has pinned this space (only present in list responses). */
+  isPinned?: boolean;
 };
 
 export type SpaceBootstrapSource =
@@ -740,70 +813,6 @@ export type SpaceConfigUpdateResponse = {
     skipped?: boolean;
     message?: string;
   };
-};
-
-export type CanvasDocumentRecord = {
-  id: string;
-  spaceId: string;
-  filePath: string;
-  title: string;
-  version: number;
-  meta?: Record<string, unknown> | null;
-  createdAt: string | null;
-  updatedAt: string | null;
-  deletedAt?: string | null;
-};
-
-export type CanvasNodeRecord = {
-  documentId: string;
-  nodeId: string;
-  type: string;
-  parentId?: string | null;
-  orderKey?: string | null;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
-  refKind?: string | null;
-  refPath?: string | null;
-  refUrl?: string | null;
-  view: Record<string, unknown>;
-  style: Record<string, unknown>;
-  animation: Record<string, unknown>;
-  data: Record<string, unknown>;
-  version: number;
-  createdAt: string | null;
-  updatedAt: string | null;
-  deletedAt?: string | null;
-};
-
-export type CanvasNodeInput = Omit<CanvasNodeRecord, "documentId" | "version" | "createdAt" | "updatedAt" | "deletedAt">;
-
-export type CanvasSemanticOp = {
-  opId?: string;
-  type: "node.create" | "node.patch" | "node.delete";
-  payload: Record<string, unknown>;
-  inverse?: Record<string, unknown>;
-};
-
-export type CanvasTransactionInput = {
-  txId: string;
-  baseVersion?: number | null;
-  clientId?: string | null;
-  undoGroupId?: string | null;
-  ops: CanvasSemanticOp[];
-};
-
-export type CanvasCreateInput = {
-  path: string;
-  title?: string;
-  nodes?: CanvasNodeInput[];
-};
-
-export type CanvasBootstrapResponse = {
-  document: CanvasDocumentRecord;
-  nodes: CanvasNodeRecord[];
 };
 
 export type SpaceCreateResponse = {
@@ -928,10 +937,17 @@ export type PromptTemplateCatalogResponse = {
   prompts: PromptTemplateCatalogEntry[];
 };
 
+export type SkillCatalogSource = {
+  type: "mod";
+  modSpaceId: string;
+  mountSlug: string;
+};
+
 export type SkillCatalogEntry = {
   name: string;
   description: string;
   scope: "platform" | "mod" | "user" | "project";
+  source?: SkillCatalogSource;
 };
 
 export type SkillCatalogResponse = {
@@ -1003,6 +1019,7 @@ export type GlobalSearchResponse = {
 
 export type CreateSpaceSessionInput = {
   title?: string | null;
+  /** Optional channel; falls back to X-Cohub-Source-Via. */
   source?: string | null;
   labelRefs?: string[];
 };
@@ -1044,10 +1061,13 @@ export type PromptAccessMode = "read_only" | "full_access";
 export type CreateSpacePromptInput = {
   sessionId?: string | null;
   title?: string | null;
+  /** Optional channel; falls back to X-Cohub-Source-Via. */
   source?: string | null;
   content: ContentBlock[];
   model?: string | null;
   provider?: string | null;
+  /** Optional thinking level override for this turn. Omit to inherit session default. */
+  thinkingLevel?: ModelThinkingLevel | null;
   clientMessageId?: string | null;
   generationPolicy?: GenerationPolicy | null;
   intent?: "followup" | "steer" | "compact" | null;
@@ -1084,6 +1104,7 @@ export type {
   CompletionThinkingLevel,
   CompletionUsage,
   CreateSpaceCompletionInput,
+  ModelThinkingLevel,
   SpaceCompletionResult,
   SpaceCompletionStreamEvent,
 } from "@cohub/protocol";
@@ -1102,6 +1123,7 @@ export type SendMessageCronJobPayload = CronJobPayload & {
   title?: string;
   model?: string;
   provider?: string;
+  thinkingLevel?: ModelThinkingLevel | null;
   labelIds?: string[];
 };
 
@@ -1275,7 +1297,7 @@ export type LabelScopeType = "space" | "user" | "org";
 
 export type LabelSource = "user" | "system";
 
-export type LabelResourceType = "session" | "checkpoint" | "file";
+export type LabelResourceType = "session" | "checkpoint" | "file" | "space";
 
 export type LabelRecord = {
   id: string;
@@ -1310,6 +1332,9 @@ export type LabelAssignmentRecord = {
   meta: Record<string, unknown> | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Label metadata joined in user-scope assignment responses. */
+  labelSystemKey?: string | null;
+  labelName?: string;
 };
 
 export type LabelAssignmentListItem = LabelAssignmentRecord & {
@@ -1389,7 +1414,6 @@ export type ExploreSpaceItem = {
   category: string | null;
   tags: string[];
   saveCount: number;
-  pinCount: number;
   forkCount: number;
   updatedAt: string | null;
   accessLabel: "public" | "sign-in-required" | "unknown";
@@ -1427,6 +1451,7 @@ export type Permission =
   | "checkpoint.edit"
   | "member.view"
   | "member.manage"
+  | "references.view"
   | "channel.view"
   | "channel.manage"
   | "cronjob.view"
@@ -1438,7 +1463,9 @@ export type Permission =
   | "mod.manage"
   | "user.space.list"
   | "user.session.list"
-  | "user.usage.read";
+  | "user.usage.read"
+  | "neta.character.read"
+  | "neta.character.favorite";
 
 export type SpaceAccess = {
   role: SpaceRole | null;
@@ -1568,30 +1595,38 @@ export type SpaceInvitation = {
   expiresInSeconds: number | null;
 };
 
+export type SpaceInvitationLocation = {
+  spaceId: string;
+  spaceSlug: string | null;
+  ownerUsername: string | null;
+};
+
+export type SpaceInvitationListResponse = SpaceInvitationLocation & {
+  items: SpaceInvitation[];
+};
+
 export type CreateInvitationInput = {
   role?: SpaceRole;
   ttlSeconds?: number;
   maxUses?: number;
 };
 
-export type CreateInvitationResponse = {
+export type CreateInvitationResponse = SpaceInvitationLocation & {
   token: string;
   role: SpaceRole;
   expiresAt: string;
   maxUses: number | null;
 };
 
-export type InvitationDetail = {
+export type InvitationDetail = SpaceInvitationLocation & {
   token: string;
-  spaceId: string;
   spaceName: string;
   role: SpaceRole;
   expiresInSeconds: number | null;
 };
 
-export type AcceptInvitationResponse = {
+export type AcceptInvitationResponse = SpaceInvitationLocation & {
   ok: true;
-  spaceId: string;
   spaceName: string;
   role: SpaceRole;
 };
@@ -1599,27 +1634,32 @@ export type AcceptInvitationResponse = {
 // ─── Reference types ───
 
 export type ReferenceResourceType =
-  | "space"
+  | "turn"
   | "session"
+  | "space"
   | "checkpoint"
-  | "user"
-  | "file"
-  | "tool";
+  | "file";
 
 /**
- * Resource types usable as a query `source`. Only these have an owning space to
- * authorize against; user/file/tool appear only as reference targets.
+ * Resource types usable as a query `source`: they resolve to an owning space to
+ * authorize against. `turn` gives the finest precision; session/space roll up.
+ * `file` appears only as an edge target, never as a queryable source.
  */
-export type ReferenceQueryableType = "space" | "session" | "checkpoint";
+export type ReferenceQueryableType = "turn" | "session" | "space" | "checkpoint";
 
 export type ReferenceKind =
   | "session_fork"
   | "space_fork"
   | "checkpoint_fork"
+  | "mod"
   | "mention"
   | "tool_call"
-  | "mod"
-  | "participant";
+  | "agent_tool_file_read"
+  | "agent_tool_file_write"
+  | "agent_tool_file_edit"
+  | "agent_tool_file_ls"
+  | "agent_tool_file_find"
+  | "agent_tool_file_grep";
 
 export type ReferenceDirection = "out" | "in" | "both";
 
@@ -1627,11 +1667,10 @@ export type ReferenceRecord = {
   kind: ReferenceKind;
   sourceType: ReferenceResourceType;
   sourceId: string;
-  sourceTurnId: string | null;
   targetType: ReferenceResourceType;
   targetId: string;
-  spaceId: string;
-  sessionId: string | null;
+  sourceSpaceId: string;
+  sourceSessionId: string | null;
   count: number;
   createdAt: string;
   updatedAt: string;
@@ -1644,7 +1683,7 @@ export type ReferenceQueryResponse = {
   references: ReferenceRecord[];
 };
 
-export type ReferenceAggregateGroupBy = "kind" | "targetType" | "sourceType" | "day";
+export type ReferenceAggregateGroupBy = "kind" | "targetType" | "target" | "sourceType" | "day";
 
 export type ReferenceAggregateGroup = {
   group: string;

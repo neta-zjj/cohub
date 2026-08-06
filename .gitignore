@@ -24,7 +24,7 @@ deploy/agent/prod/secrets.yaml
 deploy/agent/dev/secrets.yaml
 
 # Whale Shrine runtime data
-docs/work-capability-lab/whale-shrine/data/
+docs/examples/work-capability-lab/whale-shrine/data/
 
 # Changelog generation drafts
 .changelog-draft/

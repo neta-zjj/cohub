@@ -48,6 +48,11 @@ import {
 } from "$lib/generation-task-media";
 import { extractSpaceMentionsFromText } from "$lib/mentions/space";
 import {
+	formatThinkingLevelShort,
+	getRequestedThinkingLevel,
+	type ModelThinkingLevel,
+} from "$lib/model-catalog";
+import {
 	uploadChatAttachmentFile,
 	uploadChatAttachmentImage,
 } from "$lib/public-asset-images";
@@ -116,6 +121,7 @@ import { createSessionGenerationRealtimeController } from "./session-generation-
 import {
 	createSessionScrollController,
 	isSessionScrollAnchorInTurns,
+	resolveSessionScrollRestore,
 } from "./session-scroll-controller.svelte";
 import { createSessionShareController } from "./session-share-controller.svelte";
 import {
@@ -154,7 +160,7 @@ import type {
 } from "./types";
 import {
 	type ActiveViewportSource,
-	type CanvasViewportObservation,
+	type BoardViewportObservation,
 	createViewportContextController,
 } from "./viewport-context-controller.svelte";
 
@@ -342,8 +348,12 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 	const skillsLoaded = $derived(skillsCtrl.loaded);
 	let showModelSelector = $state(false);
 	let sessionModelById = $state<Record<string, SelectedModel | null>>({});
+	let sessionThinkingLevelById = $state<
+		Record<string, ModelThinkingLevel | null>
+	>({});
 	let draftSessionModel = $state<SelectedModel | null>(null);
 	let draftSessionModelManuallySelected = $state(false);
+	let draftThinkingLevel = $state<ModelThinkingLevel | null>(null);
 
 	let composerHostEl = $state<HTMLDivElement | null>(null);
 	let chatChromeEl = $state<HTMLDivElement | null>(null);
@@ -374,8 +384,8 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 	const pendingTimelineMarkdownRenders = $derived(
 		scroll.pendingTimelineMarkdownRenders,
 	);
-	const anchorRestoreWaitingForMarkdown = $derived(
-		scroll.anchorRestoreWaitingForMarkdown,
+	const anchorRestoreWaitingForLayout = $derived(
+		scroll.anchorRestoreWaitingForLayout,
 	);
 
 	const generationTaskRunById = $derived(tasks.generationTaskRunById);
@@ -431,6 +441,14 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			name: catalogItem?.model.name as string | undefined,
 		} satisfies SelectedModel;
 	});
+	const activeSessionLastRequestedThinkingLevel =
+		$derived.by<ModelThinkingLevel | null>(() => {
+			const lastPersistedTurn = [...(activeSessionState?.turns ?? [])]
+				.filter((turn) => asRecord(turn.meta)?.optimistic !== true)
+				.sort((a, b) => a.sequence - b.sequence)
+				.at(-1);
+			return getRequestedThinkingLevel(lastPersistedTurn?.meta);
+		});
 	const activeSessionModel = $derived.by(() => {
 		if (!activeSessionId) return draftSessionModel ?? firstCatalogModel;
 		return (
@@ -439,6 +457,16 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			firstCatalogModel
 		);
 	});
+	// Explicit choices remain sticky across turns. Effective model defaults are
+	// never promoted into a request, and a pending null explicitly resets to default.
+	const activeSessionThinkingLevel = $derived.by<ModelThinkingLevel | null>(
+		() => {
+			if (!activeSessionId) return draftThinkingLevel;
+			return Object.hasOwn(sessionThinkingLevelById, activeSessionId)
+				? (sessionThinkingLevelById[activeSessionId] ?? null)
+				: activeSessionLastRequestedThinkingLevel;
+		},
+	);
 	const activeGenerationState = $derived.by(() =>
 		sessionGenerationStore.get(activeSessionId),
 	);
@@ -537,6 +565,8 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 						runtimePhase: activeGenerationState.runtimePhase,
 						runtimeProvider: activeGenerationState.runtimeProvider,
 						runtimeModel: activeGenerationState.runtimeModel,
+						lastPatchAt: activeGenerationState.lastPatchAt ?? null,
+						startedAt: activeGenerationState.startedAt ?? null,
 					}
 				: null;
 		if (state.turns.length === 0 && !streaming) return EMPTY_TIMELINE;
@@ -699,16 +729,6 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 	});
 
 	$effect(() => {
-		const el = listEl;
-		if (!el) return;
-		const observer = new ResizeObserver(() => scheduleTurnMarkerMeasure());
-		observer.observe(el);
-		for (const child of Array.from(el.children)) observer.observe(child);
-		scheduleTurnMarkerMeasure();
-		return () => observer.disconnect();
-	});
-
-	$effect(() => {
 		const sessionId = activeSessionId;
 		const loadedCount = activeSessionState?.turns.length ?? 0;
 		const indexedCount = activeTurnIndex.length;
@@ -778,27 +798,56 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		const hasCachedAnchor = anchor
 			? isSessionScrollAnchorInTurns(anchor.sequence, state.turns)
 			: false;
+		const isRestoreTargetCurrent = () =>
+			activeSessionId === targetId &&
+			(scroll.pendingRestoreSessionId === targetId ||
+				scroll.activeAnchorRestore?.sessionId === targetId);
 		const finishRestore = () => {
-			scroll.pendingRestoreSessionId = null;
+			// Only clear state owned by this target — a stale rAF from a previous
+			// session must not wipe the next session's pending restore.
+			if (scroll.pendingRestoreSessionId === targetId) {
+				scroll.pendingRestoreSessionId = null;
+			}
 			if (restoringBottomSessionId === targetId) {
 				restoringBottomSessionId = null;
 			}
-			updateAutoFollow();
+			if (scroll.activeAnchorRestore?.sessionId === targetId) {
+				scroll.activeAnchorRestore = null;
+				scroll.anchorRestoreWaitingForLayout = false;
+			}
+			if (activeSessionId === targetId) updateAutoFollow();
 		};
-		const finishAnchorRestore = () => {
-			scroll.pendingRestoreSessionId = null;
+		/** Apply leave position now; keep ownership while content is still laying out. */
+		const finishAnchorRestore = (options?: { waitForLayout?: boolean }) => {
+			if (scroll.pendingRestoreSessionId === targetId) {
+				scroll.pendingRestoreSessionId = null;
+			}
 			if (restoringBottomSessionId === targetId) {
 				restoringBottomSessionId = null;
 			}
+			if (activeSessionId !== targetId) return;
+			const waitForLayout = Boolean(options?.waitForLayout);
+			if (waitForLayout) {
+				scroll.anchorRestoreWaitingForLayout = true;
+				updateAutoFollow();
+				return;
+			}
+			if (scroll.activeAnchorRestore?.sessionId === targetId) {
+				scroll.activeAnchorRestore = null;
+			}
+			scroll.anchorRestoreWaitingForLayout = false;
 			updateAutoFollow();
-			scroll.anchorRestoreWaitingForMarkdown = true;
-			requestAnimationFrame(() => {
-				maybeCompleteAnchorRestore();
-			});
+			scheduleTurnMarkerMeasure();
 		};
 		const restoreToBottom = () => {
-			scroll.activeAnchorRestore = null;
-			scroll.anchorRestoreWaitingForMarkdown = false;
+			if (activeSessionId !== targetId) {
+				finishRestore();
+				return;
+			}
+			if (scroll.activeAnchorRestore?.sessionId === targetId) {
+				scroll.activeAnchorRestore = null;
+			}
+			scroll.anchorRestoreWaitingForLayout = false;
 			restoringBottomSessionId = targetId;
 			scroll.shouldAutoFollow = true;
 			requestAnimationFrame(() => {
@@ -815,10 +864,16 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			void tick().then(restoreToBottom);
 			return;
 		}
-		const restoreByAnchor = (retries = 2) => {
+		const restoreByAnchor = (retries = 6) => {
 			requestAnimationFrame(() => {
+				// Session switched away — drop this attempt without touching the
+				// new session's pending restore flags.
+				if (activeSessionId !== targetId) return;
+				if (scroll.pendingRestoreSessionId !== targetId) return;
+				// `{#key}` remount briefly clears listEl. Keep pending restore so
+				// the effect can re-run once the new timeline binds.
 				if (!listEl) {
-					finishRestore();
+					if (retries > 0) restoreByAnchor(retries - 1);
 					return;
 				}
 				const node = listEl.querySelector<HTMLElement>(
@@ -829,34 +884,38 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 						restoreByAnchor(retries - 1);
 						return;
 					}
-					clearSessionScrollAnchor(targetId);
-					restoreToBottom();
+					// Only clear this session's anchor when we still own restore.
+					if (isRestoreTargetCurrent()) {
+						clearSessionScrollAnchor(targetId);
+						restoreToBottom();
+					}
 					return;
 				}
-				scroll.activeAnchorRestore = {
+				const restore = {
 					sessionId: targetId,
 					sequence: anchor.sequence,
 					offset: anchor.offset,
 					updatedAt: anchor.updatedAt,
 				};
-				scroll.anchorRestoreWaitingForMarkdown =
-					pendingTimelineMarkdownRenders > 0;
-				if (pendingTimelineMarkdownRenders > 0) {
-					finishRestore();
-					return;
-				}
-				requestAnimationFrame(() => {
-					if (!listEl || activeSessionId !== targetId) {
-						finishAnchorRestore();
-						return;
-					}
-					if (!applyActiveAnchorRestore(activeAnchorRestore)) {
+				scroll.activeAnchorRestore = restore;
+				// Apply immediately, but keep the anchor until the target is actually
+				// reachable. Early session layout can otherwise clamp it to scrollTop 0.
+				const restoreResult = applyActiveAnchorRestore(restore);
+				if (restoreResult === "missing") {
+					if (isRestoreTargetCurrent()) {
 						clearSessionScrollAnchor(targetId);
 						restoreToBottom();
-						return;
 					}
-					finishAnchorRestore();
-				});
+					return;
+				}
+				const waitForLayout =
+					pendingTimelineMarkdownRenders > 0 || restoreResult === "pending";
+				finishAnchorRestore({ waitForLayout });
+				if (waitForLayout && isRestoreTargetCurrent()) {
+					requestAnimationFrame(() => {
+						maybeCompleteAnchorRestore();
+					});
+				}
 			});
 		};
 		void tick().then(() => restoreByAnchor());
@@ -911,10 +970,11 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		if (!el) return;
 		let prevHeight = el.scrollHeight;
 		const ro = new ResizeObserver(() => {
-			if (!listEl) return;
-			const currentHeight = listEl.scrollHeight;
+			if (listEl !== el) return;
+			const currentHeight = el.scrollHeight;
 			const restoringBottom = restoringBottomSessionId === activeSessionId;
 			const restoringPosition = isRestoringSessionScroll(activeSessionId);
+			if (restoringPosition) maybeCompleteAnchorRestore();
 			if (
 				currentHeight > prevHeight &&
 				!restoringPosition &&
@@ -924,8 +984,11 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			}
 			prevHeight = currentHeight;
 			updateTimelineScrollMetrics();
+			scheduleTurnMarkerMeasure();
 		});
 		ro.observe(el);
+		for (const child of Array.from(el.children)) ro.observe(child);
+		scheduleTurnMarkerMeasure();
 		return () => ro.disconnect();
 	});
 
@@ -1470,7 +1533,11 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		await skillsCtrl.load();
 	}
 
-	function handleModelSelect(model: { provider: string; id: string }) {
+	function handleModelSelect(model: {
+		provider: string;
+		id: string;
+		thinkingLevel?: ModelThinkingLevel;
+	}) {
 		const catalogItem = modelsCatalog?.find(
 			(item) => item.provider === model.provider && item.id === model.id,
 		);
@@ -1479,9 +1546,11 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			id: model.id,
 			name: catalogItem?.model.name as string | undefined,
 		} satisfies SelectedModel;
+		const thinkingLevel = model.thinkingLevel ?? null;
 		if (!activeSessionId) {
 			draftSessionModel = selected;
 			draftSessionModelManuallySelected = true;
+			draftThinkingLevel = thinkingLevel;
 			showModelSelector = false;
 			focusComposerSoon();
 			return;
@@ -1489,6 +1558,10 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		sessionModelById = {
 			...sessionModelById,
 			[activeSessionId]: selected,
+		};
+		sessionThinkingLevelById = {
+			...sessionThinkingLevelById,
+			[activeSessionId]: thinkingLevel,
 		};
 		showModelSelector = false;
 		focusComposerSoon();
@@ -1718,9 +1791,17 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		workspace.prepareRouteSession(sessionId);
 		scroll.pendingRestoreSessionId = sessionId;
 		scroll.activeAnchorRestore = null;
-		scroll.anchorRestoreWaitingForMarkdown = false;
+		scroll.anchorRestoreWaitingForLayout = false;
+		// Session switch remounts the timeline via `{#key}`. MarkdownViews that
+		// started rendering on the previous tree may never fire onRendered, so
+		// drop any leaked pending count — otherwise restore waits forever and
+		// the new list stays at scrollTop 0.
+		if (sessionChanged) {
+			scroll.pendingTimelineMarkdownRenders = 0;
+		}
 		userScrollActive = false;
 		programmaticScrollActive = false;
+		programmaticScrollTarget = null;
 		currentTurnSequence = null;
 		showTurnBottomSheet = false;
 		ensureSessionModelLoaded(sessionId);
@@ -2627,17 +2708,25 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		if (fileAttachments.length === 0) return new Map<string, string>();
 		composer.setUploading("file");
 		const urls = new Map<string, string>();
-		await Promise.all(
+		const results = await Promise.allSettled(
 			fileAttachments.map(async (attachment) => {
 				const asset = await uploadChatAttachmentFile({
 					spaceId: opSpaceId,
 					sessionId: sessionId ?? undefined,
 					file: attachment.file,
 					filename: attachment.name,
+					onProgress: ({ ratio }) =>
+						composer.setAttachmentUploadProgress(
+							attachment.id,
+							Math.round(ratio * 100),
+						),
 				});
 				urls.set(attachment.id, asset.publicUrl);
+				composer.setAttachmentFinalizing(attachment.id);
 			}),
 		);
+		const failed = results.find((result) => result.status === "rejected");
+		if (failed?.status === "rejected") throw failed.reason;
 		return urls;
 	}
 
@@ -2661,6 +2750,7 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			imageAttachments.map(async (attachment) => {
 				if (attachment.uploadedUrl) {
 					urls.set(attachment.id, attachment.uploadedUrl);
+					composer.setAttachmentFinalizing(attachment.id);
 					return;
 				}
 				try {
@@ -2670,8 +2760,14 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 						file: attachment.file,
 						mediaType: attachment.mediaType,
 						filename: attachment.name,
+						onProgress: ({ ratio }) =>
+							composer.setAttachmentUploadProgress(
+								attachment.id,
+								Math.round(ratio * 100),
+							),
 					});
 					urls.set(attachment.id, asset.publicUrl);
+					composer.setAttachmentFinalizing(attachment.id);
 				} catch (error) {
 					// Image specialization failed — still upload as a normal durable file.
 					demotedIds.add(attachment.id);
@@ -2689,8 +2785,14 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 							sessionId: sessionId ?? undefined,
 							file: attachment.file,
 							filename: attachment.name,
+							onProgress: ({ ratio }) =>
+								composer.setAttachmentUploadProgress(
+									attachment.id,
+									Math.round(ratio * 100),
+								),
 						});
 						fileUrls.set(attachment.id, asset.publicUrl);
+						composer.setAttachmentFinalizing(attachment.id);
 					} catch (fileError) {
 						console.warn("[composer] demoted image file durable failed", {
 							name: attachment.name,
@@ -2809,8 +2911,6 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			);
 			hadFileUpload = fileAttachments.length > 0;
 			hadImageUpload = imageAttachments.length > 0;
-			if (fileAttachments.length > 0) composer.setUploading("file");
-			if (imageAttachments.length > 0) composer.setUploading("image");
 
 			// Client uploads once to durable public storage.
 			// With space, server materializes from those URLs into sandbox (no second client upload).
@@ -3024,10 +3124,12 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 				content,
 				model: model?.id,
 				provider: model?.provider,
+				...(activeSessionThinkingLevel
+					? { thinkingLevel: activeSessionThinkingLevel }
+					: {}),
 				clientMessageId,
 				generationPolicy: buildTurnGenerationPolicy(),
 				accessMode: "full_access",
-				source: "web",
 				intent: "followup",
 				schedule: { mode: "immediate" },
 			});
@@ -3085,6 +3187,14 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 					},
 				};
 			}
+			// The accepted turn now owns the explicit request state. Clear the local
+			// override only after merging it to avoid briefly showing the older level.
+			if (sessionId) {
+				const nextThinkingLevels = { ...sessionThinkingLevelById };
+				delete nextThinkingLevels[sessionId];
+				sessionThinkingLevelById = nextThinkingLevels;
+			}
+			draftThinkingLevel = null;
 			if (sessionId && options.getConnectionState() !== "open") {
 				schedulePostSendRecoveryCheck(sessionId);
 			}
@@ -3302,7 +3412,7 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		programmaticScrollTarget = null;
 		if (activeAnchorRestore?.sessionId === activeSessionId) {
 			scroll.activeAnchorRestore = null;
-			scroll.anchorRestoreWaitingForMarkdown = false;
+			scroll.anchorRestoreWaitingForLayout = false;
 		}
 		if (pendingRestoreSessionId === activeSessionId) {
 			scroll.pendingRestoreSessionId = null;
@@ -3327,30 +3437,34 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 	}
 
 	function maybeCompleteAnchorRestore() {
-		if (!activeAnchorRestore || !anchorRestoreWaitingForMarkdown) return;
+		if (!activeAnchorRestore || !anchorRestoreWaitingForLayout) return;
 		if (pendingTimelineMarkdownRenders > 0) return;
 		const restore = activeAnchorRestore;
+		if (activeSessionId !== restore.sessionId) return;
+		if (applyActiveAnchorRestore(restore) !== "complete") return;
+		if (scroll.activeAnchorRestore?.sessionId !== restore.sessionId) return;
 		scroll.activeAnchorRestore = null;
-		scroll.anchorRestoreWaitingForMarkdown = false;
-		if (!restore || activeSessionId !== restore.sessionId) return;
-		requestAnimationFrame(() => {
-			if (applyActiveAnchorRestore(restore)) scheduleTurnMarkerMeasure();
-		});
+		scroll.anchorRestoreWaitingForLayout = false;
+		scheduleTurnMarkerMeasure();
 		updateAutoFollow();
 	}
 
 	function applyActiveAnchorRestore(restore = activeAnchorRestore) {
 		if (!restore || !listEl || activeSessionId !== restore.sessionId)
-			return false;
+			return "missing" as const;
 		const node = listEl.querySelector<HTMLElement>(
 			`[data-sequence="${restore.sequence}"]`,
 		);
-		if (!node) return false;
-		setProgrammaticScrollTop(
-			getMessageElementAbsoluteTop(node) + restore.offset,
-		);
+		if (!node) return "missing" as const;
+		const target = resolveSessionScrollRestore({
+			anchorTop: getMessageElementAbsoluteTop(node),
+			anchorOffset: restore.offset,
+			scrollHeight: listEl.scrollHeight,
+			clientHeight: listEl.clientHeight,
+		});
+		setProgrammaticScrollTop(target.scrollTop);
 		scroll.shouldAutoFollow = false;
-		return true;
+		return target.reached ? ("complete" as const) : ("pending" as const);
 	}
 
 	function areSessionScrollAnchorsEqual(
@@ -3371,12 +3485,17 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		if (!anchor) return;
 		const restore = { ...anchor, sessionId };
 		scroll.activeAnchorRestore = restore;
-		scroll.anchorRestoreWaitingForMarkdown = pendingTimelineMarkdownRenders > 0;
-		if (pendingTimelineMarkdownRenders > 0) return;
 		requestAnimationFrame(() => {
-			if (applyActiveAnchorRestore(restore)) scheduleTurnMarkerMeasure();
-			if (activeAnchorRestore?.sessionId === sessionId)
+			if (activeSessionId !== sessionId) return;
+			const result = applyActiveAnchorRestore(restore);
+			const waitForLayout =
+				pendingTimelineMarkdownRenders > 0 || result === "pending";
+			scroll.anchorRestoreWaitingForLayout = waitForLayout;
+			if (result !== "missing") scheduleTurnMarkerMeasure();
+			if (!waitForLayout && activeAnchorRestore?.sessionId === sessionId) {
 				scroll.activeAnchorRestore = null;
+				scroll.anchorRestoreWaitingForLayout = false;
+			}
 			updateAutoFollow();
 		});
 	}
@@ -3391,7 +3510,10 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		scheduleTurnMarkerMeasure();
 		const restore = activeAnchorRestore;
 		if (restore?.sessionId === activeSessionId) {
+			// Keep the leave position pinned while content height settles.
 			requestAnimationFrame(() => {
+				if (activeSessionId !== restore.sessionId) return;
+				applyActiveAnchorRestore(restore);
 				maybeCompleteAnchorRestore();
 			});
 			return;
@@ -3685,7 +3807,7 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 				workspace.activeSessionId = null;
 				scroll.pendingRestoreSessionId = null;
 				scroll.activeAnchorRestore = null;
-				scroll.anchorRestoreWaitingForMarkdown = false;
+				scroll.anchorRestoreWaitingForLayout = false;
 				currentTurnSequence = null;
 				showTurnBottomSheet = false;
 				scroll.shouldAutoFollow = true;
@@ -3858,7 +3980,7 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 				workspace.activeSessionId = null;
 				scroll.pendingRestoreSessionId = null;
 				scroll.activeAnchorRestore = null;
-				scroll.anchorRestoreWaitingForMarkdown = false;
+				scroll.anchorRestoreWaitingForLayout = false;
 				userScrollActive = false;
 				programmaticScrollActive = false;
 				programmaticScrollTarget = null;
@@ -3882,7 +4004,7 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 			workspace.activeSessionId = null;
 			scroll.pendingRestoreSessionId = null;
 			scroll.activeAnchorRestore = null;
-			scroll.anchorRestoreWaitingForMarkdown = false;
+			scroll.anchorRestoreWaitingForLayout = false;
 			userScrollActive = false;
 			programmaticScrollActive = false;
 			programmaticScrollTarget = null;
@@ -3919,9 +4041,8 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		if (!path) return;
 		viewport.setFileVisibleLines(path, range);
 	}
-	function reportCanvasView(state: CanvasViewportObservation) {
-		viewport.setCanvasViewState(state.path, {
-			camera: state.camera,
+	function reportBoardView(state: BoardViewportObservation) {
+		viewport.setBoardViewState(state.path, {
 			visibleRect: state.visibleRect,
 			selectedNodes: state.selectedNodes,
 		});
@@ -4042,6 +4163,17 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		},
 		get activeSessionModel() {
 			return activeSessionModel;
+		},
+		/** Model recorded on the session from server turns (no draft/override). */
+		get activeSessionTurnModel() {
+			return activeSessionLastTurnModel;
+		},
+		get activeSessionThinkingLevel() {
+			return activeSessionThinkingLevel;
+		},
+		get activeSessionThinkingLevelLabel() {
+			if (!activeSessionThinkingLevel) return null;
+			return formatThinkingLevelShort(activeSessionThinkingLevel);
 		},
 		get generationPolicyLabel() {
 			return generationPolicyLabel;
@@ -4216,7 +4348,7 @@ export function createSessionChatHost(options: SessionChatHostOptions) {
 		onVisibilityChanged,
 		reportActiveSource,
 		reportFileVisibleLines,
-		reportCanvasView,
+		reportBoardView,
 		flushComposerDraft: flushActiveComposerDraft,
 		refreshSessions: refreshSessionsList,
 		renameActiveSession,

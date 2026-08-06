@@ -169,3 +169,39 @@ export async function filterSessionsByPermission(
     spacePolicy,
   });
 }
+
+/**
+ * Batch form of `hasPermission` for many spaces. Work/preview/execution
+ * principals are scoped to a single space, so they only ever match that one;
+ * ordinary users fall through to a 1–2 query membership + policy lookup.
+ */
+export async function filterSpaceIdsByPermission(
+  user: AuthUserProfile | null,
+  permission: Permission,
+  spaceIds: readonly string[],
+): Promise<string[]> {
+  if (spaceIds.length === 0) return [];
+
+  const workSession = getUserWorkSession(user);
+  if (workSession) {
+    return (await hasWorkSessionScopedPermission(workSession, permission, workSession.spaceId))
+      ? spaceIds.filter((id) => id === workSession.spaceId)
+      : [];
+  }
+
+  const previewSession = getUserPreviewSession(user);
+  if (previewSession) {
+    return hasPreviewSessionPermission(previewSession, permission, previewSession.spaceId)
+      ? spaceIds.filter((id) => id === previewSession.spaceId)
+      : [];
+  }
+
+  const execution = getUserExecution(user);
+  if (execution) {
+    return scopeListHasPermission(normalizePermissionScopes(execution.scopes ?? []), permission)
+      ? spaceIds.filter((id) => id === execution.spaceId)
+      : [];
+  }
+
+  return permissionStore.filterSpaceIdsByPermission({ user, permission, spaceIds });
+}

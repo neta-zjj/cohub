@@ -32,8 +32,14 @@ const TRANSITION_DURATION_MS = DURATION_DRAWER_OUT;
 
 const openRatio = $derived(getDrawerOpenRatio(dragOffsetPx));
 const interactive = $derived(isDragging || uiState.mobileRightDrawerOpen);
+/** Slid away mid-drag so the surface behind (a board) can take the drop. */
+const retracted = $derived(uiState.mobileRightDrawerRetracted);
 
 const panelStyle = $derived.by(() => {
+	if (retracted) {
+		// pointer-events off is what lets the hit test reach the board behind.
+		return `transform: translateX(${MOBILE_DRAWER_WIDTH_PX}px); transition: ${CLOSE_TRANSITION_CSS}; pointer-events: none;`;
+	}
 	if (isDragging) {
 		const offset = MOBILE_DRAWER_WIDTH_PX - dragOffsetPx;
 		return `transform: translateX(${offset}px); transition: none; pointer-events: auto;`;
@@ -45,6 +51,9 @@ const panelStyle = $derived.by(() => {
 });
 
 const backdropStyle = $derived.by(() => {
+	if (retracted) {
+		return `opacity: 0; transition: ${CLOSE_BACKDROP_TRANSITION_CSS}; pointer-events: none;`;
+	}
 	if (isDragging) {
 		return `opacity: ${openRatio * 0.5}; transition: none; pointer-events: auto;`;
 	}

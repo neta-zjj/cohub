@@ -10,6 +10,8 @@ export type AppConfig = {
   talesofaiBillingAdminApiKey?: string;
   env: "dev" | "prod";
   appEncryptionKey: string;
+  /** Optional checkpoint to bootstrap first-time Home spaces from; blank when unset. */
+  homeBootstrapCheckpointId?: string;
   sandboxImage: string;
   sandboxNodeSelector: Record<string, string>;
   sandboxTolerations: SandboxToleration[];
@@ -38,6 +40,13 @@ export type AppConfig = {
   publicAssetOssAccessKeyId?: string;
   publicAssetOssSecretAccessKey?: string;
   publicAssetCdnBaseUrl?: string;
+  userUploadS3Endpoint?: string;
+  userUploadS3Region: string;
+  userUploadS3AccessKeyId?: string;
+  userUploadS3SecretAccessKey?: string;
+  chatAttachmentS3Bucket?: string;
+  chatAttachmentPublicBaseUrl?: string;
+  spaceUploadS3Bucket?: string;
   workAssetCdnBaseUrl?: string;
   checkpointAssetOssEndpoint?: string;
   checkpointAssetOssPublicEndpoint?: string;
@@ -45,6 +54,8 @@ export type AppConfig = {
   checkpointAssetOssBucket?: string;
   checkpointAssetOssAccessKeyId?: string;
   checkpointAssetOssSecretAccessKey?: string;
+  /** Router status probe API base URL, used to derive per-model availability. */
+  routerStatusUrl: string;
 };
 
 export type SandboxToleration = {
@@ -128,6 +139,7 @@ export const config: AppConfig = {
   talesofaiBillingAdminApiKey: process.env.TALESOFAI_BILLING_ADMIN_API_KEY,
   env,
   appEncryptionKey: process.env.APP_ENCRYPTION_KEY ?? "",
+  homeBootstrapCheckpointId: process.env.HOME_BOOTSTRAP_CHECKPOINT_ID?.trim() || undefined,
   sandboxImage:
     process.env.SANDBOX_IMAGE ?? getDefaultSandboxImage(env),
   sandboxNodeSelector: parseSandboxNodeSelector(process.env.SANDBOX_NODE_SELECTOR),
@@ -157,6 +169,13 @@ export const config: AppConfig = {
   publicAssetOssAccessKeyId: process.env.PUBLIC_ASSET_OSS_ACCESS_KEY_ID,
   publicAssetOssSecretAccessKey: process.env.PUBLIC_ASSET_OSS_SECRET_ACCESS_KEY,
   publicAssetCdnBaseUrl: process.env.PUBLIC_ASSET_CDN_BASE_URL?.replace(/\/+$/, ""),
+  userUploadS3Endpoint: process.env.USER_UPLOAD_S3_ENDPOINT,
+  userUploadS3Region: process.env.USER_UPLOAD_S3_REGION ?? "auto",
+  userUploadS3AccessKeyId: process.env.USER_UPLOAD_S3_ACCESS_KEY_ID,
+  userUploadS3SecretAccessKey: process.env.USER_UPLOAD_S3_SECRET_ACCESS_KEY,
+  chatAttachmentS3Bucket: process.env.CHAT_ATTACHMENT_S3_BUCKET,
+  chatAttachmentPublicBaseUrl: process.env.CHAT_ATTACHMENT_PUBLIC_BASE_URL?.replace(/\/+$/, ""),
+  spaceUploadS3Bucket: process.env.SPACE_UPLOAD_S3_BUCKET,
   workAssetCdnBaseUrl: process.env.WORK_ASSET_CDN_BASE_URL?.replace(/\/+$/, ""),
   checkpointAssetOssEndpoint: process.env.CHECKPOINT_ASSET_OSS_ENDPOINT ?? process.env.TURN_OBJECT_S3_ENDPOINT ?? "http://127.0.0.1:9000",
   checkpointAssetOssPublicEndpoint: process.env.CHECKPOINT_ASSET_OSS_PUBLIC_ENDPOINT ?? process.env.TURN_OBJECT_S3_PUBLIC_ENDPOINT,
@@ -164,6 +183,7 @@ export const config: AppConfig = {
   checkpointAssetOssBucket: process.env.CHECKPOINT_ASSET_OSS_BUCKET ?? process.env.TURN_OBJECT_S3_BUCKET,
   checkpointAssetOssAccessKeyId: process.env.CHECKPOINT_ASSET_OSS_ACCESS_KEY_ID ?? process.env.TURN_OBJECT_S3_ACCESS_KEY_ID,
   checkpointAssetOssSecretAccessKey: process.env.CHECKPOINT_ASSET_OSS_SECRET_ACCESS_KEY ?? process.env.TURN_OBJECT_S3_SECRET_ACCESS_KEY,
+  routerStatusUrl: (process.env.ROUTER_STATUS_URL ?? "https://router-status.neta.art/api/v1/status").trim(),
 };
 
 export const sessionsNamespace = getSessionsNamespace(config.env);

@@ -1,5 +1,246 @@
 # @neta-art/cohub-cli
 
+## 3.5.1
+
+### Patch Changes
+
+- Updated dependencies [aea39ee]
+  - @neta-art/cohub@4.9.0
+
+## 3.5.0
+
+### Minor Changes
+
+- 93c1267: Add platform-managed Cohub Balance components to Work Commerce products, including SDK response types, retry-safe checkout attempts, and CLI creation and listing support.
+
+### Patch Changes
+
+- Updated dependencies [93c1267]
+  - @neta-art/cohub@4.8.0
+
+## 3.4.1
+
+### Patch Changes
+
+- Updated dependencies [3931642]
+  - @neta-art/cohub@4.7.1
+
+## 3.4.0
+
+### Minor Changes
+
+- ec5ffdb: Add generation model discovery helpers and hide generation declarations marked `hidden` from default CLI discovery while preserving exact-ID and explicit-policy access.
+
+### Patch Changes
+
+- Updated dependencies [ec5ffdb]
+  - @neta-art/cohub@4.7.0
+
+## 3.3.1
+
+### Patch Changes
+
+- Updated dependencies [4735eea]
+  - @neta-art/cohub@4.6.0
+
+## 3.3.0
+
+### Minor Changes
+
+- 59443a9: Add friendly-first space invite URLs, invitation location metadata, reliable invitation limits and usage tracking, and CLI commands for creating, listing, and revoking invite links.
+
+### Patch Changes
+
+- Updated dependencies [59443a9]
+  - @neta-art/cohub@4.5.0
+
+## 3.2.0
+
+### Minor Changes
+
+- f514b5e: Add paginated Space-level Turn listing with author and time boundaries, including CLI access.
+
+### Patch Changes
+
+- Updated dependencies [f514b5e]
+  - @neta-art/cohub@4.4.0
+
+## 3.1.6
+
+### Patch Changes
+
+- 651476c: Expose mounted Mod provenance in skill catalog entries and show the source slug in CLI listings.
+- Updated dependencies [651476c]
+  - @neta-art/cohub@4.3.0
+
+## 3.1.5
+
+### Patch Changes
+
+- Updated dependencies [4e9e994]
+- Updated dependencies [22c00f4]
+  - @neta-art/cohub@4.2.0
+
+## 3.1.4
+
+### Patch Changes
+
+- Updated dependencies [3a9a51d]
+  - @neta-art/cohub@4.1.0
+
+## 3.1.3
+
+### Patch Changes
+
+- Updated dependencies [1fb5002]
+  - @neta-art/cohub@4.0.1
+
+## 3.1.2
+
+### Patch Changes
+
+- Updated dependencies [9350706]
+- Updated dependencies [9350706]
+- Updated dependencies [c1eb8ef]
+- Updated dependencies [95ae57d]
+- Updated dependencies [b9e6840]
+- Updated dependencies [a98f930]
+- Updated dependencies [9350706]
+- Updated dependencies [ba7d325]
+  - @neta-art/cohub@4.0.0
+
+## 3.1.1
+
+### Patch Changes
+
+- 54cd4d0: Move the Board document model, renderers, and image exporters into the Cohub SDK, organised by dependency so each entry only carries what it needs:
+
+  - `@neta-art/cohub/board` — document schema, geometry, shapes, timeline compilation, and export planning. No PixiJS, so it runs on servers, agents, and edge workers.
+  - `@neta-art/cohub/board/render` — the PixiJS card renderers, themes, and palette the editor draws with.
+  - `@neta-art/cohub/board/export` — rendering a planned export to a canvas in the browser.
+  - `@neta-art/cohub/board/headless` — Node.js image export on `@napi-rs/canvas`.
+
+  `pixi.js` and `@napi-rs/canvas` stay optional peers, needed only for the rendering and export entries. Board modules also keep their build boundaries, so consumers tree-shake unused schemas and renderers instead of pulling in the whole model.
+
+- Updated dependencies [54cd4d0]
+  - @neta-art/cohub@3.2.0
+
+## 3.1.0
+
+### Minor Changes
+
+- 7140fbe: Add board image export, shared between the web editor and the CLI.
+
+  The board renderers, geometry and codec now live in a new `@neta-art/cohub-board`
+  package, so the same PixiJS card renderers draw a board on screen and in a
+  headless Node export. `cohub boards export <board> -o out.png` renders a board id
+  or `.board` path, with `--frame`, `--items` and `--rect` regions, `--scale`,
+  `--theme`, `--background transparent` and PNG/JPEG/WebP output. In the editor,
+  Shift+Cmd/Ctrl+E (or the context menu) opens an export dialog that can download
+  or copy the image, reusing the live renderer and the current theme.
+
+  Two rendering fixes came out of this: non-Latin text (CJK) rendered as
+  missing-glyph boxes because the renderers asked for a Latin-only font with no
+  fallback, and shape label colors in the hard-coded fallback palette had drifted
+  from the CSS tokens, making note text dark-on-dark wherever the CSS was not
+  available.
+
+### Patch Changes
+
+- Updated dependencies [94a8f99]
+- Updated dependencies [7140fbe]
+- Updated dependencies [b47510a]
+- Updated dependencies [7135f11]
+- Updated dependencies [fd41a7f]
+  - @neta-art/cohub@3.1.0
+  - @neta-art/cohub-board@0.2.0
+
+## 3.0.0
+
+### Major Changes
+
+- 760a6ec: Align the CLI with the Board domain rename in `@neta-art/cohub` 3.0.0. The CLI now targets the Board transaction and playback APIs; canvas-era SDK surfaces it depended on are gone.
+
+### Minor Changes
+
+- e5e7060: Add space-scoped Board creation, inspection, transaction, playback, and realtime watch commands with structured JSON input.
+
+### Patch Changes
+
+- Updated dependencies [077ce83]
+- Updated dependencies [ac1a3ce]
+  - @neta-art/cohub@3.0.0
+
+## 2.7.0
+
+### Minor Changes
+
+- 7dfa1d8: Add optional `thinkingLevel` to session prompts, scheduled prompts, channel model config, and space hooks. The level is fully optional — omitted values inherit the session default, matching existing provider/model behavior. UI, CLI, and SDK all support per-model thinking level selection driven by models config (`reasoning`, `defaultThinkingLevel`, `thinkingLevelMap`). Effective thinking level is persisted to turn meta and exposed on turn records for multi-client recovery.
+
+### Patch Changes
+
+- Updated dependencies [7dfa1d8]
+- Updated dependencies [7dfa1d8]
+  - @neta-art/cohub@2.15.0
+
+## 2.6.1
+
+### Patch Changes
+
+- dad311e: Recover WebSocket sessions from a transient authentication failure by forcing one access-token refresh, reconnecting once, and restoring room subscriptions without entering an infinite retry loop.
+- Updated dependencies [dad311e]
+  - @neta-art/cohub@2.14.1
+
+## 2.6.0
+
+### Minor Changes
+
+- f72fa82: Expose structured canvas transaction conflicts and richer published Work metadata through the Cohub SDK and CLI dependency bundle.
+
+  - Export `CanvasTransactionError` with status, code, and `isVersionConflict` so clients can rebase and retry rejected canvas transactions.
+  - Add `lang` and `themeColor` to published Work metadata types.
+
+### Patch Changes
+
+- Updated dependencies [f72fa82]
+  - @neta-art/cohub@2.14.0
+
+## 2.5.1
+
+### Patch Changes
+
+- Upgrade `@neta-art/generation` dependency to `^0.1.16`.
+
+## 2.5.0
+
+### Minor Changes
+
+- Carry request provenance via `X-Cohub-Source-*` headers for cross-space traceability.
+
+  - **SDK**: `requestSource` on client options (static or per-request getter); transport stamps `X-Cohub-Source-*` automatically; re-export provenance helpers (`readRequestSourceFromEnv`, `requestSourceToHeaders`, `mergeRequestSourceIntoMeta`, …).
+  - **CLI**: every request sends `via: cli` and sandbox `COHUB_*` identity when present; drop ad-hoc `meta.source` / `versionMeta` / `meta.cohub` merge on works and generations.
+  - **Breaking note**: `WorkCreateInput.versionMeta` removed — publish provenance is taken from request headers instead.
+
+### Patch Changes
+
+- Updated dependencies
+  - @neta-art/cohub@2.13.0
+
+## 2.4.0
+
+### Minor Changes
+
+- d21c200: Ship the resource-references graph-edge model and empty-account Home space bootstrap that the API and agent already expose.
+
+  - **feat(references): graph-edge model with agent file access stats** — turn-level sources, file targets, and agent tool file kinds (`agent_tool_file_read|write|edit|ls|find|grep`); drop redundant `participant` edges; `ReferenceRecord` uses `sourceSpaceId` / `sourceSessionId`; aggregate supports `groupBy=target` and `limit`.
+  - **feat: auto-create Home space for empty accounts** — `spaces.getDefault()` creates a blank Home space (`slug=home`) when the account has no accessible space.
+  - **CLI**: `references query` accepts `turn:<uuid>`; aggregate `--group-by target` / `--limit`; file targets render as short space id + path.
+
+### Patch Changes
+
+- Updated dependencies [d21c200]
+  - @neta-art/cohub@2.12.0
+
 ## 2.3.3
 
 ### Patch Changes

@@ -170,8 +170,6 @@ local 模式下 `fs.changed` / `ports.changed` 只经 control 通道上报（不
 5. 后续 heartbeat 持续上报 sandbox runtime 状态；workspace 内容初始化由 worker 独立完成
 6. sandbox ready 与 workspace bootstrap ready 分别建模，不再耦合
 
-## 当前限制 / 后续事项
+## 当前限制
 
 - 目前 active sandbox connection 还是单连接模型
-- API / deployment 层仍需补 agent Deployment / Service 的最终定义
-- `space_sandboxes` 的 status / heartbeat / endpoint 还需要进一步整理

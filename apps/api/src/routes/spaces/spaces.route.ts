@@ -4,13 +4,16 @@ import { createLogger } from "@cohub/infra/logging";
 import { Hono, type Context } from "hono";
 import type { ContentBlock } from "@cohub/protocol/core";
 import { getDefaultSpaceModsForEnv } from "@cohub/protocol";
+import {
+  parseSpaceSlug,
+  validatePublicIdentifierAssignment,
+} from "@cohub/protocol/public-identifiers";
 import { normalizeGenerationPolicy } from "@cohub/protocol/generation";
 import * as cronParser from "cron-parser";
 import { db } from "../../db/index.js";
 import {
   userChannels,
   spaceChannels,
-  spaceMods,
   spaces,
   taskRuns,
   spaceSessions,
@@ -19,11 +22,19 @@ import {
   sessionTurns,
 } from "@cohub/db";
 import { eq, and, inArray, desc, lt, or, sql } from "drizzle-orm";
-import { useAuth, getOptionalAuth, getWorkSessionPrincipal, requireValidId, buildSpaceListItems, buildStorageRepoName, authzDenied, getSpacePublicProfile, normalizePublicAvatarUrl } from "../../lib/middleware.js";
+import { useAuth, getOptionalAuth, getWorkSessionPrincipal, getPreviewSessionPrincipal, getExecutionPrincipal, requireValidId, buildSpaceListItems, authzDenied, getSpacePublicProfile, normalizePublicAvatarUrl } from "../../lib/middleware.js";
 import { config } from "../../config.js";
 import { scheduleSandboxAutoDestroy } from "../../sandbox-idle-scheduler.js";
 import { attachSandboxPublicEndpoints } from "../../sandbox-public-network.js";
-import { ensureSpaceSandbox, getSpaceSandboxBySpaceId, markSandboxSpecPendingRestart, recoverSpaceSandbox, reconcileSpaceSandbox, resizeSpaceSandboxToSpec } from "../../space-sandboxes.js";
+import {
+  createOwnedSpace,
+  provisionCreatedSpace,
+  type ProvisionCreatedSpaceResult,
+  type SpaceBootstrapSource,
+  type SpaceSandboxAutoDestroyPolicy,
+  type SpaceSandboxProvider,
+} from "../../space-create.js";
+import { getSpaceSandboxBySpaceId, markSandboxSpecPendingRestart, recoverSpaceSandbox, resizeSpaceSandboxToSpec } from "../../space-sandboxes.js";
 import {
   createInitialSpaceSession,
   getSpaceById,
@@ -42,10 +53,11 @@ import { fallbackBoundChannelHealth, getChannelHealthMap } from "../../channel-h
 import { createCronJob, enqueueTask } from "../../tasks.js";
 import { RUN_COMMAND_TASK_TYPE } from "@cohub/core/commands";
 import { sanitizePostgresJsonValue } from "@cohub/core/content/sanitize";
-import { assignLabelsToSession, parseLabelRefs, resolveLabelPaths, resolveOrCreateLabelPaths } from "@cohub/core/labels";
+import { assignLabelsToSession, getPinnedSpaceIds, parseLabelRefs, resolveLabelPaths, resolveOrCreateLabelPaths } from "@cohub/core/labels";
 import { assignSessionSourceSystemLabel } from "@cohub/core/labels/session-source";
 import { hasPermission, getSpaceMemberRole, filterSessionsByPermission, resolvePermissionAccess, asAccountIdentity } from "../../permissions.js";
 import { checkpoints } from "@cohub/db";
+import { LogtoUserRequiredError } from "../../user-profiles.js";
 import {
   CHECKPOINT_DIFF_CACHE_CONTROL,
   getCheckpointDiffFile,
@@ -54,10 +66,11 @@ import {
 import { checkpointFsJsonError, listCheckpointDirectory, readCheckpointFile } from "../../checkpoint-fs.js";
 import type { AuthUser } from "../../lib/middleware.js";
 import { submitSessionPrompt } from "../../session-prompts.js";
-import { parsePromptEnv, PromptEnvValidationError } from "@cohub/core/sessions";
+import { ModelUnavailableError, parsePromptEnv, PromptEnvValidationError } from "@cohub/core/sessions";
 import { delegatedPromptAuthFromWorkSession, promptAuthContextFromWorkSession } from "../../prompt-auth-context.js";
 import { buildSessionTurnResponse } from "../../session-turn-response.js";
 import { getSessionTurnById, hydrateTurnAuthorProfiles } from "../../session-turns.js";
+import { InvalidSpaceTurnListQueryError, listSpaceTurns } from "../../space-turns.js";
 import { dispatchTurnUpdated } from "../../session-output.js";
 import { enqueueAgentTurnJob } from "../../agent-turn-queue.js";
 import { requestAgentTurnAbort } from "../../agent-turn-abort.js";
@@ -70,6 +83,8 @@ import { parseChannelConfigPatch, mergeChannelConfig, validateChannelModelConfig
 import { redisCommandClient } from "../../redis.js";
 import { featureGateResponse } from "../../lib/feature-gate.js";
 import { billingBlockedResponse } from "../../lib/billing-blocked.js";
+import { applyRequestSourceToMeta, getRequestSource, resolveSessionSourceFromRequest } from "../../lib/request-source.js";
+import { validatePromptModel } from "../../llm/models.js";
 
 
 const logger = createLogger({ serviceName: "cohub-api" });
@@ -106,21 +121,21 @@ const normalizePromptAccessMode = (value: unknown): PromptAccessMode | null => {
   return value === "read_only" || value === "full_access" ? value : null;
 };
 
-const MAX_PROMPT_SOURCE_LENGTH = 255;
-
-const normalizePromptSource = (value: unknown): { source: string; error?: string } => {
-  if (value === undefined || value === null) return { source: "public_api" };
-  if (typeof value !== "string") return { source: "public_api", error: "source must be a string" };
-  const source = value.trim() || "public_api";
-  if (source.length > MAX_PROMPT_SOURCE_LENGTH) return { source, error: "source must be at most 255 characters" };
-  return { source };
-};
-
 type SpacePromptIntent = "followup" | "steer";
 
 const normalizeSpacePromptIntent = (value: unknown): SpacePromptIntent | null => {
   if (value === undefined || value === null) return "followup";
   return value === "followup" || value === "steer" ? value : null;
+};
+
+const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+const normalizePromptThinkingLevel = (value: unknown): string | null | undefined => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return VALID_THINKING_LEVELS.has(trimmed) ? trimmed : null;
 };
 
 const readMetaRecord = (value: unknown): Record<string, unknown> =>
@@ -261,6 +276,7 @@ type SpacePromptInput = {
   content?: ContentBlock[];
   model?: string | null;
   provider?: string | null;
+  thinkingLevel?: string | null;
   clientMessageId?: string | null;
   generationPolicy?: unknown;
   intent?: SpacePromptIntent | null;
@@ -269,12 +285,6 @@ type SpacePromptInput = {
   labelRefs?: unknown;
   env?: unknown;
 };
-
-type SpaceSandboxAutoDestroyPolicy =
-  | { mode: "idle"; ttlSeconds: number }
-  | { mode: "never" };
-
-type SpaceSandboxProvider = "cloud" | "local";
 
 type SpaceConfigInput = {
   sandbox?: {
@@ -293,17 +303,17 @@ const MIN_SPACE_SANDBOX_AUTO_DESTROY_TTL_SECONDS = 60;
 const MAX_SPACE_SANDBOX_AUTO_DESTROY_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_SPACE_DESCRIPTION_LENGTH = 10_000;
 const HOME_SPACE_SLUG = "home";
-const SPACE_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,78}[a-z0-9])?$/;
-
+const HOME_SPACE_NAME = "Home";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const normalizeSpaceSlug = (value: unknown): { slug: string | null; error?: string } => {
   if (value === undefined || value === null) return { slug: null };
   if (typeof value !== "string") return { slug: null, error: "slug must be a string or null" };
-  const slug = value.trim();
-  if (!slug) return { slug: null };
-  if (!SPACE_SLUG_PATTERN.test(slug)) {
+  const rawSlug = value.trim();
+  if (!rawSlug) return { slug: null };
+  const slug = parseSpaceSlug(rawSlug);
+  if (!slug) {
     return {
       slug: null,
       error: "slug must be 1-80 characters, lowercase letters, numbers, hyphens, or underscores, and cannot start or end with a separator",
@@ -311,6 +321,12 @@ const normalizeSpaceSlug = (value: unknown): { slug: string | null; error?: stri
   }
   return { slug };
 };
+
+const reservedSpaceSlugResponse = (c: Context) => c.json({
+  code: "public_identifier_reserved",
+  field: "slug",
+  message: "This Space slug is reserved.",
+}, 400);
 
 const uniqueViolationConstraint = (error: unknown): string | null => {
   const record = error as { code?: string; constraint_name?: string; constraint?: string };
@@ -535,6 +551,189 @@ function getSpaceProvisionParams(
   };
 }
 
+async function findOwnedHomeSpace(userUuid: string): Promise<SpaceRow | null> {
+  const [ownedHome] = await db
+    .select()
+    .from(spaces)
+    .where(and(eq(spaces.userUuid, userUuid), eq(spaces.slug, HOME_SPACE_SLUG)))
+    .limit(1);
+  return ownedHome ?? null;
+}
+
+async function findOwnedRecentSpace(userUuid: string): Promise<SpaceRow | null> {
+  const [ownedRecent] = await db
+    .select()
+    .from(spaces)
+    .where(eq(spaces.userUuid, userUuid))
+    .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
+    .limit(1);
+  return ownedRecent ?? null;
+}
+
+/** After a unique conflict, prefer the real home slug, then any owned space. */
+async function resolveHomeEnsureConflict(userUuid: string, reason: string): Promise<SpaceRow | null> {
+  const home = await findOwnedHomeSpace(userUuid);
+  if (home) return home;
+  const recent = await findOwnedRecentSpace(userUuid);
+  if (recent) {
+    logger.warn("[DefaultSpace] home ensure conflict without slug=home", {
+      userUuid,
+      reason,
+      spaceId: recent.id,
+      name: recent.name,
+      slug: recent.slug,
+    });
+  }
+  return recent;
+}
+
+async function findDefaultSpaceCandidate(userUuid: string): Promise<SpaceRow | null> {
+  // Hot path: most accounts already have a home space.
+  const [[ownedHome], [memberHome]] = await Promise.all([
+    db
+      .select()
+      .from(spaces)
+      .where(and(eq(spaces.userUuid, userUuid), eq(spaces.slug, HOME_SPACE_SLUG)))
+      .limit(1),
+    db
+      .select({ space: spaces })
+      .from(spaceMembers)
+      .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
+      .where(and(eq(spaceMembers.userId, userUuid), eq(spaces.slug, HOME_SPACE_SLUG)))
+      .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
+      .limit(1),
+  ]);
+  const homeSpace = selectMostRecentSpace([ownedHome, memberHome?.space]);
+  if (homeSpace) return homeSpace;
+
+  const [[ownedRecent], [memberRecent]] = await Promise.all([
+    db
+      .select()
+      .from(spaces)
+      .where(eq(spaces.userUuid, userUuid))
+      .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
+      .limit(1),
+    db
+      .select({ space: spaces })
+      .from(spaceMembers)
+      .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
+      .where(eq(spaceMembers.userId, userUuid))
+      .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
+      .limit(1),
+  ]);
+  return selectMostRecentSpace([ownedRecent, memberRecent?.space]);
+}
+
+type PreparedHomeMods = Awaited<ReturnType<typeof prepareSpaceModInserts>>;
+
+const HOME_BOOTSTRAP: SpaceBootstrapSource = { type: "blank" };
+
+/**
+ * Home bootstrap source: fork from `HOME_BOOTSTRAP_CHECKPOINT_ID` when set,
+ * otherwise create a blank workspace.
+ */
+function resolveHomeBootstrap(): SpaceBootstrapSource {
+  const checkpointId = config.homeBootstrapCheckpointId;
+  return checkpointId ? { type: "checkpoint", checkpointId } : HOME_BOOTSTRAP;
+}
+
+async function insertHomeSpaceRecord(
+  user: AuthUser,
+  preparedModValues: PreparedHomeMods,
+  bootstrapSource: SpaceBootstrapSource,
+): Promise<SpaceRow> {
+  const { space } = await createOwnedSpace({
+    user,
+    name: HOME_SPACE_NAME,
+    slug: HOME_SPACE_SLUG,
+    bootstrapSource,
+    sandbox: {
+      provider: "cloud",
+      autoDestroy: DEFAULT_SPACE_SANDBOX_AUTO_DESTROY,
+      spec: DEFAULT_SANDBOX_SPEC_ID,
+    },
+    extraEnv: [],
+    mods: preparedModValues,
+    meta: { createdSource: "default_ensure" },
+  });
+  return space;
+}
+
+/**
+ * Create the first-time Home space for a user. Idempotent under concurrency:
+ * unique conflicts re-select the winner instead of failing the entry path.
+ * Bootstraps from `HOME_BOOTSTRAP_CHECKPOINT_ID` when set, else blank.
+ * Only call from normal account sessions (never work/preview/execution).
+ */
+async function ensureHomeSpace(user: AuthUser): Promise<SpaceRow | null> {
+  const bootstrapSource = resolveHomeBootstrap();
+  // Caller only invokes this when no accessible space was found. Concurrent
+  // ensures rely on (userUuid, slug|name) unique indexes + re-select.
+  const createMods = getDefaultSpaceModsForEnv(config.env);
+  // spaceId is remapped at insert; placeholder only for prepare validation.
+  const preparedModValues = await prepareSpaceModInserts({
+    actor: user,
+    spaceId: crypto.randomUUID(),
+    mods: createMods,
+    existing: [],
+  }).catch((error) => {
+    const response = spaceModErrorResponse(error);
+    logger.warn("[DefaultSpace] failed to prepare home mods; creating without mods", {
+      userUuid: user.uuid,
+      message: response?.message ?? (error instanceof Error ? error.message : String(error)),
+      status: response?.status,
+    });
+    return [] as PreparedHomeMods;
+  });
+
+  let space: SpaceRow | undefined;
+  try {
+    space = await insertHomeSpaceRecord(user, preparedModValues, bootstrapSource);
+  } catch (error) {
+    const constraint = uniqueViolationConstraint(error);
+    if (constraint?.includes("user_slug") || constraint?.includes("user_name")) {
+      return resolveHomeEnsureConflict(
+        user.uuid,
+        constraint.includes("user_slug") ? "slug_conflict" : "name_conflict",
+      );
+    }
+    const modResponse = spaceModErrorResponse(error);
+    if (modResponse) {
+      // First attempt rolled back. Retry once without mods so first-time users
+      // still get an entry target.
+      logger.warn("[DefaultSpace] home mod insert failed; retrying without mods", {
+        userUuid: user.uuid,
+        message: modResponse.message,
+      });
+      try {
+        space = await insertHomeSpaceRecord(user, [], bootstrapSource);
+      } catch (retryError) {
+        const retryConstraint = uniqueViolationConstraint(retryError);
+        if (retryConstraint?.includes("user_slug") || retryConstraint?.includes("user_name")) {
+          return resolveHomeEnsureConflict(user.uuid, "retry_unique_conflict");
+        }
+        throw retryError;
+      }
+    } else {
+      throw error;
+    }
+  }
+
+  if (!space) return resolveHomeEnsureConflict(user.uuid, "missing_space");
+  const provisioned = await provisionCreatedSpace({
+    user,
+    space,
+    bootstrapSource,
+    extraEnv: [],
+    sandbox: {
+      provider: "cloud",
+      autoDestroy: DEFAULT_SPACE_SANDBOX_AUTO_DESTROY,
+    },
+    onBootstrapFailure: "soft",
+  });
+  return provisioned.space;
+}
+
 router.get("/", async (c) => {
   const user = useAuth(c);
   if (user instanceof Response) return user;
@@ -553,8 +752,13 @@ router.get("/", async (c) => {
     .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt));
 
   const items = await buildSpaceListItems(spaceList);
+  const pinnedSpaceIds = await getPinnedSpaceIds(db, identity.uuid);
+  const itemsWithPins = items.map((item) => ({
+    ...item,
+    isPinned: pinnedSpaceIds.has(item.id),
+  }));
   const workSession = getWorkSessionPrincipal(c);
-  return c.json(workSession ? items.map(stripSensitiveSpaceFields) : items);
+  return c.json(workSession ? itemsWithPins.map(stripSensitiveSpaceFields) : itemsWithPins);
 });
 
 router.get("/default", async (c) => {
@@ -564,39 +768,17 @@ router.get("/default", async (c) => {
   const identity = asAccountIdentity(user);
   if (!identity) return authzDenied(c);
 
-  const [[ownedHome], [memberHome]] = await Promise.all([
-    db
-      .select()
-      .from(spaces)
-      .where(and(eq(spaces.userUuid, identity.uuid), eq(spaces.slug, HOME_SPACE_SLUG)))
-      .limit(1),
-    db
-      .select({ space: spaces })
-      .from(spaceMembers)
-      .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
-      .where(and(eq(spaceMembers.userId, identity.uuid), eq(spaces.slug, HOME_SPACE_SLUG)))
-      .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
-      .limit(1),
-  ]);
-  const homeSpace = selectMostRecentSpace([ownedHome, memberHome?.space]);
-  if (homeSpace) return c.json({ space: await buildDefaultSpaceResponse(c, homeSpace, user) });
-
-  const [[ownedRecent], [memberRecent]] = await Promise.all([
-    db
-      .select()
-      .from(spaces)
-      .where(eq(spaces.userUuid, user.uuid))
-      .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
-      .limit(1),
-    db
-      .select({ space: spaces })
-      .from(spaceMembers)
-      .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
-      .where(eq(spaceMembers.userId, user.uuid))
-      .orderBy(sql`${spaces.lastActivityAt} desc nulls last`, desc(spaces.createdAt))
-      .limit(1),
-  ]);
-  const space = selectMostRecentSpace([ownedRecent, memberRecent?.space]);
+  // Prefer existing home / recent space.
+  let space = await findDefaultSpaceCandidate(identity.uuid);
+  // Ensure only for normal account sessions. Work / preview / execution
+  // principals may list via viewer grants but must not mint spaces.
+  const canEnsureHome =
+    !getWorkSessionPrincipal(c) &&
+    !getPreviewSessionPrincipal(c) &&
+    !getExecutionPrincipal(c);
+  if (!space && canEnsureHome) {
+    space = await ensureHomeSpace(user);
+  }
 
   return c.json({ space: space ? await buildDefaultSpaceResponse(c, space, user) : null });
 });
@@ -649,6 +831,9 @@ router.post("/", async (c) => {
 
   const { slug, error: slugError } = normalizeSpaceSlug(body.slug);
   if (slugError) return c.json({ message: slugError }, 400);
+  if (slug && validatePublicIdentifierAssignment("spaceSlug", slug).reason === "reserved") {
+    return reservedSpaceSlugResponse(c);
+  }
 
   const existingSpace = await db
     .select({ id: spaces.id })
@@ -734,13 +919,11 @@ router.post("/", async (c) => {
     if (!(await hasPermission(user, "checkpoint.view", { spaceId: checkpoint.spaceId }))) return authzDenied(c);
   }
 
-  const spaceId = crypto.randomUUID();
-  const storageRepoName = buildStorageRepoName(spaceId);
-
   const createMods = Array.isArray(body.mods) ? body.mods : getDefaultSpaceModsForEnv(config.env);
+  // spaceId is remapped inside createOwnedSpace; placeholder for prepare only.
   const preparedModValues = await prepareSpaceModInserts({
     actor: user,
-    spaceId,
+    spaceId: crypto.randomUUID(),
     mods: createMods,
     existing: [],
   }).catch((error) => {
@@ -750,83 +933,37 @@ router.post("/", async (c) => {
   });
   if (!Array.isArray(preparedModValues)) return c.json({ message: preparedModValues.message }, preparedModValues.status);
 
+  const sandboxProvider = normalizedConfig.sandbox?.provider ?? "cloud";
+  const sandboxAutoDestroy = normalizedConfig.sandbox?.autoDestroy ?? DEFAULT_SPACE_SANDBOX_AUTO_DESTROY;
+
   let space: typeof spaces.$inferSelect | undefined;
   let insertedChannels: Array<typeof spaceChannels.$inferSelect> = [];
   try {
-    const result = await db.transaction(async (tx) => {
-      const [createdSpace] = await tx
-        .insert(spaces)
-        .values({
-          id: spaceId,
-          userUuid: user.uuid,
-          name,
-          slug,
-          description: body.description ?? null,
-          storageRepoName,
-          baseCheckpointId: normalizedBootstrapSource.type === "checkpoint" ? normalizedBootstrapSource.checkpointId : null,
-          headCheckpointId: null,
-          lastActivityAt: new Date(),
-          meta: {
-            ...(body.meta ?? {}),
-            config: {
-              ...(isRecord(body.meta?.config) ? body.meta.config : {}),
-              sandbox: {
-                provider: normalizedConfig.sandbox?.provider ?? "cloud",
-                autoDestroy: normalizedConfig.sandbox?.autoDestroy ?? DEFAULT_SPACE_SANDBOX_AUTO_DESTROY,
-                spec: requestedSpec,
-              },
-            },
-            extraEnv: normalizedExtraEnv,
-            bootstrap: {
-              status: "pending",
-              stage: null,
-              taskRunId: null,
-              errorMessage: null,
-              source: normalizedBootstrapSource,
-              startedAt: null,
-              finishedAt: null,
-            },
-          },
-        })
-        .returning();
-      if (!createdSpace) throw new Error("failed to create space");
-
-      await tx.insert(spaceMembers).values({
-        spaceId: createdSpace.id,
-        userId: user.uuid,
-        role: "host",
-        createdBy: user.uuid,
-        updatedBy: user.uuid,
-      });
-
-      if (preparedModValues.length > 0) {
-        await tx.insert(spaceMods).values(preparedModValues);
-      }
-
-      for (const binding of normalizedChannelBindings) {
-        if (!(await validateChannelModelConfig(tx as unknown as typeof db, createdSpace.id, binding.config?.model ?? null))) {
-          throw new Error("model not found");
-        }
-      }
-
-      const createdChannels = normalizedChannelBindings.length > 0
-        ? await tx
-            .insert(spaceChannels)
-            .values(
-              normalizedChannelBindings.map((binding) => ({
-                spaceId: createdSpace.id,
-                channelId: binding.channelId,
-                config: binding.config,
-              })),
-            )
-            .returning()
-        : [];
-
-      return { space: createdSpace, insertedChannels: createdChannels };
+    const result = await createOwnedSpace({
+      user,
+      name,
+      slug,
+      description: body.description ?? null,
+      bootstrapSource: normalizedBootstrapSource,
+      sandbox: {
+        provider: sandboxProvider,
+        autoDestroy: sandboxAutoDestroy,
+        spec: requestedSpec,
+      },
+      extraEnv: normalizedExtraEnv,
+      mods: preparedModValues,
+      meta: applyRequestSourceToMeta(c, body.meta ?? {}) ?? {},
+      channelBindings: normalizedChannelBindings.map((binding) => ({
+        channelId: binding.channelId,
+        config: (binding.config as Record<string, unknown> | null) ?? null,
+      })),
     });
     space = result.space;
     insertedChannels = result.insertedChannels;
   } catch (error) {
+    if (error instanceof LogtoUserRequiredError) {
+      return c.json({ message: error.message }, 403);
+    }
     const constraint = uniqueViolationConstraint(error);
     if (constraint?.includes("user_slug")) return c.json({ message: "space slug already exists" }, 409);
     const modResponse = spaceModErrorResponse(error);
@@ -836,13 +973,6 @@ router.post("/", async (c) => {
   }
 
   if (!space) return c.json({ message: "failed to create space" }, 500);
-
-  // Keep the runtime env cache in sync at creation time. The agent reads
-  // user-provided space env from Redis (not directly from DB meta), so spaces
-  // created with extraEnv must populate Redis before the sandbox/session starts.
-  // Later env panel writes already go through persistSpaceEnv(), which does the
-  // same cache update.
-  await setSpaceEnv(space.id, normalizedExtraEnv);
 
   if (insertedChannels.length > 0) {
     await Promise.all(
@@ -857,114 +987,38 @@ router.post("/", async (c) => {
     void bindSpaceChannelsToGateway(space.id).catch((error) => logger.error("[SpaceChannels] failed to bind channels after space creation", { spaceId: space.id, error }));
   }
 
-  if ((normalizedConfig.sandbox?.provider ?? "cloud") === "local") {
-    // Local sandboxes are provided by the user's machine via the gateway relay.
-    // Skip cloud pod provisioning and idle auto-destroy; register the row before
-    // enqueuing bootstrap so the worker never races ahead of a missing sandbox.
-    try {
-      await ensureSpaceSandbox({
-        spaceId: space.id,
-        provider: "local",
-        status: "stopped",
-        runtimeStatus: "unknown",
-        stopReason: "disconnected",
-        stoppedAt: new Date(),
-      });
-    } catch (error) {
-      logger.error("[LocalSandbox] failed to register local sandbox after space creation", { spaceId: space.id, error });
+  let provisioned: ProvisionCreatedSpaceResult;
+  try {
+    provisioned = await provisionCreatedSpace({
+      user,
+      space,
+      bootstrapSource: normalizedBootstrapSource,
+      extraEnv: normalizedExtraEnv,
+      sandbox: {
+        provider: sandboxProvider,
+        autoDestroy: sandboxAutoDestroy,
+      },
+      gitToken,
+      onBootstrapFailure: "throw",
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "failed to register local sandbox") {
       return c.json({ message: "failed to register local sandbox" }, 500);
     }
-  } else {
-    void scheduleSandboxAutoDestroy({
-      spaceId: space.id,
-      policy: normalizedConfig.sandbox?.autoDestroy ?? DEFAULT_SPACE_SANDBOX_AUTO_DESTROY,
-      baseAt: space.createdAt ? new Date(space.createdAt) : new Date(),
-    }).catch((error) => logger.error("[SandboxAutoDestroy] failed to schedule policy after space creation", { spaceId: space.id, error }));
-    void reconcileSpaceSandbox(
-      {
-        ...getSpaceProvisionParams(user, space),
-        mode: "ensure",
-        reason: "space_created",
-      },
-    ).catch((error) => logger.error("[SandboxPublicNetwork] failed to reconcile after space creation", { spaceId: space.id, error }));
+    if (error instanceof Error && error.message === "failed to allocate create_space task id") {
+      return c.json({ message: "failed to create bootstrap job" }, 500);
+    }
+    throw error;
   }
 
-  const taskData: Record<string, unknown> = { source: normalizedBootstrapSource };
-  // TODO: gitToken is stored in taskData (BullMQ Redis + DB task_runs).
-  // For long-term security, encrypt it or use a temporary token reference.
-  if (gitToken) taskData.gitToken = gitToken;
-
-  const job = await enqueueTask({
-    type: "create_space",
-    spaceId: space.id,
-    userId: user.uuid,
-    data: taskData,
-  }).catch(async (error) => {
-    const nextMeta = {
-      ...((space.meta as Record<string, unknown> | null) ?? {}),
-      bootstrap: {
-        status: "failed",
-        stage: null,
-        taskRunId: null,
-        errorMessage: error instanceof Error ? error.message : String(error),
-        source: normalizedBootstrapSource,
-        startedAt: null,
-        finishedAt: new Date().toISOString(),
-      },
-    };
-    await db
-      .update(spaces)
-      .set({ meta: nextMeta, updatedAt: new Date(), lastActivityAt: new Date() })
-      .where(eq(spaces.id, space.id));
-    throw error;
-  });
-  const taskRunId = job.taskRunId;
-  if (!taskRunId) {
-    await db
-      .update(spaces)
-      .set({
-        meta: {
-          ...((space.meta as Record<string, unknown> | null) ?? {}),
-          bootstrap: {
-            status: "failed",
-            stage: null,
-            taskRunId: null,
-            errorMessage: "failed to allocate create_space task id",
-            source: normalizedBootstrapSource,
-            startedAt: null,
-            finishedAt: new Date().toISOString(),
-          },
-        },
-        updatedAt: new Date(),
-        lastActivityAt: new Date(),
-      })
-      .where(eq(spaces.id, space.id));
+  if (!provisioned.taskRunId) {
     return c.json({ message: "failed to create bootstrap job" }, 500);
   }
 
-  const [spaceWithJob] = await db
-    .update(spaces)
-    .set({
-      meta: {
-        ...((space.meta as Record<string, unknown> | null) ?? {}),
-        bootstrap: {
-          status: "pending",
-          stage: null,
-          taskRunId,
-          errorMessage: null,
-          source: normalizedBootstrapSource,
-          startedAt: null,
-          finishedAt: null,
-        },
-      },
-      updatedAt: new Date(),
-      lastActivityAt: new Date(),
-    })
-    .where(eq(spaces.id, space.id))
-    .returning();
-
-  const createdSpace = spaceWithJob ?? space;
-  return c.json({ space: await serializeSpaceForResponse(createdSpace, user), taskRunId });
+  return c.json({
+    space: await serializeSpaceForResponse(provisioned.space, user),
+    taskRunId: provisioned.taskRunId,
+  });
 });
 
 /**
@@ -1153,6 +1207,13 @@ router.patch("/:id", async (c) => {
     const { slug, error: slugError } = normalizeSpaceSlug(body.slug);
     if (slugError) return c.json({ message: slugError }, 400);
     if (!slug && space.slug) return c.json({ message: "space slug cannot be cleared once set" }, 400);
+    if (
+      slug &&
+      slug !== space.slug &&
+      validatePublicIdentifierAssignment("spaceSlug", slug).reason === "reserved"
+    ) {
+      return reservedSpaceSlugResponse(c);
+    }
     if (slug !== space.slug) updates.slug = slug;
   }
 
@@ -1280,7 +1341,11 @@ router.post("/:id/checkpoints", async (c) => {
     type: "save_checkpoint",
     spaceId,
     userId: user.uuid,
-    data: { spaceId, description },
+    data: {
+      spaceId,
+      description,
+      requestSource: getRequestSource(c),
+    },
   });
 
   return c.json({ ok: true, taskRunId });
@@ -1770,6 +1835,8 @@ router.post("/:id/prompt", async (c) => {
   if (!accessMode) return c.json({ message: "accessMode must be one of: read_only, full_access" }, 400);
   const promptIntent = normalizeSpacePromptIntent(body.intent);
   if (!promptIntent) return c.json({ message: "intent must be one of: followup, steer" }, 400);
+  const promptThinkingLevel = normalizePromptThinkingLevel(body.thinkingLevel);
+  if (promptThinkingLevel === null) return c.json({ message: "thinkingLevel must be one of: off, minimal, low, medium, high, xhigh, max" }, 400);
   const promptPermission = accessMode === "read_only" ? "session.prompt.readonly" : "session.prompt.fullaccess";
   if (!(await hasPermission(user, promptPermission, { spaceId }))) return authzDenied(c);
 
@@ -1803,6 +1870,16 @@ router.post("/:id/prompt", async (c) => {
     return c.json({ message: "generationPolicy is invalid" }, 400);
   }
 
+  const requestedModel = body.model?.trim() || null;
+  const requestedProvider = body.provider?.trim() || (requestedModel ? "cohub" : null);
+  if (
+    requestedModel &&
+    requestedProvider &&
+    !(await validatePromptModel({ userId: user.uuid, provider: requestedProvider, model: requestedModel }))
+  ) {
+    return c.json({ code: "model_unavailable", message: "requested model is not available" }, 422);
+  }
+
   let promptLabelIds: string[] = [];
   try {
     const labelPaths = parseLabelRefs(body.labelRefs);
@@ -1827,9 +1904,7 @@ router.post("/:id/prompt", async (c) => {
 
   const content = body.content;
   const clientMessageId = body.clientMessageId?.trim() || crypto.randomUUID();
-  const sourceResult = normalizePromptSource(body.source);
-  if (sourceResult.error) return c.json({ message: sourceResult.error }, 400);
-  const source = sourceResult.source;
+  const source = resolveSessionSourceFromRequest(c, typeof body.source === "string" ? body.source : null);
 
   const scheduledAuth = getScheduledPromptAuthContext(c, spaceId, user.uuid);
   const taskData = {
@@ -1844,6 +1919,7 @@ router.post("/:id/prompt", async (c) => {
     ...(body.title ? { title: body.title } : {}),
     ...(body.model ? { model: body.model } : {}),
     ...(body.provider ? { provider: body.provider } : {}),
+    ...(promptThinkingLevel ? { thinkingLevel: promptThinkingLevel } : {}),
     ...(promptLabelIds.length > 0 ? { labelIds: promptLabelIds } : {}),
     ...(scheduledAuth ? { auth: scheduledAuth } : {}),
   };
@@ -1882,14 +1958,17 @@ router.post("/:id/prompt", async (c) => {
         clientMessageId,
         content,
         source,
-        model: body.model ?? null,
-        provider: body.provider ?? null,
+        model: requestedModel,
+        provider: requestedProvider,
+        thinkingLevel: promptThinkingLevel ?? null,
         generationPolicy,
         intent: promptIntent,
         accessMode,
         env: promptEnv,
         context: { kind: "public_api", auth: getPromptAuthContext(c, spaceId) },
-      });
+      }, {}, requestedModel && requestedProvider
+        ? { prevalidatedModel: { provider: requestedProvider, model: requestedModel } }
+        : {});
       const response = await buildSpacePromptTurnResponse(await getSpaceSessionById(sessionId), turnId);
       if (!response) return c.json({ message: "turn not found" }, 500);
       return c.json(response);
@@ -1905,6 +1984,12 @@ router.post("/:id/prompt", async (c) => {
           return c.json({ ...body, sessionId: createdSessionId }, res.status as never);
         }
         return res;
+      }
+      if (error instanceof ModelUnavailableError) {
+        return c.json(
+          { code: error.code, message: "requested model is not available", ...(createdSessionId ? { sessionId: createdSessionId } : {}) },
+          422,
+        );
       }
       if (error instanceof SandboxNotReadyError) {
         return c.json(
@@ -2060,7 +2145,7 @@ router.post("/:id/sessions", async (c) => {
     return c.json({ message: error instanceof Error ? error.message : String(error) }, 400);
   }
 
-  const source = body.source?.trim() || "public_api";
+  const source = resolveSessionSourceFromRequest(c, body.source);
   const session = await createInitialSpaceSession({
     spaceId: space.id,
     sessionId: crypto.randomUUID(),
@@ -2081,6 +2166,50 @@ router.post("/:id/sessions", async (c) => {
   });
 
   return c.json({ ok: true, session });
+});
+
+router.get("/:id/turns", async (c) => {
+  const user = getOptionalAuth(c);
+  const spaceId = c.req.param("id");
+  if (!requireValidId(spaceId)) return c.json({ message: "space not found" }, 404);
+  if (!(await hasPermission(user, "session.view", { spaceId }))) return authzDenied(c);
+
+  const sessionId = c.req.query("sessionId")?.trim() || null;
+  if (sessionId && !requireValidId(sessionId)) return c.json({ message: "invalid sessionId" }, 400);
+
+  const isMember = user?.uuid
+    ? (await getSpaceMemberRole(spaceId, user.uuid)) !== null
+    : false;
+  let accessibleSessionIds: string[] | null = null;
+  if (!isMember) {
+    const sessions = sessionId
+      ? [await getSpaceSessionById(sessionId)].filter(
+        (session): session is NonNullable<typeof session> => session?.spaceId === spaceId,
+      )
+      : await db.select().from(spaceSessions).where(eq(spaceSessions.spaceId, spaceId));
+    const visibleSessions = await filterSessionsByPermission(user, "session.view", spaceId, sessions);
+    accessibleSessionIds = visibleSessions.map((session) => session.id);
+  }
+
+  const rawLimit = c.req.query("limit");
+  try {
+    return c.json(await listSpaceTurns({
+      spaceId,
+      userUuid: user?.uuid ?? null,
+      author: (c.req.query("author") ?? "any") as "any" | "self" | "others",
+      after: c.req.query("after") ?? null,
+      before: c.req.query("before") ?? null,
+      cursor: c.req.query("cursor") ?? null,
+      limit: rawLimit === undefined ? undefined : Number(rawLimit),
+      sessionId,
+      accessibleSessionIds,
+    }));
+  } catch (error) {
+    if (error instanceof InvalidSpaceTurnListQueryError) {
+      return c.json({ message: error.message }, 400);
+    }
+    throw error;
+  }
 });
 
 router.get("/:id/sessions", async (c) => {

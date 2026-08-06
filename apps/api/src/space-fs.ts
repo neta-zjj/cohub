@@ -1,10 +1,11 @@
 
-import type { Stats } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { context, SpanStatusCode, trace, type Span } from "@opentelemetry/api";
 import { createLogger } from "@cohub/infra/logging";
+import { BOARD_EXTENSION, BOARD_MIME_TYPE } from "@cohub/protocol";
 import { getTracer } from "@cohub/infra/tracing/propagator";
 import {
   buildPreparingFile,
@@ -31,6 +32,7 @@ import type {
   SpaceFsWriteFileInput,
 } from "@cohub/protocol/fs";
 import { isTextMime } from "./space-fs-mime.js";
+import { matchesSpaceFsVersion } from "./space-fs-version.js";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_BATCH_READ_FILES = 50;
@@ -39,8 +41,8 @@ const MAX_BATCH_READ_CONCURRENCY = 8;
 const MAX_DIR_ENTRIES = 1000;
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
 const MAX_UPLOAD_COUNT = 20;
-const MAX_DIRECTORY_EXPORT_FILES = 1000;
-const MAX_DIRECTORY_EXPORT_TOTAL_BYTES = 100 * 1024 * 1024;
+const MAX_PATH_CHARS = 4096;
+const MAX_PATH_DEPTH = 64;
 const SPACE_REAL_ROOT_CACHE_TTL_MS = 30_000;
 const logger = createLogger({ serviceName: "cohub-api" });
 const tracer = getTracer("cohub-api");
@@ -61,6 +63,7 @@ const mimeByExt: Record<string, string> = {
   ".markdown": "text/markdown",
   ".json": "application/json",
   ".jsonl": "application/x-ndjson",
+  [BOARD_EXTENSION]: BOARD_MIME_TYPE,
   ".js": "text/javascript",
   ".mjs": "text/javascript",
   ".cjs": "text/javascript",
@@ -178,7 +181,18 @@ export function assertSafeRelativePath(input: string, options?: { allowEmpty?: b
   if (value.startsWith("/") || value.includes("\0")) {
     throw new SpaceFsError(400, "path_invalid", "Invalid path.");
   }
-  return value;
+  const normalized = posix.normalize(value);
+  if (normalized === ".") {
+    if (options?.allowEmpty) return "";
+    throw new SpaceFsError(400, "path_invalid", "Invalid path.");
+  }
+  if (normalized === ".." || normalized.startsWith("../") || posix.isAbsolute(normalized)) {
+    throw new SpaceFsError(400, "path_invalid", "Invalid path.");
+  }
+  if (normalized.length > MAX_PATH_CHARS || normalized.split("/").length > MAX_PATH_DEPTH) {
+    throw new SpaceFsError(400, "path_invalid", "Invalid path.");
+  }
+  return normalized;
 }
 
 type CachedSpaceRealRoot = {
@@ -222,6 +236,57 @@ async function resolveTarget(
   const target = resolve(rootReal, safePath);
   assertInsideRoot(target, rootReal);
   return { root: rootReal, target, relativePath: safePath };
+}
+
+async function ensureDirectories(root: string, targetDir: string) {
+  const rel = relative(root, targetDir);
+  if (!rel || rel === ".") return [];
+  const parts = rel.split(/[\\/]+/).filter(Boolean);
+  const created: string[] = [];
+  let current = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    current = join(current, parts[index] as string);
+    try {
+      await mkdir(current);
+      created.push(parts.slice(0, index + 1).join("/"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!(await stat(current)).isDirectory()) {
+        throw new SpaceFsError(400, "not_a_directory", "A parent path is not a directory.");
+      }
+    }
+  }
+  return created;
+}
+
+async function writeFileWithDisposition(path: string, data: Buffer) {
+  while (true) {
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(path, "wx");
+      try {
+        await handle.writeFile(data);
+        return true;
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+
+    try {
+      handle = await open(path, constants.O_WRONLY | constants.O_TRUNC);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    try {
+      await handle.writeFile(data);
+      return false;
+    } finally {
+      await handle.close();
+    }
+  }
 }
 
 async function assertVisiblePath(
@@ -571,7 +636,16 @@ export async function listSpaceDirectory(
       observation,
       "directory_read",
       "Read directory entry names; slow when the directory is large or the backing volume is under IO pressure.",
-      () => readdir(target),
+      async () => {
+        try {
+          return await readdir(target);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            throw new SpaceFsError(404, "path_not_found", "File or directory not found.");
+          }
+          throw error;
+        }
+      },
       (result) => ({
         entryCount: result.length,
         scannedEntryLimit: MAX_DIR_ENTRIES,
@@ -913,121 +987,6 @@ export async function readSpaceFile(
   });
 }
 
-export type SpaceFsDirectoryFile = {
-  path: string;
-  relativePath: string;
-  size: number;
-  mimeType: string | null;
-  content: Buffer;
-};
-
-export async function readSpaceDirectoryFiles(
-  spaceId: string,
-  path: string,
-  options?: { visibility?: SpaceFsVisibility },
-): Promise<{ path: string; files: SpaceFsDirectoryFile[] }> {
-  const visibility = options?.visibility ?? "full";
-  return observeSpaceFs("directory_files", { spaceId, path, visibility }, async (observation) => {
-    const { root, target, relativePath } = await observeSpaceFsStage(
-      observation,
-      "resolve_target",
-      "Normalize the requested path, resolve the workspace root, and protect against path traversal; slow when storage metadata or realpath is cold.",
-      () => resolveTarget(spaceId, path, { allowEmpty: true }),
-      (result) => pathTelemetry(result.relativePath),
-    );
-    observation.normalizedPath = relativePath;
-
-    const targetStats = await observeSpaceFsStage(
-      observation,
-      "target_stat",
-      "Read filesystem metadata for the requested export directory; slow when the backing volume is cold or under IO pressure.",
-      async () => {
-        try {
-          return await lstat(target);
-        } catch {
-          throw new SpaceFsError(404, "path_not_found", "File or directory not found.");
-        }
-      },
-      (stats) => ({ nodeType: entryType(stats), fileSizeBytes: stats.size, isDirectory: stats.isDirectory(), isSymlink: stats.isSymbolicLink() }),
-    );
-
-    const filter = await observeSpaceFsStage(
-      observation,
-      "visibility_filter",
-      "Build the visibility filter from workspace ignore rules when filtered access is requested; slow when ignore files need to be read.",
-      () => createVisibilityFilter(root, visibility),
-      (result) => ({ filterEnabled: result !== null }),
-    );
-
-    await observeSpaceFsStage(
-      observation,
-      "directory_check",
-      "Check visibility and validate that the requested node is an exportable directory.",
-      async () => {
-        await assertVisiblePath(filter, relativePath, { isDirectory: targetStats.isDirectory() });
-        if (targetStats.isSymbolicLink()) throw new SpaceFsError(400, "symlink_not_supported", "Symlink export is not supported.");
-        if (!targetStats.isDirectory()) throw new SpaceFsError(400, "not_a_directory", "The selected path is not a directory.");
-      },
-      () => ({ visible: true, isDirectory: true }),
-    );
-
-    const files: SpaceFsDirectoryFile[] = [];
-    let totalBytes = 0;
-    let directoriesVisited = 0;
-
-    await observeSpaceFsStage(
-      observation,
-      "directory_walk",
-      "Recursively stat and read visible files for directory export; slow when many files are present or storage is cold.",
-      async () => {
-        const walk = async (dir: string) => {
-          directoriesVisited += 1;
-          const names = await readdir(dir);
-          names.sort((a, b) => a.localeCompare(b));
-          for (const name of names) {
-            const absPath = join(dir, name);
-            const stats = await lstat(absPath);
-            const filePath = toRelativePath(root, absPath);
-            await assertVisiblePath(filter, filePath, { isDirectory: stats.isDirectory() });
-            if (stats.isSymbolicLink()) throw new SpaceFsError(400, "symlink_not_supported", "Symlink export is not supported.");
-            if (stats.isDirectory()) {
-              await walk(absPath);
-              continue;
-            }
-            if (!stats.isFile()) continue;
-            if (files.length >= MAX_DIRECTORY_EXPORT_FILES) {
-              throw new SpaceFsError(413, "directory_too_many_files", `Cannot publish more than ${MAX_DIRECTORY_EXPORT_FILES} files from a directory.`);
-            }
-            totalBytes += stats.size;
-            if (totalBytes > MAX_DIRECTORY_EXPORT_TOTAL_BYTES) {
-              throw new SpaceFsError(413, "directory_too_large", "Directory publish size exceeds 100MB.");
-            }
-            const relativeFilePath = relative(target, absPath).replace(/\\/g, "/");
-            files.push({
-              path: filePath,
-              relativePath: relativeFilePath,
-              size: stats.size,
-              mimeType: getMimeType(absPath),
-              content: await readFile(absPath),
-            });
-          }
-        };
-        await walk(target);
-      },
-      () => ({
-        fileCount: files.length,
-        totalBytes,
-        directoriesVisited,
-        maxFiles: MAX_DIRECTORY_EXPORT_FILES,
-        maxTotalBytes: MAX_DIRECTORY_EXPORT_TOTAL_BYTES,
-      }),
-    );
-
-    observation.result = { fileCount: files.length, totalBytes, directoriesVisited };
-    return { path: relativePath, files };
-  });
-}
-
 export async function readSpaceFiles(
   spaceId: string,
   paths: string[],
@@ -1263,17 +1222,28 @@ export async function streamSpaceFile(
 }
 
 export async function writeSpaceFile(spaceId: string, input: SpaceFsWriteFileInput) {
-  const { target, relativePath } = await resolveTarget(spaceId, input.path);
-  await mkdir(dirname(target), { recursive: true });
+  const { root, target, relativePath } = await resolveTarget(spaceId, input.path);
+  if (input.expected) {
+    let current: Stats;
+    try {
+      current = await stat(target);
+    } catch {
+      throw new SpaceFsError(409, "file_conflict", "File changed since it was opened.");
+    }
+    if (!matchesSpaceFsVersion(current, input.expected)) {
+      throw new SpaceFsError(409, "file_conflict", "File changed since it was opened.");
+    }
+  }
+  const createdDirs = await ensureDirectories(root, dirname(target));
   const data = input.encoding === "base64" ? Buffer.from(input.content, "base64") : Buffer.from(input.content, "utf8");
-  await writeFile(target, data);
+  const created = await writeFileWithDisposition(target, data);
   const file = await stat(target);
-  return { path: relativePath, size: file.size, mtimeMs: file.mtimeMs };
+  return { path: relativePath, size: file.size, mtimeMs: file.mtimeMs, created, createdDirs };
 }
 
 export async function createSpaceFileExclusive(spaceId: string, input: SpaceFsWriteFileInput) {
-  const { target, relativePath } = await resolveTarget(spaceId, input.path);
-  await mkdir(dirname(target), { recursive: true });
+  const { root, target, relativePath } = await resolveTarget(spaceId, input.path);
+  const createdDirs = await ensureDirectories(root, dirname(target));
   const data = input.encoding === "base64" ? Buffer.from(input.content, "base64") : Buffer.from(input.content, "utf8");
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -1287,14 +1257,14 @@ export async function createSpaceFileExclusive(spaceId: string, input: SpaceFsWr
     await handle?.close().catch(() => undefined);
   }
   const file = await stat(target);
-  return { path: relativePath, size: file.size, mtimeMs: file.mtimeMs };
+  return { path: relativePath, size: file.size, mtimeMs: file.mtimeMs, created: true, createdDirs };
 }
 
 export async function createSpaceDirectory(spaceId: string, path: string) {
-  const { target, relativePath } = await resolveTarget(spaceId, path);
-  await mkdir(target, { recursive: true });
+  const { root, target, relativePath } = await resolveTarget(spaceId, path);
+  const createdDirs = await ensureDirectories(root, target);
   const info = await stat(target);
-  return { path: relativePath, mtimeMs: info.mtimeMs };
+  return { path: relativePath, mtimeMs: info.mtimeMs, created: createdDirs.includes(relativePath), createdDirs };
 }
 
 export const deleteSpaceNode = async (spaceId: string, path: string, recursive = false) => {
@@ -1316,9 +1286,10 @@ export const deleteSpaceNode = async (spaceId: string, path: string, recursive =
 export async function moveSpaceNode(spaceId: string, input: SpaceFsMoveInput) {
   const from = await resolveTarget(spaceId, input.fromPath);
   const to = await resolveTarget(spaceId, input.toPath);
-  await mkdir(dirname(to.target), { recursive: true });
+  const nodeType = entryType(await lstat(from.target));
+  const createdDirs = await ensureDirectories(to.root, dirname(to.target));
   await rename(from.target, to.target);
-  return { fromPath: from.relativePath, toPath: to.relativePath };
+  return { fromPath: from.relativePath, toPath: to.relativePath, nodeType, createdDirs };
 }
 
 export function sanitizeFileName(name: string): string | null {
@@ -1333,19 +1304,14 @@ export function sanitizeFileName(name: string): string | null {
   return cleaned || null;
 }
 
-export async function uploadSpaceFiles(
-  spaceId: string,
+type DirectUploadCandidate = { file: File; name: string; relativePath: string };
+
+function prepareDirectUploadCandidates(
   files: File[],
   targetDir: string,
-): Promise<SpaceFsUploadResponse> {
-  const { workspaceDir } = await ensureSpaceWorkspaceReady(spaceId);
-  const dir = targetDir ? resolve(workspaceDir, targetDir) : workspaceDir;
-  assertInsideRoot(dir, workspaceDir);
-  await mkdir(dir, { recursive: true });
-
-  const uploaded: SpaceFsUploadResponse["uploaded"] = [];
+): { candidates: DirectUploadCandidate[]; errors: SpaceFsUploadResponse["errors"] } {
+  const candidates: DirectUploadCandidate[] = [];
   const errors: SpaceFsUploadResponse["errors"] = [];
-
   for (const file of files.slice(0, MAX_UPLOAD_COUNT)) {
     const safeName = sanitizeFileName(file.name);
     if (!safeName) {
@@ -1356,24 +1322,50 @@ export async function uploadSpaceFiles(
       errors.push({ name: safeName, code: "file_too_large", message: "file exceeds 50MB limit" });
       continue;
     }
-    const targetPath = join(dir, safeName);
+    candidates.push({
+      file,
+      name: safeName,
+      relativePath: targetDir ? `${targetDir}/${safeName}` : safeName,
+    });
+  }
+  return { candidates, errors };
+}
+
+export async function uploadSpaceFiles(
+  spaceId: string,
+  files: File[],
+  targetDir: string,
+): Promise<SpaceFsUploadResponse> {
+  const safeTargetDir = targetDir ? assertSafeRelativePath(targetDir, { allowEmpty: true }) : "";
+  const { candidates, errors } = prepareDirectUploadCandidates(files, safeTargetDir);
+  if (candidates.length === 0) return { uploaded: [], errors, createdDirs: [] };
+
+  const { workspaceDir } = await ensureSpaceWorkspaceReady(spaceId);
+  const dir = safeTargetDir ? resolve(workspaceDir, safeTargetDir) : workspaceDir;
+  assertInsideRoot(dir, workspaceDir);
+  const createdDirs = await ensureDirectories(workspaceDir, dir);
+  const uploaded: SpaceFsUploadResponse["uploaded"] = [];
+
+  for (const candidate of candidates) {
+    const targetPath = join(dir, candidate.name);
     try {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      await writeFile(targetPath, buffer);
+      const buffer = Buffer.from(await candidate.file.arrayBuffer());
+      const created = await writeFileWithDisposition(targetPath, buffer);
       const stats = await stat(targetPath);
       uploaded.push({
-        path: targetDir ? `${targetDir}/${safeName}` : safeName,
-        name: safeName,
+        path: candidate.relativePath,
+        name: candidate.name,
         size: stats.size,
-        mimeType: getMimeType(safeName),
+        mimeType: getMimeType(candidate.name),
         mtimeMs: stats.mtimeMs,
+        created,
       });
     } catch {
-      errors.push({ name: safeName, code: "write_failed", message: "failed to write file" });
+      errors.push({ name: candidate.name, code: "write_failed", message: "failed to write file" });
     }
   }
 
-  return { uploaded, errors };
+  return { uploaded, errors, createdDirs };
 }
 
 export function spaceFsJsonError(error: unknown) {

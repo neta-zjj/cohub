@@ -28,8 +28,12 @@ export type SessionTurnSegmentRecord = {
 };
 
 export type {
+  ContextCompactionMeta,
+  ContextCompactionScope,
+  ContextCompactionTriggerReason,
   MessageToolCallsFile,
   SessionTurnAuthorProfile,
+  SessionTurnCompactionSummary,
   SessionTurnIntent,
   SessionTurnIntermediateIndex,
   SessionTurnIntermediateSummary,
@@ -37,6 +41,9 @@ export type {
   SessionTurnRecord,
   SessionTurnStatus,
   SessionTurnSummary,
+  SpaceTurnAuthorFilter,
+  SpaceTurnListItem,
+  SpaceTurnsResponse,
   StoredIntermediateMessage,
   StoredToolCall,
   TurnIntermediateMessagesFile,
@@ -54,6 +61,7 @@ export type SessionPromptInput = {
     intent?: "auto" | "continue" | "new_session" | "fork" | "steer" | "followup";
     model?: string;
     provider?: string;
+    thinkingLevel?: string;
     turnId?: string;
   } | null;
 };

@@ -5,6 +5,7 @@ import {
 	FolderKanban,
 	Loader2,
 	MessageSquare,
+	Pin,
 	Plus,
 	Search,
 	Tag,
@@ -38,10 +39,30 @@ import UserAvatar from "$lib/components/UserAvatar.svelte";
 import { isComposingKeyboardEvent } from "$lib/keyboard";
 import { sdk } from "$lib/sdk";
 import { buildUserNewSessionRoute } from "$lib/space-routes";
+import { authStore } from "$lib/stores/auth.svelte";
 import {
 	fetchSpaceListWithCache,
 	getCachedSpaceListMeta,
+	onSpaceListCacheUpdated,
 } from "$lib/stores/space-list-cache";
+import {
+	getCachedSpaceFilterPref,
+	type SpaceFilterPref,
+	setCachedSpaceFilterPref,
+} from "$lib/stores/space-picker-filter";
+import { toggleSpacePin } from "$lib/stores/space-pins.svelte";
+
+/** Immediately reflect pin state on rendered items after a toggle. */
+function syncPinStateInItems(spaceId: string, isPinned: boolean) {
+	const patch = (items: CommandPaletteItem[]) =>
+		items.map((item) =>
+			item.type === "space" && item.spaceId === spaceId
+				? { ...item, isPinned }
+				: item,
+		);
+	defaultItems = patch(defaultItems);
+	localItems = patch(localItems);
+}
 
 const MIN_QUERY_LENGTH = 2;
 const RESULT_LIMIT = 30;
@@ -100,6 +121,39 @@ let runStatus = $state<"idle" | "queued" | "running" | "done" | "failed">(
 let runError = $state("");
 let runPollTimer: number | null = null;
 
+// Space picker filter (All / Mine / Pinned) — shown when the palette operates
+// in space-selection mode (query starts with `a:` or intent is new-chat).
+type SpaceFilter = SpaceFilterPref;
+let spaceFilter = $state<SpaceFilter>("all");
+
+// Pagination for Space Picker mode: load larger page sizes (e.g. 50 items per page)
+// and dynamically render more as user scrolls.
+const SPACE_PAGE_SIZE = 50;
+let spaceDisplayLimit = $state(SPACE_PAGE_SIZE);
+
+function handleResultsScroll(event: Event) {
+	if (!isSpacePickerMode || runMode) return;
+	const target = event.currentTarget as HTMLElement | null;
+	if (!target) return;
+	// When scrolled within 100px of bottom, reveal next page
+	if (target.scrollTop + target.clientHeight >= target.scrollHeight - 100) {
+		const totalAvailable = filteredSpaceItems
+			? filteredSpaceItems(mergedItemsRaw).length
+			: mergedItemsRaw.length;
+		if (spaceDisplayLimit < totalAvailable) {
+			spaceDisplayLimit += SPACE_PAGE_SIZE;
+		}
+	}
+}
+
+// Space filter reset on change
+$effect(() => {
+	spaceFilter;
+	query;
+	open;
+	spaceDisplayLimit = SPACE_PAGE_SIZE;
+});
+
 const currentSpaceId = $derived.by(() => {
 	const match = page.url.pathname.match(/^\/spaces\/([^/]+)/);
 	const id = match?.[1] ?? null;
@@ -116,6 +170,11 @@ const hasLabelScope = $derived(
 	Boolean(searchPlan.labelRef && searchPlan.resourceTypes?.includes("label")),
 );
 const typeLabel = $derived(typeLabelFor(searchPlan.resourceTypes));
+const isSpacePickerMode = $derived(
+	openIntent === "new-chat" ||
+		(searchPlan.resourceTypes?.length === 1 &&
+			searchPlan.resourceTypes[0] === "space"),
+);
 const recentItems = $derived.by(() => {
 	const items = getRecentCommandItems();
 	if (!searchPlan.resourceTypes) return items;
@@ -123,8 +182,20 @@ const recentItems = $derived.by(() => {
 });
 // Local commands are always resolved synchronously — never blocked by network/IDB.
 const localCommands = $derived(resolveLocalCommandItems(searchPlan));
-const mergedItems = $derived.by(() => {
-	const raw =
+const myUserUuid = $derived(authStore.userUuid);
+const filteredSpaceItems = $derived.by(() => {
+	if (!isSpacePickerMode || spaceFilter === "all") return null;
+	return (items: CommandPaletteItem[]) =>
+		items.filter((item) => {
+			if (item.type !== "space") return true;
+			if (spaceFilter === "mine")
+				return item.ownerProfile?.userUuid === myUserUuid;
+			if (spaceFilter === "pinned") return item.isPinned ?? false;
+			return true;
+		});
+});
+const mergedItemsRaw = $derived.by(() => {
+	let raw =
 		trimmedQuery.length < MIN_QUERY_LENGTH && !hasLabelScope
 			? withLocalCommands(
 					defaultItems.length > 0 ? defaultItems : recentItems,
@@ -141,12 +212,22 @@ const mergedItems = $derived.by(() => {
 					RESULT_LIMIT,
 				);
 	// New-chat intent is space-only: keep spaces + New Space, drop the rest.
-	if (openIntent !== "new-chat") return raw;
-	return raw.filter(
-		(item) =>
-			item.type === "space" ||
-			(item.type === "command" && item.id === "new-space"),
-	);
+	if (openIntent === "new-chat") {
+		raw = raw.filter(
+			(item) =>
+				item.type === "space" ||
+				(item.type === "command" && item.id === "new-space"),
+		);
+	}
+	// Apply Mine / Pinned filter in space picker mode
+	if (filteredSpaceItems) raw = filteredSpaceItems(raw);
+	return raw;
+});
+const mergedItems = $derived.by(() => {
+	if (isSpacePickerMode) {
+		return mergedItemsRaw.slice(0, spaceDisplayLimit);
+	}
+	return mergedItemsRaw;
 });
 const isSearching = $derived(!localDone || !remoteDone || !defaultDone);
 const renderedItems = $derived(
@@ -285,6 +366,7 @@ function openPalette(detail?: OpenCommandPaletteDetail) {
 	placeholder = detail?.placeholder ?? DEFAULT_PLACEHOLDER;
 	query = detail?.query ?? "";
 	openIntent = detail?.intent ?? "navigate";
+	spaceFilter = getCachedSpaceFilterPref();
 	forceSpaceRefreshForNextSearch = Boolean(detail?.refreshSpaces);
 	activeIndex = 0;
 	armPointerHover();
@@ -299,6 +381,7 @@ function closePalette() {
 	title = "Command search";
 	placeholder = DEFAULT_PLACEHOLDER;
 	openIntent = "navigate";
+	spaceFilter = getCachedSpaceFilterPref();
 	activeIndex = 0;
 	settledItems = [];
 	refreshingSpaces = false;
@@ -658,6 +741,11 @@ $effect(() => {
 onMount(() => {
 	window.addEventListener("keydown", handleGlobalKeydown, { capture: true });
 	window.addEventListener("cohub:open-command-palette", handleOpenPaletteEvent);
+	// Refresh space items when the space list cache changes (e.g. pin toggle)
+	// so the palette reflects the new isPinned state immediately.
+	const offSpaceListCache = onSpaceListCacheUpdated(() => {
+		if (open && !runMode) spaceListRefreshToken += 1;
+	});
 	return () => {
 		window.removeEventListener("keydown", handleGlobalKeydown, {
 			capture: true,
@@ -666,6 +754,7 @@ onMount(() => {
 			"cohub:open-command-palette",
 			handleOpenPaletteEvent,
 		);
+		offSpaceListCache();
 		localController?.abort();
 		remoteController?.abort();
 		if (debounceTimer != null) window.clearTimeout(debounceTimer);
@@ -699,6 +788,21 @@ onMount(() => {
 				{/if}
 			</div>
 
+			{#if isSpacePickerMode && !runMode}
+				<div class="space-filter-bar" role="tablist" aria-label="Filter spaces">
+					{#each [{ key: "all", label: "All" }, { key: "mine", label: "Mine" }, { key: "pinned", label: "Pinned" }] as filter}
+						<button
+							type="button"
+							class="space-filter-btn"
+							class:active={spaceFilter === filter.key}
+							role="tab"
+							aria-selected={spaceFilter === filter.key}
+							onclick={() => { spaceFilter = filter.key as SpaceFilter; setCachedSpaceFilterPref(filter.key as SpaceFilter); activeIndex = 0; }}
+						>{filter.label}</button>
+					{/each}
+				</div>
+			{/if}
+
 			{#if runMode}
 				<div bind:this={resultsEl} class="command-results command-runner">
 					{#if runError}
@@ -730,16 +834,30 @@ onMount(() => {
 					{/if}
 				</div>
 			{:else}
-				<div bind:this={resultsEl} class:searching={showingSettledItems} class="command-results" role="listbox" aria-label="Search results">
+				<div bind:this={resultsEl} class:searching={showingSettledItems} class="command-results" role="listbox" aria-label="Search results" onscroll={handleResultsScroll}>
 					{#if renderedItems.length === 0}
 						<div class="command-empty">
 							<div class="command-empty-mark"><CornerDownRight class="h-4 w-4" /></div>
 							<div>
 								<div class="text-[13px] font-medium text-text-secondary">
-									{trimmedQuery.length < MIN_QUERY_LENGTH && !hasLabelScope ? "Command lens ready" : "No matching results"}
+									{#if isSpacePickerMode && spaceFilter === "pinned"}
+										No pinned spaces
+									{:else if isSpacePickerMode && spaceFilter === "mine"}
+										No spaces you own
+									{:else if trimmedQuery.length < MIN_QUERY_LENGTH && !hasLabelScope}
+										Command lens ready
+									{:else}
+										No matching results
+									{/if}
 								</div>
 								<div class="mt-1 text-[12px] text-text-tertiary">
-									{trimmedQuery.length < MIN_QUERY_LENGTH && !hasLabelScope ? "Try label:bug for labels, a: for spaces, or t: for turns." : "Try a different phrase or type filter."}
+									{#if isSpacePickerMode && spaceFilter === "pinned"}
+										Pin a space to bookmark it here.
+									{:else if trimmedQuery.length < MIN_QUERY_LENGTH && !hasLabelScope}
+										Try label:bug for labels, a: for spaces, or t: for turns.
+									{:else}
+										Try a different phrase or type filter.
+									{/if}
 								</div>
 							</div>
 						</div>
@@ -749,44 +867,74 @@ onMount(() => {
 							{@const Icon = meta.icon}
 							{@const profile = profileFor(item)}
 							{@const timestamp = itemTimestamp(item)}
-							<button
-								type="button"
+							<div
 								class:active={index === activeIndex}
 								class="command-result"
 								onpointermove={() => handleResultPointerMove(index)}
-								onclick={() => void activate(item)}
 								role="option"
 								aria-selected={index === activeIndex}
+								tabindex="-1"
 							>
-								{#if item.type === "space"}
-									<SpaceAvatar name={item.title || item.spaceName || item.spaceId} profile={item.spaceProfile} size="sm" />
-								{:else}
-									<div class={`command-type-mark ${meta.className}`} aria-label={item.type}>
-										<Icon class="h-3.5 w-3.5" />
+								<button
+									type="button"
+									class="command-result-main"
+									onclick={() => void activate(item)}
+								>
+									{#if item.type === "space"}
+										<SpaceAvatar name={item.title || item.spaceName || item.spaceId} profile={item.spaceProfile} size="sm" />
+									{:else}
+										<div class={`command-type-mark ${meta.className}`} aria-label={item.type}>
+											<Icon class="h-3.5 w-3.5" />
+										</div>
+									{/if}
+									<div class="min-w-0 flex-1 text-left">
+										<div class="flex min-w-0 items-center gap-2">
+											<span class="truncate text-[13px] font-medium text-text-primary">{item.title}</span>
+										</div>
+										<div class="command-context-row">
+											{#if profile}
+												<span class="command-profile" title={profile.displayName}>
+													<UserAvatar name={profile.displayName} avatarUrl={profile.avatarUrl} size="xxs" class="border-0 bg-bg-primary text-[8px]" />
+													<span class="truncate">{profile.displayName}</span>
+												</span>
+												<span class="command-context-separator">·</span>
+											{/if}
+											<span class="command-context" title={contextFor(item)}>{contextFor(item)}</span>
+											{#if timestamp}
+												<span class="command-context-separator">·</span>
+												<time class="command-time" datetime={item.updatedAt ?? undefined} title={timestamp.title}>{timestamp.label}</time>
+											{/if}
+										</div>
 									</div>
+									<div class="command-enter">↵</div>
+								</button>
+								{#if isSpacePickerMode && item.type === "space"}
+									<button
+										type="button"
+										class="command-pin-btn"
+										class:pinned={item.isPinned}
+										title={item.isPinned ? "Unpin" : "Pin"}
+										aria-label={item.isPinned ? `Unpin ${item.title}` : `Pin ${item.title}`}
+										onclick={(e) => {
+									e.stopPropagation();
+									const wasPinned = item.isPinned ?? false;
+									syncPinStateInItems(item.spaceId, !wasPinned);
+									void toggleSpacePin(item.spaceId).catch((err) => {
+										console.warn("[palette] pin toggle failed", err);
+										syncPinStateInItems(item.spaceId, wasPinned);
+									});
+								}}
+									>
+										<Pin class="h-3.5 w-3.5" />
+									</button>
 								{/if}
-								<div class="min-w-0 flex-1 text-left">
-									<div class="flex min-w-0 items-center gap-2">
-										<span class="truncate text-[13px] font-medium text-text-primary">{item.title}</span>
-									</div>
-									<div class="command-context-row">
-										{#if profile}
-											<span class="command-profile" title={profile.displayName}>
-												<UserAvatar name={profile.displayName} avatarUrl={profile.avatarUrl} size="xxs" class="border-0 bg-bg-primary text-[8px]" />
-												<span class="truncate">{profile.displayName}</span>
-											</span>
-											<span class="command-context-separator">·</span>
-										{/if}
-										<span class="command-context" title={contextFor(item)}>{contextFor(item)}</span>
-										{#if timestamp}
-											<span class="command-context-separator">·</span>
-											<time class="command-time" datetime={item.updatedAt ?? undefined} title={timestamp.title}>{timestamp.label}</time>
-										{/if}
-									</div>
-								</div>
-								<div class="command-enter">↵</div>
-							</button>
+							</div>
 						{/each}
+						{#if isSpacePickerMode && mergedItemsRaw.length > spaceDisplayLimit}
+							<div class="flex items-center justify-center py-2 text-[11px] text-text-tertiary">
+								<span>Showing {spaceDisplayLimit} of {mergedItemsRaw.length} spaces · scroll for more</span>
+							</div>
+						{/if}
 					{/if}
 				</div>
 			{/if}
@@ -884,14 +1032,72 @@ onMount(() => {
 		display: flex;
 		width: 100%;
 		align-items: center;
-		gap: 12px;
+		gap: 4px;
 		border: 0;
 		border-radius: 9px;
 		background: transparent;
-		padding: 10px 10px;
+		padding: 6px 6px;
 		color: inherit;
 		transition: background-color 90ms cubic-bezier(0.25, 1, 0.5, 1), transform 90ms cubic-bezier(0.25, 1, 0.5, 1);
 	}
+
+	.command-result-main {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-width: 0;
+		flex: 1;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		padding: 4px 4px;
+		border-radius: 7px;
+		cursor: pointer;
+	}
+
+	.command-result-main:focus-visible {
+		outline: 2px solid color-mix(in oklch, var(--brand) 42%, transparent);
+		outline-offset: -2px;
+	}
+
+	.command-pin-btn {
+		display: grid;
+		place-items: center;
+		flex: 0 0 auto;
+		width: 28px;
+		height: 28px;
+		border: 0;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--text-tertiary);
+		opacity: 0;
+		cursor: pointer;
+		transition: opacity 90ms cubic-bezier(0.25, 1, 0.5, 1), background-color 90ms cubic-bezier(0.25, 1, 0.5, 1), color 90ms cubic-bezier(0.25, 1, 0.5, 1);
+	}
+
+	.command-pin-btn:focus-visible {
+		opacity: 1;
+		outline: 2px solid color-mix(in oklch, var(--brand) 42%, transparent);
+		outline-offset: -2px;
+	}
+
+	.command-pin-btn.pinned {
+		opacity: 1;
+		color: var(--brand);
+	}
+
+	.command-pin-btn:hover {
+		opacity: 1;
+		background: var(--bg-hover);
+		color: var(--brand);
+	}
+
+	.command-pin-btn:active {
+		transform: scale(0.92);
+	}
+
+	.command-result.active .command-pin-btn { opacity: 1; }
+	.command-result.active .command-pin-btn:not(.pinned) { color: var(--text-tertiary); }
 
 	.command-result::before {
 		content: "";
@@ -1031,6 +1237,35 @@ onMount(() => {
 		font-size: 10px;
 	}
 
+	.space-filter-bar {
+		display: flex;
+		gap: 2px;
+		padding: 6px 8px;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.space-filter-btn {
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		padding: 4px 12px;
+		color: var(--text-tertiary);
+		font-size: 12px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background-color 90ms, color 90ms;
+	}
+
+	.space-filter-btn:hover {
+		background: var(--bg-hover);
+		color: var(--text-secondary);
+	}
+
+	.space-filter-btn.active {
+		background: color-mix(in oklch, var(--brand) 12%, var(--bg-primary) 88%);
+		color: var(--brand);
+	}
+
 	.command-status {
 		display: inline-flex;
 		min-width: 0;
@@ -1091,8 +1326,8 @@ onMount(() => {
 
 		.command-result {
 			min-height: 58px;
-			gap: 10px;
-			padding: 10px 8px;
+			gap: 6px;
+			padding: 8px 8px;
 		}
 
 		.command-type-mark {
@@ -1100,9 +1335,9 @@ onMount(() => {
 			height: 32px;
 		}
 
-		.command-pin-action,
-		.command-pin-action:not(.pinned) {
-			min-width: 44px;
+		.command-pin-btn,
+		.command-pin-btn:not(.pinned) {
+			width: 44px;
 			height: 44px;
 			opacity: 1;
 		}

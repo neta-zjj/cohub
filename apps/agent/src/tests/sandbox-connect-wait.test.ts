@@ -51,5 +51,3 @@ assert.equal(isSandboxConnectRetryable(refused), true, "then wait for the new en
 
 const authError = new Error("forbidden");
 assert.equal(isSandboxConnectRetryable(authError), false, "auth/logic errors fail fast");
-
-console.log("sandbox connect wait policy checks passed");

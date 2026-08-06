@@ -210,6 +210,13 @@ $effect(() => {
 	.chat-timeline-scroll {
 		scrollbar-width: none;
 		-ms-overflow-style: none;
+		/*
+		 * Mobile WebKit paints native text selection outside overflow:auto bounds,
+		 * so long selections can bleed into the header/composer while scrolling.
+		 * A solid mask keeps the selection highlight clipped to this scroller.
+		 */
+		-webkit-mask-image: linear-gradient(#000 0 0);
+		mask-image: linear-gradient(#000 0 0);
 	}
 
 	.chat-timeline-scroll::-webkit-scrollbar {

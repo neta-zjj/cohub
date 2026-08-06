@@ -1,14 +1,13 @@
 import type { ContentBlock } from "@cohub/protocol/core";
 import { parseMentions } from "./mentions.js";
-import type { ReferenceInput } from "./types.js";
+import { fileTargetId, normalizeFilePath } from "./paths.js";
+import type { ReferenceInput, ReferenceKind } from "./types.js";
 
 /** A turn's worth of content needed to extract references from it. */
 export type TurnReferenceSource = {
   spaceId: string;
   sessionId: string;
   turnId: string;
-  /** The user who authored the turn, for participant references. */
-  userUuid?: string | null;
   /** User-authored content (carries @mentions). */
   userContent?: ContentBlock[] | null;
   /** Plain text fallback when structured content is unavailable. */
@@ -28,57 +27,73 @@ const collectText = (content: ContentBlock[] | null | undefined): string => {
     .join("\n");
 };
 
+const asString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() !== "" ? value : undefined;
+
 /**
- * Read a structured `spaceId` / `sessionId` from a tool call's input. Tools that
- * act on other resources carry these as explicit UUID fields, so we resolve
- * cross-resource references structurally rather than by parsing text.
+ * Read the space/session a tool acted on. Cross-resource tools carry these as
+ * explicit UUID fields (camelCase from the SDK, snake_case from raw tool
+ * params), so we resolve targets structurally rather than by parsing text.
  */
 const readToolTarget = (
   input: Record<string, unknown>,
 ): { spaceId?: string; sessionId?: string } => {
-  const spaceId = isUuid(input.spaceId) ? input.spaceId : undefined;
-  const sessionId = isUuid(input.sessionId) ? input.sessionId : undefined;
-  return { spaceId, sessionId };
+  const spaceRaw = input.spaceId ?? input.space_id;
+  const sessionRaw = input.sessionId ?? input.session_id;
+  return {
+    spaceId: isUuid(spaceRaw) ? (spaceRaw as string) : undefined,
+    sessionId: isUuid(sessionRaw) ? (sessionRaw as string) : undefined,
+  };
+};
+
+/** Map a filesystem tool name to its `agent_tool_file_*` reference kind. */
+const FILE_TOOL_KINDS: Record<string, ReferenceKind> = {
+  read: "agent_tool_file_read",
+  write: "agent_tool_file_write",
+  edit: "agent_tool_file_edit",
+  ls: "agent_tool_file_ls",
+  find: "agent_tool_file_find",
+  grep: "agent_tool_file_grep",
 };
 
 /**
- * Extract every reference carried by a single turn: the participant, any
- * @mentions in user content, and cross-resource tool calls in assistant
- * content. Merging these into one pass keeps the write path cheap \u2014 a turn is
- * the natural boundary that already holds all three signals.
+ * Directory-scanning tools treat a missing path as the current working
+ * directory, so a bare `ls` still records a workspace-root touch. Content tools
+ * (read/write/edit) always carry an explicit path, so a missing one is skipped.
+ */
+const DIR_TOOL_KINDS = new Set<ReferenceKind>([
+  "agent_tool_file_ls",
+  "agent_tool_file_find",
+  "agent_tool_file_grep",
+]);
+
+/**
+ * Extract every reference edge carried by a single turn: @mentions in user
+ * content, cross-resource tool calls, and filesystem access from path-bearing
+ * tools. All edges are sourced at the turn for maximum precision; session/space
+ * rollups come from the denormalized ancestry columns.
  *
  * Pure and deterministic: identical input always yields identical output, so it
- * powers both the live double-write and the backfill scan.
+ * powers both the live double-write and the backfill scan. Turn authorship is
+ * not indexed here — that lives on `session_turns.user_uuid`.
  */
 export const extractTurnReferences = (turn: TurnReferenceSource): ReferenceInput[] => {
   const references: ReferenceInput[] = [];
   const { spaceId, sessionId, turnId } = turn;
 
-  // Participant: the turn author is an active member of this session.
-  const userUuid = turn.userUuid?.trim();
-  if (userUuid) {
-    references.push({
-      kind: "participant",
-      sourceType: "user",
-      sourceId: userUuid,
-      sourceTurnId: turnId,
-      targetType: "session",
-      targetId: sessionId,
-      spaceId,
-      sessionId,
-    });
-  }
+  const source = {
+    sourceType: "turn" as const,
+    sourceId: turnId,
+    sourceSpaceId: spaceId,
+    sourceSessionId: sessionId,
+  };
 
-  // Mentions: @space / @session links authored in the user's message.
-  const mentionText =
-    collectText(turn.userContent) || turn.userText || "";
+  // Mentions: @space / @session links authored in the user's message. Recorded
+  // in full, including self-references; consumers filter self-loops if needed.
+  const mentionText = collectText(turn.userContent) || turn.userText || "";
   const seenMentions = new Map<string, ReferenceInput>();
   for (const mention of parseMentions(mentionText)) {
-    // Skip self-references to the current session.
-    if (mention.sessionId && mention.sessionId === sessionId) continue;
-    const targetType: ReferenceInput["targetType"] = mention.sessionId
-      ? "session"
-      : "space";
+    const targetType = mention.sessionId ? ("session" as const) : ("space" as const);
     const targetId = mention.sessionId ?? mention.spaceId;
     const key = `${targetType}:${targetId}`;
     const existing = seenMentions.get(key);
@@ -87,14 +102,10 @@ export const extractTurnReferences = (turn: TurnReferenceSource): ReferenceInput
       continue;
     }
     const reference: ReferenceInput = {
+      ...source,
       kind: "mention",
-      sourceType: "session",
-      sourceId: sessionId,
-      sourceTurnId: turnId,
       targetType,
       targetId,
-      spaceId,
-      sessionId,
       count: 1,
       meta: {
         label: mention.label,
@@ -105,43 +116,64 @@ export const extractTurnReferences = (turn: TurnReferenceSource): ReferenceInput
     references.push(reference);
   }
 
-  // Tool calls: cross-resource actions carry structured target ids.
-  const seenToolCalls = new Map<string, ReferenceInput>();
-  for (const block of turn.assistantContent ?? []) {
-    if (block.type !== "tool_use") continue;
-    const { spaceId: toolSpaceId, sessionId: toolSessionId } = readToolTarget(block.input);
-    // Only record references that point at a *different* resource.
-    const targetsOtherSession = toolSessionId && toolSessionId !== sessionId;
-    const targetsOtherSpace = toolSpaceId && toolSpaceId !== spaceId;
-    if (!targetsOtherSession && !targetsOtherSpace) continue;
-
-    const targetType: ReferenceInput["targetType"] = targetsOtherSession
-      ? "session"
-      : "space";
-    const targetId = (targetsOtherSession ? toolSessionId : toolSpaceId) as string;
-    const key = `${targetType}:${targetId}`;
-    const existing = seenToolCalls.get(key);
+  // Tool activity: cross-resource actions (target space/session) and filesystem
+  // access (target file). Both recorded in full; self-loops are ordinary edges.
+  const seenEdges = new Map<string, ReferenceInput>();
+  const bump = (key: string, build: () => ReferenceInput) => {
+    const existing = seenEdges.get(key);
     if (existing) {
       existing.count = (existing.count ?? 1) + 1;
+      return;
+    }
+    const reference = build();
+    seenEdges.set(key, reference);
+    references.push(reference);
+  };
+
+  for (const block of turn.assistantContent ?? []) {
+    if (block.type !== "tool_use") continue;
+    const input = block.input as Record<string, unknown>;
+
+    // Filesystem access: path-bearing tools point at a workspace/absolute path.
+    const fileKind = FILE_TOOL_KINDS[block.name];
+    if (fileKind) {
+      const targetSpaceId = readToolTarget(input).spaceId ?? spaceId;
+      const rawPath = asString(input.path);
+      // Directory tools default a missing path to the working directory.
+      const path = normalizeFilePath(rawPath ?? (DIR_TOOL_KINDS.has(fileKind) ? "." : undefined));
+      if (path) {
+        const targetId = fileTargetId(targetSpaceId, path);
+        bump(`${fileKind}|${targetId}`, () => ({
+          ...source,
+          kind: fileKind,
+          targetType: "file",
+          targetId,
+          count: 1,
+          meta: {
+            ...(rawPath && rawPath !== path ? { raw: rawPath } : {}),
+            ...(targetSpaceId !== spaceId ? { targetSpaceId } : {}),
+          },
+        }));
+      }
       continue;
     }
-    const reference: ReferenceInput = {
+
+    // Cross-resource tool calls: prefer a session target, else a space target.
+    const { spaceId: toolSpaceId, sessionId: toolSessionId } = readToolTarget(input);
+    const targetType = toolSessionId ? ("session" as const) : toolSpaceId ? ("space" as const) : null;
+    if (!targetType) continue;
+    const targetId = (toolSessionId ?? toolSpaceId) as string;
+    bump(`tool_call|${targetType}:${targetId}`, () => ({
+      ...source,
       kind: "tool_call",
-      sourceType: "session",
-      sourceId: sessionId,
-      sourceTurnId: turnId,
       targetType,
       targetId,
-      spaceId,
-      sessionId,
       count: 1,
       meta: {
         tool: block.name,
-        ...(targetsOtherSession && toolSpaceId ? { targetSpaceId: toolSpaceId } : {}),
+        ...(toolSessionId && toolSpaceId ? { targetSpaceId: toolSpaceId } : {}),
       },
-    };
-    seenToolCalls.set(key, reference);
-    references.push(reference);
+    }));
   }
 
   return references;

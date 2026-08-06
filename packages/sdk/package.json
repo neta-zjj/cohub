@@ -1,7 +1,7 @@
 {
   "name": "@neta-art/cohub",
-  "version": "2.11.2",
-  "description": "Cohub SDK for spaces, sessions, checkpoints, and realtime agent collaboration.",
+  "version": "4.9.0",
+  "description": "Cohub SDK for spaces, sessions, boards, and realtime agent collaboration.",
   "license": "Apache-2.0",
   "private": false,
   "type": "module",
@@ -43,6 +43,22 @@
       "./debugger": {
         "types": "./dist/debugger.d.ts",
         "import": "./dist/debugger.js"
+      },
+      "./board": {
+        "types": "./dist/board/index.d.ts",
+        "import": "./dist/board/index.js"
+      },
+      "./board/render": {
+        "types": "./dist/board/render/index.d.ts",
+        "import": "./dist/board/render/index.js"
+      },
+      "./board/export": {
+        "types": "./dist/board/export/index.d.ts",
+        "import": "./dist/board/export/index.js"
+      },
+      "./board/headless": {
+        "types": "./dist/board/headless/index.d.ts",
+        "import": "./dist/board/headless/index.js"
       }
     },
     "types": "./dist/index.d.ts"
@@ -67,6 +83,22 @@
     "./debugger": {
       "types": "./src/debugger.ts",
       "import": "./src/debugger.ts"
+    },
+    "./board": {
+      "types": "./src/board/index.ts",
+      "import": "./src/board/index.ts"
+    },
+    "./board/render": {
+      "types": "./src/board/render/index.ts",
+      "import": "./src/board/render/index.ts"
+    },
+    "./board/export": {
+      "types": "./src/board/export/index.ts",
+      "import": "./src/board/export/index.ts"
+    },
+    "./board/headless": {
+      "types": "./src/board/headless/index.ts",
+      "import": "./src/board/headless/index.ts"
     }
   },
   "types": "./src/index.ts",
@@ -79,11 +111,35 @@
   ],
   "scripts": {
     "build": "tsdown",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "test": "node ../../scripts/test/run.mjs 'src/**/*.test.ts' 'tests/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "perfect-freehand": "1.2.3",
+    "zod": "^4.4.3"
+  },
   "devDependencies": {
+    "@biomejs/biome": "2.5.3",
     "@cohub/protocol": "workspace:*",
+    "@napi-rs/canvas": "^1.0.2",
+    "@types/node": "26.1.1",
+    "pixi.js": "^8.19.0",
     "tsdown": "^0.22.7",
+    "tsx": "4.23.1",
     "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@napi-rs/canvas": "^1.0.2",
+    "pixi.js": "^8.19.0"
+  },
+  "peerDependenciesMeta": {
+    "@napi-rs/canvas": {
+      "optional": true
+    },
+    "pixi.js": {
+      "optional": true
+    }
   }
 }

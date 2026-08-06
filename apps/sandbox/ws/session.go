@@ -118,6 +118,12 @@ func (s *Server) handleSessionAttach(session *connectionSession, attach protocol
 	}
 	if err := s.sendToConnection(session, payload); err != nil {
 		s.logger.Warn("failed to send session.attach.ok", slog.String("connectionId", session.id), slog.String("identity", identity), slog.String("error", err.Error()))
+		return
+	}
+	if s.shouldResyncFSOnAttach() {
+		if err := s.sendFSResync(session); err != nil {
+			s.logger.Warn("failed to send fs resync after attach", slog.String("connectionId", session.id), slog.String("identity", identity), slog.String("error", err.Error()))
+		}
 	}
 }
 
@@ -199,16 +205,18 @@ func (s *Server) sendHeartbeat(session *connectionSession, includeSnapshot bool)
 	}
 	if includeSnapshot {
 		message.Capabilities = protocol.SandboxCapabilities{
-			FSRead:           true,
-			FSWrite:          true,
-			FSStat:           true,
-			FSLs:             true,
-			FSTree:           true,
-			FSFind:           true,
-			FSGrep:           true,
-			ProcessStart:     true,
-			ProcessStartArgv: true,
-			ProcessAbort:     true,
+			FSRead:             true,
+			FSWrite:            true,
+			FSWriteDisposition: true,
+			FSMkdir:            true,
+			FSStat:             true,
+			FSLs:               true,
+			FSTree:             true,
+			FSFind:             true,
+			FSGrep:             true,
+			ProcessStart:       true,
+			ProcessStartArgv:   true,
+			ProcessAbort:       true,
 		}
 		message.Filesystem = &protocol.SandboxFilesystem{
 			DefaultCwd: s.cfg.WorkspaceDir,

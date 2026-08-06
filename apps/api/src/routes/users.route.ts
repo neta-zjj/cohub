@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { and, desc, eq, or, sql } from "drizzle-orm";
 import { accessPolicies, spaces, userProfiles, works } from "@cohub/db";
+import { readWorkPageFields, workTitleFromMeta } from "@cohub/core/works";
 import { db } from "../db/index.js";
 import { getSpacePublicProfile, requireValidId, useAuth } from "../lib/middleware.js";
 import { createWorkPublicUrl } from "../lib/work-public-url.js";
@@ -19,20 +20,6 @@ const PUBLIC_USER_HTTP_CACHE = "public, max-age=60, stale-while-revalidate=300";
 
 type BatchProfilesBody = {
   userUuids?: unknown;
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value && typeof value === "object" && !Array.isArray(value));
-
-const cleanText = (value: unknown) => {
-  if (typeof value !== "string") return null;
-  const text = value.replace(/\s+/g, " ").trim();
-  return text || null;
-};
-
-const workTitleFromMeta = (meta: unknown, fallback: string) => {
-  if (!isRecord(meta)) return fallback;
-  return cleanText(meta.title) ?? cleanText(meta.name) ?? fallback;
 };
 
 const isDiscoverableSpacePolicy = or(
@@ -167,20 +154,25 @@ router.get("/by-username/:username", async (c) => {
   const publicWorks = workRows
     .filter((row): row is typeof row & { spaceSlug: string; spaceOwnerUsername: string } =>
       Boolean(row.spaceSlug && row.spaceOwnerUsername))
-    .map((row) => ({
-      id: row.id,
-      slug: row.slug,
-      title: workTitleFromMeta(row.meta, row.slug),
-      spaceSlug: row.spaceSlug,
-      spaceName: row.spaceName,
-      publicUrl: createWorkPublicUrl({
-        ownerUsername: row.spaceOwnerUsername,
+    .map((row) => {
+      const page = readWorkPageFields(row.meta);
+      return {
+        id: row.id,
+        slug: row.slug,
+        title: workTitleFromMeta(row.meta, row.slug),
+        description: page.description,
+        icon: page.icon,
         spaceSlug: row.spaceSlug,
-        workSlug: row.slug,
-      }),
-      publishedAt: row.publishedAt?.toISOString() ?? null,
-      updatedAt: row.updatedAt?.toISOString() ?? null,
-    }));
+        spaceName: row.spaceName,
+        publicUrl: createWorkPublicUrl({
+          ownerUsername: row.spaceOwnerUsername,
+          spaceSlug: row.spaceSlug,
+          workSlug: row.slug,
+        }),
+        publishedAt: row.publishedAt?.toISOString() ?? null,
+        updatedAt: row.updatedAt?.toISOString() ?? null,
+      };
+    });
 
   c.header("Cache-Control", PUBLIC_USER_HTTP_CACHE);
   return c.json({

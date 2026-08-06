@@ -67,7 +67,7 @@ const showDraftHint = $derived(
 );
 </script>
 
-<section class="flex h-full min-h-0 flex-col bg-bg-content">
+<section class="flex h-full min-h-0 flex-col bg-chat-bg">
 	{#if !hasContent}
 		<div
 			class="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
@@ -79,7 +79,7 @@ const showDraftHint = $derived(
 		</div>
 	{:else}
 		<header
-			class="flex shrink-0 items-center gap-2 border-b border-border-subtle px-3 py-2.5 sm:px-4"
+			class="relative z-10 flex shrink-0 items-center gap-2 border-b border-chat-panel-border bg-chat-panel px-3 py-2.5 sm:px-4"
 		>
 			{#if isDraft}
 				<a

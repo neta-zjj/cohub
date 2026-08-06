@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isSessionScrollAnchorInTurns } from "../lib/features/session-chat/session-scroll-controller.svelte.ts";
+import {
+	isSessionScrollAnchorInTurns,
+	resolveSessionScrollRestore,
+} from "../lib/features/session-chat/session-scroll-controller.svelte.ts";
 
 const turns = [{ sequence: 1 }, { sequence: 2 }, { sequence: 5 }];
 
@@ -30,5 +33,29 @@ test("rejects non-finite sequences", () => {
 	assert.equal(
 		isSessionScrollAnchorInTurns(Number.POSITIVE_INFINITY, turns),
 		false,
+	);
+});
+
+test("keeps restore pending while the anchor target is not scrollable yet", () => {
+	assert.deepEqual(
+		resolveSessionScrollRestore({
+			anchorTop: 640,
+			anchorOffset: -40,
+			scrollHeight: 500,
+			clientHeight: 500,
+		}),
+		{ scrollTop: 0, reached: false },
+	);
+});
+
+test("reaches the same anchor after timeline layout expands", () => {
+	assert.deepEqual(
+		resolveSessionScrollRestore({
+			anchorTop: 640,
+			anchorOffset: -40,
+			scrollHeight: 1800,
+			clientHeight: 500,
+		}),
+		{ scrollTop: 600, reached: true },
 	);
 });

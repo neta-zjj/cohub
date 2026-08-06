@@ -1,9 +1,11 @@
 package filewatch
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +133,12 @@ func (w *Watcher) Close() error {
 	return w.watcher.Close()
 }
 
+// RequestResync asks consumers to reload authoritative filesystem state.
+// It is safe to call when a transport reconnects or watcher coverage is repaired.
+func (w *Watcher) RequestResync() {
+	w.enqueueResync()
+}
+
 func (w *Watcher) loop() {
 	for {
 		select {
@@ -144,6 +152,10 @@ func (w *Watcher) loop() {
 				return
 			}
 			w.logger.Warn("file watcher error", slog.String("error", err.Error()))
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				w.addRecursiveBestEffort(w.root)
+				w.enqueueResync()
+			}
 		case <-w.closed:
 			return
 		}
@@ -156,7 +168,9 @@ func (w *Watcher) repairLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			w.addRecursiveBestEffort(w.root)
+			if added := w.addRecursiveBestEffort(w.root); added {
+				w.enqueueResync()
+			}
 		case <-w.closed:
 			return
 		}
@@ -181,11 +195,12 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	nodeType := "unknown"
 	var size int64
 	var mtimeMs int64
+	discoverSubtree := false
 	if info, err := os.Lstat(event.Name); err == nil {
 		if info.IsDir() {
 			nodeType = "dir"
 			if event.Has(fsnotify.Create) {
-				w.addRecursiveBestEffort(event.Name)
+				discoverSubtree = true
 			}
 		} else {
 			nodeType = "file"
@@ -195,9 +210,21 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	w.enqueue(Change{Path: rel, Kind: kind, NodeType: nodeType, Size: size, MtimeMs: mtimeMs})
+	if discoverSubtree {
+		// Keep the fsnotify loop responsive while a copied or extracted subtree
+		// is scanned. enqueue is synchronized and switches to resync at the cap.
+		go w.discoverAndWatchSubtree(event.Name, w.enqueue)
+	}
 }
 
-func (w *Watcher) addRecursiveBestEffort(root string) {
+// addRecursiveBestEffort registers every visible directory below root and
+// reports whether watcher coverage expanded. It deliberately emits no changes.
+func (w *Watcher) addRecursiveBestEffort(root string) bool {
+	known := make(map[string]struct{})
+	for _, path := range w.watcher.WatchList() {
+		known[filepath.Clean(path)] = struct{}{}
+	}
+	added := false
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || !d.IsDir() {
 			return nil
@@ -206,9 +233,68 @@ func (w *Watcher) addRecursiveBestEffort(root string) {
 		if ok && rel != "" && w.isIgnored(rel) {
 			return filepath.SkipDir
 		}
+		cleaned := filepath.Clean(path)
+		_, wasKnown := known[cleaned]
 		if err := w.watcher.Add(path); err != nil && !os.IsNotExist(err) {
 			w.logger.Debug("failed to add file watcher", slog.String("path", path), slog.String("error", err.Error()))
+		} else if err == nil && !wasKnown {
+			known[cleaned] = struct{}{}
+			added = true
 		}
+		return nil
+	})
+	return added
+}
+
+// discoverAndWatchSubtree closes the recursive inotify race. It streams
+// existing descendants to emit while registering each directory before reading
+// its children. Once emit reaches its cap, the walk keeps only watcher coverage;
+// the queued resync supplies authoritative state without unbounded allocations.
+func (w *Watcher) discoverAndWatchSubtree(root string, emit func(Change) bool) {
+	cleanedRoot := filepath.Clean(root)
+	emitting := true
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil
+		}
+		rel, ok := w.relative(path)
+		if !ok {
+			return nil
+		}
+		if rel != "" && w.isIgnored(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if err := w.watcher.Add(path); err != nil && !os.IsNotExist(err) {
+				w.logger.Debug("failed to add file watcher", slog.String("path", path), slog.String("error", err.Error()))
+			}
+		}
+		if filepath.Clean(path) == cleanedRoot {
+			return nil
+		}
+		if !emitting {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
+		}
+		nodeType := "file"
+		if info.IsDir() {
+			nodeType = "dir"
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			nodeType = "unknown"
+		}
+		emitting = emit(Change{
+			Path:     rel,
+			Kind:     "create",
+			NodeType: nodeType,
+			Size:     info.Size(),
+			MtimeMs:  info.ModTime().UnixMilli(),
+		})
 		return nil
 	})
 }
@@ -250,24 +336,28 @@ func (w *Watcher) isIgnored(rel string) bool {
 	return false
 }
 
-func (w *Watcher) enqueue(change Change) {
+// enqueue returns false once callers should stop materializing individual
+// changes and rely on the queued resync instead.
+func (w *Watcher) enqueue(change Change) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.resync {
 		w.ensureTimerLocked()
-		return
+		return false
 	}
-	if len(w.pending) >= maxBatchSize {
+	previous, exists := w.pending[change.Path]
+	if !exists && len(w.pending) >= maxBatchSize {
 		w.pending = make(map[string]Change)
 		w.resync = true
 		w.ensureTimerLocked()
-		return
+		return false
 	}
-	if previous, ok := w.pending[change.Path]; ok {
+	if exists {
 		change = mergeChange(previous, change)
 	}
 	w.pending[change.Path] = change
 	w.ensureTimerLocked()
+	return true
 }
 
 func (w *Watcher) enqueueResync() {
@@ -303,12 +393,18 @@ func (w *Watcher) flush() {
 	seq := w.seq
 	w.mu.Unlock()
 
+	sort.Slice(changes, func(i, j int) bool {
+		return changes[i].Path < changes[j].Path
+	})
 	w.handler(Batch{Seq: seq, Resync: resync, Changes: changes})
 }
 
 func mergeChange(a, b Change) Change {
-	if a.Kind == "delete" || b.Kind == "delete" {
-		b.Kind = "delete"
+	if b.Kind == "delete" {
+		return b
+	}
+	if a.Kind == "delete" {
+		b.Kind = "create"
 		return b
 	}
 	if a.Kind == "create" {

@@ -18,6 +18,12 @@ import {
 	hasCohubResourceDragData,
 	setCohubResourceDragData,
 } from "$lib/drag/cohub-resource-drag";
+import type { PointerDragPayload } from "$lib/drag/pointer-drag.svelte";
+import {
+	pointerDrag,
+	pointerDragSource,
+	pointerDropZone,
+} from "$lib/drag/pointer-drag.svelte";
 import { resolveFsMoveDestination } from "$lib/features/space/modules/file-workspace-utils";
 import type { SpaceFsNode } from "$lib/space-fs";
 import {
@@ -33,7 +39,7 @@ const {
 	onToggle,
 	onSelect,
 	onCreateFile,
-	onCreateCanvas,
+	onCreateBoard,
 	onCreateDir,
 	onRename,
 	onMove,
@@ -43,6 +49,7 @@ const {
 	onInsertReference,
 	onPublishDirectory,
 	draggable = true,
+	touchDraggable = false,
 	showItemActions = true,
 	canWrite = true,
 }: {
@@ -52,7 +59,7 @@ const {
 	onToggle: (node: SpaceFsNode) => void;
 	onSelect: (node: SpaceFsNode) => void;
 	onCreateFile: (parentPath: string) => void;
-	onCreateCanvas?: (parentPath: string) => void;
+	onCreateBoard?: (parentPath: string) => void;
 	onCreateDir: (parentPath: string) => void;
 	onRename: (node: SpaceFsNode) => void;
 	onMove?: (node: SpaceFsNode, targetDir: string) => void;
@@ -62,6 +69,8 @@ const {
 	onInsertReference?: (path: string) => void;
 	onPublishDirectory?: (path: string) => void;
 	draggable?: boolean;
+	/** Enable the long-press drag gesture for touch and pen. */
+	touchDraggable?: boolean;
 	showItemActions?: boolean;
 	canWrite?: boolean;
 } = $props();
@@ -71,6 +80,63 @@ const isActive = $derived(selectedPath === node.path);
 const isDir = $derived(node.type === "dir");
 let isDragOver = $state(false);
 let isMoveTarget = $state(false);
+let rowEl: HTMLDivElement | null = $state(null);
+
+/** The row is the drop target of the current touch drag. */
+const isPointerDropTarget = $derived(pointerDrag.isTarget(rowEl));
+/** The row is the source being held, so it recedes while the ghost leads. */
+const isPointerDragSource = $derived(
+	pointerDrag.active &&
+		pointerDrag.payload?.items.some((item) => item.path === node.path) === true,
+);
+
+function buildPointerDragPayload(): PointerDragPayload | null {
+	if (!touchDraggable) return null;
+	return {
+		origin: "space-file-tree",
+		items: [
+			{
+				type: node.type === "dir" ? "dir" : "file",
+				path: node.path,
+				name: node.name,
+				mimeType: node.mimeType,
+				size: node.size,
+				mtimeMs: node.mtimeMs,
+			},
+		],
+	};
+}
+
+/**
+ * Move a dragged tree node into this directory.
+ *
+ * Shared by the native drop and the touch drop so both paths apply the same
+ * validation (no move into self or a descendant, no same-parent no-op).
+ */
+function moveIntoThisDir(dragged: {
+	path: string;
+	type: SpaceFsNode["type"];
+}): boolean {
+	if (!canWrite || !onMove) return false;
+	const destination = resolveFsMoveDestination(dragged.path, node.path);
+	if (!destination) return false;
+	onMove(
+		{
+			name: destination.name,
+			path: destination.fromPath,
+			type: dragged.type,
+			size: 0,
+			mimeType: null,
+			mtimeMs: Date.now(),
+			children: [],
+			isOpen: false,
+			isLoaded: false,
+			isLoading: false,
+		},
+		node.path,
+	);
+	return true;
+}
 
 // Inline dropdown state
 let menuOpen = $state(false);
@@ -196,26 +262,8 @@ async function handleDrop(e: DragEvent) {
 	if (!e.dataTransfer) return;
 
 	if (hasInternalTreeDrag(e.dataTransfer)) {
-		if (!canWrite || !onMove) return;
 		const dragged = resolveDraggedTreeNodeMeta(e.dataTransfer);
-		if (!dragged) return;
-		const destination = resolveFsMoveDestination(dragged.path, node.path);
-		if (!destination) return;
-		onMove(
-			{
-				name: destination.name,
-				path: destination.fromPath,
-				type: dragged.type,
-				size: 0,
-				mimeType: null,
-				mtimeMs: Date.now(),
-				children: [],
-				isOpen: false,
-				isLoaded: false,
-				isLoading: false,
-			},
-			node.path,
-		);
+		if (dragged) moveIntoThisDir(dragged);
 		return;
 	}
 
@@ -259,16 +307,37 @@ $effect(() => {
 </script>
 
 <div
+  bind:this={rowEl}
   class:selected={isActive}
   data-space-file-path={node.path}
   class="tree-item"
   class:menu-open={menuOpen}
-  class:drop-target={isDragOver}
-  class:move-target={isMoveTarget}
+  class:drop-target={isDragOver || isPointerDropTarget}
+  class:move-target={isMoveTarget || isPointerDropTarget}
+  class:drag-source={isPointerDragSource}
   role="button"
   tabindex="0"
   draggable={draggable}
   style={`padding-left: ${indent}px`}
+  use:pointerDragSource={{
+    enabled: touchDraggable,
+    getPayload: buildPointerDragPayload,
+  }}
+  use:pointerDropZone={{
+    priority: 2,
+    resolve: (payload) => {
+      if (!isDir || !canWrite || !onMove) return null;
+      const [item] = payload.items;
+      if (!item || payload.items.length !== 1) return null;
+      if (!resolveFsMoveDestination(item.path, node.path)) return null;
+      return { label: `Move to ${node.name}`, effect: "move" };
+    },
+    drop: (payload) => {
+      const [item] = payload.items;
+      if (!item) return;
+      moveIntoThisDir({ path: item.path, type: item.type === "dir" ? "dir" : "file" });
+    },
+  }}
   onclick={handleClick}
   onkeydown={handleKeydown}
   ondragstart={(e) => {
@@ -287,6 +356,9 @@ $effect(() => {
             ref: node.path,
             title: node.name,
             path: node.path,
+            mimeType: node.mimeType ?? undefined,
+            size: node.size,
+            mtimeMs: node.mtimeMs,
           }],
           origin: { kind: "space-file-tree" },
           createdAt: Date.now(),
@@ -339,8 +411,8 @@ $effect(() => {
               {/if}
               <div class="dropdown-sep"></div>
               <button type="button" class="dropdown-item" onclick={stopAndCloseMenu(() => onCreateFile(node.path))}>New file</button>
-              {#if onCreateCanvas}
-                <button type="button" class="dropdown-item" onclick={stopAndCloseMenu(() => onCreateCanvas(node.path))}>New canvas</button>
+              {#if onCreateBoard}
+                <button type="button" class="dropdown-item" onclick={stopAndCloseMenu(() => onCreateBoard(node.path))}>New board</button>
               {/if}
               <button type="button" class="dropdown-item" onclick={stopAndCloseMenu(() => onCreateDir(node.path))}>New folder</button>
               {#if onPublishDirectory}
@@ -385,7 +457,7 @@ $effect(() => {
       {onToggle}
       {onSelect}
       {onCreateFile}
-      {onCreateCanvas}
+      {onCreateBoard}
       {onCreateDir}
       {onRename}
       {onMove}
@@ -395,6 +467,7 @@ $effect(() => {
       {onInsertReference}
       {onPublishDirectory}
       {draggable}
+      {touchDraggable}
       {showItemActions}
       {canWrite}
     />
@@ -448,6 +521,11 @@ $effect(() => {
 
   .tree-item.move-target {
     background: color-mix(in srgb, var(--brand) 12%, var(--bg-hover-strong));
+  }
+
+  /* The held row recedes so the ghost card reads as the thing being moved. */
+  .tree-item.drag-source {
+    opacity: 0.4;
   }
 
   .icon {

@@ -9,6 +9,8 @@ export type SpaceFsChange = {
 
 export type SpaceFsChangedPayload = {
   source: "sandbox-inotify" | "api-fs" | "bootstrap" | "sandbox-watch-started";
+  /** Client-generated id used to identify an API write echoed over realtime. */
+  mutationId?: string;
   seq?: number;
   resync?: boolean;
   changes: SpaceFsChange[];
@@ -74,11 +76,33 @@ export type SpaceFsWriteFileInput = {
   path: string;
   content: string;
   encoding: SpaceFsEncoding;
+  /** Reject the write when the file no longer matches this server baseline. */
+  expected?: {
+    mtimeMs: number;
+    size: number;
+  };
+  /** Optional client-generated id echoed in the resulting fs event. */
+  mutationId?: string;
 };
 
 export type SpaceFsMoveInput = {
   fromPath: string;
   toPath: string;
+  /** Optional idempotency key used by backends that support retry dedupe. */
+  mutationId?: string;
+};
+
+export type SpaceFsCreateDirectoryInput = {
+  path: string;
+  /** Optional idempotency key used by backends that support retry dedupe. */
+  mutationId?: string;
+};
+
+export type SpaceFsDeleteNodeInput = {
+  path: string;
+  recursive?: boolean;
+  /** Optional idempotency key used by backends that support retry dedupe. */
+  mutationId?: string;
 };
 
 export type SpaceFsUploadEntry = {
@@ -87,6 +111,8 @@ export type SpaceFsUploadEntry = {
   size: number;
   mimeType: string | null;
   mtimeMs: number;
+  /** Whether this upload created the file rather than replacing it. */
+  created?: boolean;
 };
 
 export type SpaceFsUploadError = {
@@ -98,6 +124,8 @@ export type SpaceFsUploadError = {
 export type SpaceFsUploadResponse = {
   uploaded: SpaceFsUploadEntry[];
   errors: SpaceFsUploadError[];
+  /** Workspace-relative directories created while materializing the upload. */
+  createdDirs?: string[];
 };
 
 export type SpaceFsUploadPlanEntryInput = {

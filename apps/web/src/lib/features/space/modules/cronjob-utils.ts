@@ -1,9 +1,11 @@
+import type { ModelThinkingLevel } from "$lib/model-catalog";
 import { asRecord } from "../space-utils";
 
 export type CronjobSelectedModel = {
 	provider: string;
 	id: string;
 	name?: string;
+	thinkingLevel?: ModelThinkingLevel | null;
 };
 
 export function formatContentBlockForPreview(block: unknown): string {
@@ -92,9 +94,12 @@ export function buildSendMessagePayload(
 	if (model) {
 		next.provider = model.provider;
 		next.model = model.id;
+		if (model.thinkingLevel) next.thinkingLevel = model.thinkingLevel;
+		else delete next.thinkingLevel;
 	} else {
 		delete next.provider;
 		delete next.model;
+		delete next.thinkingLevel;
 	}
 	return next;
 }

@@ -8,6 +8,7 @@ export type SaveCheckpointInput = {
   description?: string | null;
   reason?: string;
   sourceTaskRunId?: string | null;
+  requestSource?: import("@cohub/protocol/provenance").RequestSource | null;
   onProgress?: (progress: SaveCheckpointProgress) => Promise<void> | void;
 };
 

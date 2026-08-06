@@ -250,27 +250,6 @@ function parseMeta(value?: string): Record<string, unknown> | undefined {
   return parsed as Record<string, unknown>;
 }
 
-function mergeCohubMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-  const sessionId = envValue("COHUB_SESSION_ID");
-  const turnId = envValue("COHUB_TURN_ID");
-  const toolCallId = envValue("COHUB_TOOL_CALL_ID");
-  if (!sessionId && !turnId && !toolCallId) return meta;
-
-  const existingCohub = meta?.cohub;
-  const cohub = existingCohub && typeof existingCohub === "object" && !Array.isArray(existingCohub)
-    ? existingCohub as Record<string, unknown>
-    : {};
-  return {
-    ...(meta ?? {}),
-    cohub: {
-      ...cohub,
-      ...(sessionId ? { sessionId } : {}),
-      ...(turnId ? { turnId } : {}),
-      ...(toolCallId ? { toolCallId } : {}),
-    },
-  };
-}
-
 export function registerGenerations(program: Command): void {
   program
     .command("generate")
@@ -340,7 +319,7 @@ Examples:
           throw policyError;
         }
 
-        const meta = mergeCohubMeta(parseMeta(opts.meta));
+        const meta = parseMeta(opts.meta);
         const client = createClient();
         const created = await client.generations.create({
           spaceId,

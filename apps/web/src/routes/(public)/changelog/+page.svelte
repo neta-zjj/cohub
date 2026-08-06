@@ -7,6 +7,7 @@ import {
 	entries,
 	latestEntry,
 } from "$lib/changelog";
+import PublicContentShell from "$lib/components/PublicContentShell.svelte";
 import PublicHeader from "$lib/components/PublicHeader.svelte";
 import { canonicalUrl } from "$lib/seo";
 
@@ -172,9 +173,12 @@ function scrollDesktopNavIntoView(
 		`[data-version="${version}"]`,
 	);
 	if (!desktopItem) return;
+	const scrollContainer = nav.closest<HTMLElement>("aside") ?? nav;
 	// Must not use Element.scrollIntoView — browsers also scroll the document,
 	// which fights user wheel scrolling and causes the page to jump back up.
-	scrollContainerToItem(nav, desktopItem, { behavior: options?.behavior });
+	scrollContainerToItem(scrollContainer, desktopItem, {
+		behavior: options?.behavior,
+	});
 }
 
 function scrollMobileJumpActiveIntoView() {
@@ -247,6 +251,49 @@ onMount(() => {
 });
 </script>
 
+{#snippet desktopSidebar()}
+	<div class="mb-5 px-2">
+		<div class="text-[12px] font-semibold tracking-tight text-text-primary">
+			Changelog
+		</div>
+		<p class="mt-1 text-[12px] text-text-tertiary">What's new in Cohub</p>
+	</div>
+
+	<nav bind:this={desktopNavEl} class="space-y-5" aria-label="Version navigation">
+		{#each yearGroups as group (group.year)}
+			<div>
+				<div
+					class="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-text-placeholder"
+				>
+					{group.year}
+				</div>
+				<ul class="space-y-0.5">
+					{#each group.entries as entry (entry.version)}
+						<li>
+							<a
+								href="#v{entry.version}"
+								data-version={entry.version}
+								class="group flex items-baseline justify-between gap-2 rounded-[6px] border-l-2 px-2 py-1.5 transition-colors {activeVersion ===
+								entry.version
+									? 'border-brand bg-brand/10 font-medium text-brand'
+									: 'border-transparent text-text-secondary hover:bg-bg-hover hover:text-text-primary'}"
+								aria-current={activeVersion === entry.version ? "true" : undefined}
+								onclick={(event) => onNavClick(event, entry.version)}
+							>
+								<span class="font-mono text-[12px] tabular-nums">v{entry.version}</span>
+								<span
+									class="text-[11px] font-normal tabular-nums text-text-placeholder group-hover:text-text-tertiary"
+									>{formatShortDate(entry.date)}</span
+								>
+							</a>
+						</li>
+					{/each}
+				</ul>
+			</div>
+		{/each}
+	</nav>
+{/snippet}
+
 <svelte:head>
 	<title>{pageTitle}</title>
 	<meta name="description" content={description} />
@@ -265,175 +312,122 @@ onMount(() => {
 <div class="min-h-screen bg-bg-primary text-text-primary">
 	<PublicHeader cta="open-app" />
 
-	<div class="mx-auto w-full max-w-5xl px-5 pb-20 pt-6 sm:px-8 sm:pt-10">
-		<header class="mb-8 sm:mb-10">
-			<p
-				class="text-[11px] font-medium uppercase tracking-[0.14em] text-text-placeholder"
-			>
-				Product
-			</p>
-			<h1
-				class="mt-2 text-[clamp(1.75rem,4vw,2.25rem)] font-semibold tracking-tight text-text-primary"
-			>
-				Changelog
-			</h1>
-			<p class="mt-2 max-w-xl text-[15px] leading-relaxed text-text-secondary">
-				What's new in Cohub
-			</p>
-		</header>
-
-		{#if entries.length === 0}
-			<p class="text-text-tertiary">No entries yet.</p>
-		{:else}
-			<!-- Mobile: compact jump control (100+ versions can't be a chip strip) -->
-			<div
-				class="sticky top-0 z-20 -mx-5 mb-8 border-b border-border-subtle bg-bg-primary/90 backdrop-blur-md lg:hidden"
-			>
-				<button
-					type="button"
-					class="flex w-full items-center justify-between gap-3 px-5 py-2.5 text-left transition-colors active:bg-bg-subtle"
-					aria-expanded={mobileJumpOpen}
-					aria-controls="changelog-mobile-jump"
-					onclick={toggleMobileJump}
+	<PublicContentShell sidebarLabel="Changelog" sidebar={desktopSidebar}>
+		<main class="px-5 pb-20 pt-6 sm:px-8 sm:pt-10 lg:px-0 lg:py-10">
+			<header class="mb-8 sm:mb-10">
+				<p
+					class="text-[11px] font-medium uppercase tracking-[0.14em] text-text-placeholder"
 				>
-					<span class="min-w-0">
-						<span class="block text-[10px] font-medium uppercase tracking-[0.12em] text-text-placeholder">
-							Version
-						</span>
-						<span class="mt-0.5 flex items-baseline gap-2">
-							<span class="font-mono text-[13px] tabular-nums text-text-primary">
-								v{activeEntry?.version ?? "—"}
+					Product
+				</p>
+				<h1
+					class="mt-2 text-[clamp(1.75rem,4vw,2.25rem)] font-semibold tracking-tight text-text-primary"
+				>
+					Changelog
+				</h1>
+				<p class="mt-2 max-w-xl text-[15px] leading-relaxed text-text-secondary">
+					What's new in Cohub
+				</p>
+			</header>
+
+			{#if entries.length === 0}
+				<p class="text-text-tertiary">No entries yet.</p>
+			{:else}
+				<!-- Mobile: compact jump control (100+ versions can't be a chip strip) -->
+				<div
+					class="sticky top-12 z-20 -mx-5 mb-8 border-b border-border-subtle bg-bg-primary/90 backdrop-blur-md lg:hidden"
+				>
+					<button
+						type="button"
+						class="flex w-full items-center justify-between gap-3 px-5 py-2.5 text-left transition-colors active:bg-bg-subtle"
+						aria-expanded={mobileJumpOpen}
+						aria-controls="changelog-mobile-jump"
+						onclick={toggleMobileJump}
+					>
+						<span class="min-w-0">
+							<span class="block text-[10px] font-medium uppercase tracking-[0.12em] text-text-placeholder">
+								Version
 							</span>
-							{#if activeEntry}
-								<span class="text-[12px] text-text-tertiary">
-									{formatShortDate(activeEntry.date)}
+							<span class="mt-0.5 flex items-baseline gap-2">
+								<span class="font-mono text-[13px] tabular-nums text-text-primary">
+									v{activeEntry?.version ?? "—"}
 								</span>
-							{/if}
+								{#if activeEntry}
+									<span class="text-[12px] text-text-tertiary">
+										{formatShortDate(activeEntry.date)}
+									</span>
+								{/if}
+							</span>
 						</span>
-					</span>
-					<span class="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-text-tertiary">
-						Jump
-						<span
-							class="inline-block text-[10px] transition-transform {mobileJumpOpen
-								? 'rotate-90'
-								: ''}"
-							aria-hidden="true">▸</span
-						>
-					</span>
-				</button>
+						<span class="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-text-tertiary">
+							Jump
+							<span
+								class="inline-block text-[10px] transition-transform {mobileJumpOpen
+									? 'rotate-90'
+									: ''}"
+								aria-hidden="true">▸</span
+							>
+						</span>
+					</button>
 
-				{#if mobileJumpOpen}
-					<div
-						id="changelog-mobile-jump"
-						class="border-t border-border-subtle bg-bg-primary"
-						role="region"
-						aria-label="Jump to version"
-					>
+					{#if mobileJumpOpen}
 						<div
-							bind:this={mobileJumpListEl}
-							class="max-h-[min(58vh,22rem)] overflow-y-auto overscroll-contain px-2 py-2 [scrollbar-width:thin]"
+							id="changelog-mobile-jump"
+							class="border-t border-border-subtle bg-bg-primary"
+							role="region"
+							aria-label="Jump to version"
 						>
-							{#each yearGroups as group (group.year)}
-								<div class="mb-2 last:mb-0">
-									<div
-										class="sticky top-0 z-[1] bg-bg-primary/95 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-text-placeholder backdrop-blur-sm"
-									>
-										{group.year}
-										<span class="ml-1.5 font-normal normal-case tracking-normal text-text-placeholder/80">
-											{group.entries.length}
-										</span>
-									</div>
-									<ul>
-										{#each group.entries as entry (entry.version)}
-											<li>
-												<a
-													href="#v{entry.version}"
-													data-version={entry.version}
-													class="flex min-h-10 items-center justify-between gap-3 rounded-[6px] px-2.5 py-2 transition-colors {activeVersion ===
-													entry.version
-														? 'bg-bg-hover text-text-primary'
-														: 'text-text-secondary active:bg-bg-subtle'}"
-													aria-current={activeVersion === entry.version
-														? "true"
-														: undefined}
-													onclick={(event) =>
-														onNavClick(event, entry.version, { closeJump: true })}
-												>
-													<span
-														class="font-mono text-[13px] tabular-nums {activeVersion ===
+							<div
+								bind:this={mobileJumpListEl}
+								class="max-h-[min(58vh,22rem)] overflow-y-auto overscroll-contain px-2 py-2 [scrollbar-width:thin]"
+							>
+								{#each yearGroups as group (group.year)}
+									<div class="mb-2 last:mb-0">
+										<div
+											class="sticky top-0 z-[1] bg-bg-primary/95 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-text-placeholder backdrop-blur-sm"
+										>
+											{group.year}
+											<span class="ml-1.5 font-normal normal-case tracking-normal text-text-placeholder/80">
+												{group.entries.length}
+											</span>
+										</div>
+										<ul>
+											{#each group.entries as entry (entry.version)}
+												<li>
+													<a
+														href="#v{entry.version}"
+														data-version={entry.version}
+														class="flex min-h-10 items-center justify-between gap-3 rounded-[6px] px-2.5 py-2 transition-colors {activeVersion ===
 														entry.version
-															? 'text-brand'
-															: ''}">v{entry.version}</span
+															? 'bg-bg-hover text-text-primary'
+															: 'text-text-secondary active:bg-bg-subtle'}"
+														aria-current={activeVersion === entry.version
+															? "true"
+															: undefined}
+														onclick={(event) =>
+															onNavClick(event, entry.version, { closeJump: true })}
 													>
-													<span class="text-[12px] tabular-nums text-text-placeholder">
-														{formatShortDate(entry.date)}
-													</span>
-												</a>
-											</li>
-										{/each}
-									</ul>
-								</div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-			</div>
-
-			<!--
-			  Do not use items-start on this grid: sticky nav needs the aside
-			  column to stretch to the full row height (timeline), otherwise
-			  the short aside scrolls away and the nav disappears.
-			-->
-			<div class="lg:grid lg:grid-cols-[148px_minmax(0,1fr)] lg:gap-12 xl:grid-cols-[160px_minmax(0,1fr)] xl:gap-14">
-				<!-- Desktop sticky version nav -->
-				<aside class="hidden lg:block" aria-label="Version navigation">
-					<nav
-						bind:this={desktopNavEl}
-						class="sticky top-8 max-h-[calc(100vh-4rem)] overflow-y-auto overscroll-contain pr-2 [scrollbar-width:thin]"
-					>
-						{#each yearGroups as group (group.year)}
-							<div class="mb-5 last:mb-0">
-								<div
-									class="mb-2 px-2 text-[10px] font-medium uppercase tracking-[0.14em] text-text-placeholder"
-								>
-									{group.year}
-								</div>
-								<ul class="space-y-0.5">
-									{#each group.entries as entry (entry.version)}
-										<li>
-											<a
-												href="#v{entry.version}"
-												data-version={entry.version}
-												class="group flex items-baseline justify-between gap-2 rounded-[6px] px-2 py-1.5 transition-colors {activeVersion ===
-												entry.version
-													? 'bg-bg-hover text-text-primary'
-													: 'text-text-tertiary hover:bg-bg-subtle hover:text-text-secondary'}"
-												aria-current={activeVersion === entry.version
-													? "true"
-													: undefined}
-												onclick={(event) => onNavClick(event, entry.version)}
-											>
-												<span
-													class="font-mono text-[12px] tabular-nums {activeVersion ===
-													entry.version
-														? 'text-brand'
-														: ''}">v{entry.version}</span
-												>
-												<span
-													class="text-[11px] tabular-nums text-text-placeholder group-hover:text-text-tertiary"
-													>{formatShortDate(entry.date)}</span
-												>
-											</a>
-										</li>
-									{/each}
-								</ul>
+														<span
+															class="font-mono text-[13px] tabular-nums {activeVersion ===
+															entry.version
+																? 'text-brand'
+																: ''}">v{entry.version}</span
+														>
+														<span class="text-[12px] tabular-nums text-text-placeholder">
+															{formatShortDate(entry.date)}
+														</span>
+													</a>
+												</li>
+											{/each}
+										</ul>
+									</div>
+								{/each}
 							</div>
-						{/each}
-					</nav>
-				</aside>
+						</div>
+					{/if}
+				</div>
 
-				<!-- Timeline -->
-				<div class="relative">
+				<div class="relative max-w-3xl">
 					<div
 						aria-hidden="true"
 						class="pointer-events-none absolute bottom-2 left-[5px] top-2 w-px bg-border-subtle max-sm:left-[4px]"
@@ -515,9 +509,9 @@ onMount(() => {
 						{/each}
 					</div>
 				</div>
-			</div>
-		{/if}
-	</div>
+			{/if}
+		</main>
+	</PublicContentShell>
 </div>
 
 <style>

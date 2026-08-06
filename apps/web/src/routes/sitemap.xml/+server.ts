@@ -1,9 +1,21 @@
 import { entries } from "$lib/changelog";
+import {
+	DOCS_LOCALES,
+	type DocsLocale,
+	docsHref,
+	getDocsNavItems,
+} from "$lib/docs";
 import { siteOrigin } from "$lib/seo";
 
 export const prerender = true;
 
-const STATIC_PATHS = ["/", "/pricing", "/changelog"] as const;
+const STATIC_PATHS = [
+	"/",
+	"/docs",
+	"/docs/zh",
+	"/pricing",
+	"/changelog",
+] as const;
 
 function escapeXml(value: string): string {
 	return value
@@ -14,29 +26,91 @@ function escapeXml(value: string): string {
 		.replace(/'/g, "&apos;");
 }
 
+type SitemapUrl = {
+	path: string;
+	priority: string;
+	changefreq: string;
+	lastmod?: string;
+	alternates?: Array<{ hreflang: string; path: string }>;
+};
+
+function docsSitemapUrls(): SitemapUrl[] {
+	const urls: SitemapUrl[] = [];
+	for (const item of getDocsNavItems()) {
+		const enPath = docsHref(item.slug, "en");
+		const zhPath = docsHref(item.slug, "zh");
+		const alternates = [
+			{ hreflang: "en", path: enPath },
+			{ hreflang: "zh-CN", path: zhPath },
+			{ hreflang: "x-default", path: enPath },
+		];
+		for (const locale of DOCS_LOCALES as DocsLocale[]) {
+			const path = docsHref(item.slug, locale);
+			// Home paths are also in STATIC_PATHS for priority; skip duplicates here.
+			if (!item.slug) continue;
+			urls.push({
+				path,
+				priority: "0.7",
+				changefreq: "weekly",
+				alternates,
+			});
+		}
+	}
+	return urls;
+}
+
+function renderUrl(origin: string, entry: SitemapUrl): string {
+	const loc = entry.path === "/" ? `${origin}/` : `${origin}${entry.path}`;
+	const lines = [`  <url>`, `    <loc>${escapeXml(loc)}</loc>`];
+	if (entry.lastmod) {
+		lines.push(`    <lastmod>${escapeXml(entry.lastmod)}</lastmod>`);
+	}
+	lines.push(
+		`    <changefreq>${entry.changefreq}</changefreq>`,
+		`    <priority>${entry.priority}</priority>`,
+	);
+	for (const alt of entry.alternates ?? []) {
+		const href = alt.path === "/" ? `${origin}/` : `${origin}${alt.path}`;
+		lines.push(
+			`    <xhtml:link rel="alternate" hreflang="${escapeXml(alt.hreflang)}" href="${escapeXml(href)}" />`,
+		);
+	}
+	lines.push(`  </url>`);
+	return lines.join("\n");
+}
+
 export function GET() {
 	const origin = siteOrigin();
 	const latest = entries[0]?.date ?? null;
 
+	const staticEntries: SitemapUrl[] = STATIC_PATHS.map((path) => {
+		const isDocsHome = path === "/docs" || path === "/docs/zh";
+		const alternates = isDocsHome
+			? [
+					{ hreflang: "en", path: "/docs" },
+					{ hreflang: "zh-CN", path: "/docs/zh" },
+					{ hreflang: "x-default", path: "/docs" },
+				]
+			: undefined;
+		return {
+			path,
+			priority:
+				path === "/"
+					? "1.0"
+					: isDocsHome || path === "/changelog"
+						? "0.8"
+						: "0.7",
+			changefreq: path === "/changelog" || isDocsHome ? "weekly" : "monthly",
+			lastmod: path === "/changelog" && latest ? latest : undefined,
+			alternates,
+		};
+	});
+
 	const body = [
 		`<?xml version="1.0" encoding="UTF-8"?>`,
-		`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`,
-		...STATIC_PATHS.map((path) => {
-			const loc = path === "/" ? `${origin}/` : `${origin}${path}`;
-			const priority =
-				path === "/" ? "1.0" : path === "/changelog" ? "0.8" : "0.7";
-			const changefreq = path === "/changelog" ? "weekly" : "monthly";
-			const lines = [`  <url>`, `    <loc>${escapeXml(loc)}</loc>`];
-			if (path === "/changelog" && latest) {
-				lines.push(`    <lastmod>${escapeXml(latest)}</lastmod>`);
-			}
-			lines.push(
-				`    <changefreq>${changefreq}</changefreq>`,
-				`    <priority>${priority}</priority>`,
-				`  </url>`,
-			);
-			return lines.join("\n");
-		}),
+		`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">`,
+		...staticEntries.map((entry) => renderUrl(origin, entry)),
+		...docsSitemapUrls().map((entry) => renderUrl(origin, entry)),
 		`</urlset>`,
 		``,
 	].join("\n");

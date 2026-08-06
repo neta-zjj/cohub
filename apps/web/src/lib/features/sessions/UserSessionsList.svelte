@@ -114,7 +114,7 @@ function spaceName(session: UserSessionListItem) {
 				<p class="mt-1 text-[12px] text-text-placeholder">Start a chat in any space to see it here.</p>
 				<button
 					type="button"
-					class="mt-4 inline-flex items-center rounded-[6px] bg-bg-hover px-3 py-1.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover-strong hover:text-text-primary"
+					class="sessions-empty-new-chat mt-4 inline-flex items-center rounded-[6px] bg-bg-hover px-3 py-1.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover-strong hover:text-text-primary"
 					onclick={onNewChat}
 				>
 					New chat
@@ -172,3 +172,18 @@ function spaceName(session: UserSessionListItem) {
 		{/if}
 	</div>
 </section>
+
+<style>
+	:global([data-theme="neta-studio"]) .sessions-empty-new-chat {
+		border: 1px solid var(--sidebar-primary-action-border);
+		border-radius: var(--sidebar-primary-action-radius);
+		background: var(--sidebar-primary-action-bg);
+		color: var(--sidebar-primary-action-fg);
+		font-weight: 500;
+	}
+
+	:global([data-theme="neta-studio"]) .sessions-empty-new-chat:hover {
+		background: var(--sidebar-primary-action-bg-hover);
+		color: var(--sidebar-primary-action-fg);
+	}
+</style>

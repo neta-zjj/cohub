@@ -74,6 +74,127 @@ await session.messages.send({
 });
 ```
 
+## Boards
+
+Use `space.boards` for collection operations and bind an ID with
+`space.board(boardId)` for entity operations:
+
+```ts
+const created = await space.boards.create({
+  path: "boards/plan.board",
+  title: "Plan",
+  nodes: [],
+});
+
+const board = space.board(created.board.id);
+// Equivalent: space.boards.byId(created.board.id)
+
+const snapshot = await board.inspect({
+  include: ["nodes", "effects", "sequences", "clips", "playback"],
+});
+
+await board.apply({
+  txId: crypto.randomUUID(),
+  baseVersion: snapshot.board.version,
+  operations: [
+    { type: "board.patch", payload: { patch: { title: "Updated plan" } } },
+  ],
+});
+
+await board.play({
+  commandId: crypto.randomUUID(),
+  type: "play",
+  sequenceId: "ambient",
+});
+```
+
+A bound `BoardClient` injects its `boardId` into validation and transaction
+requests. Realtime subscriptions are also scoped to that Board:
+
+```ts
+const stop = board.subscribe({
+  transaction(event) {
+    console.log("version", event.payload.version);
+  },
+  playback(event) {
+    console.log("playback", event.payload.status);
+  },
+});
+
+stop();
+```
+
+Board is split by dependency: the model runs anywhere, drawing needs PixiJS.
+`@neta-art/cohub/board` carries the document schema, geometry, the shape layer,
+timeline compilation and export planning, with no renderer and no PixiJS — so
+agents, servers and edge workers can read, write and measure boards without a
+graphics stack:
+
+```ts
+import {
+  BoardDocumentSchema,
+  clip,
+  compileSequence,
+  createBoardExtensionRegistry,
+  itemBounds,
+  planBoardExport,
+  timeline,
+} from "@neta-art/cohub/board";
+
+const sequence = compileSequence({
+  id: "ambient",
+  name: "Ambient",
+  seed: "ambient-v1",
+  timeline: clip({
+    kind: "motion.keyframes",
+    target: { type: "node", nodeId: "image" },
+    duration: 1_000,
+    keyframes: [
+      { at: 0, value: { y: 0 } },
+      { at: 500, value: { y: -8 } },
+      { at: 1_000, value: { y: 0 } },
+    ],
+  }),
+});
+
+await space.boards.create({
+  path: "boards/ambient.board",
+  metadata: {
+    playback: {
+      sequenceId: sequence.sequence.id,
+      delayMs: 500,
+      loop: true,
+    },
+  },
+  sequences: [sequence],
+});
+```
+
+Drawing pixels is where PixiJS enters. The card renderers and themes the editor
+uses live behind `@neta-art/cohub/board/render`, and turning a plan into an
+image has dedicated browser and Node.js entries:
+
+```ts
+import { getBoardCardRenderer } from "@neta-art/cohub/board/render";
+import { renderBoardExport } from "@neta-art/cohub/board/export";
+import {
+  createBoardHeadlessRenderer,
+  exportBoardImageBytes,
+} from "@neta-art/cohub/board/headless";
+```
+
+Install `pixi.js` to use `board/render` or `board/export`, and add
+`@napi-rs/canvas` as well for `board/headless`. Both are optional peers, and
+`@neta-art/cohub/board` never reaches for either, so HTTP-only installations
+stay lightweight.
+
+Text metrics follow the same split. The renderers measure through a real canvas
+and set that up themselves, so nothing extra is needed to draw or export. Called
+straight off `@neta-art/cohub/board` with no renderer in play,
+`measureBoardText` returns a per-character estimate instead — fine for laying
+out a board on a server, but call `installBoardTextMeasurement` from
+`board/render` first if the numbers have to match what the editor draws.
+
 ## Session subscriptions
 
 ```ts
@@ -137,6 +258,45 @@ They never substitute for each other.** For example, `session.prompt.fullaccess`
 lets you send a prompt but does NOT let you read the reply — that needs
 `session.view` (a work scope). Similarly, `generation.create` lets you create
 a generation task, but polling its result needs `taskrun.view` (a work scope).
+
+### Realtime rooms
+
+Work runtime rooms are generic, temporary event channels. The SDK does not
+know the Work's business events; define their names and payload types in the
+Work itself.
+
+```ts
+type Events = {
+  "shared.state.updated": { value: number };
+  "activity.submitted": { itemId: string };
+};
+
+const room = await client.work.realtime.createRoom<Events>({
+  code: "TEAM-ALPHA", // optional; generated when omitted
+  maxParticipants: 64,
+  expiresInSeconds: 2 * 60 * 60,
+});
+
+const stop = room.subscribe("shared.state.updated", (event) => {
+  console.log(event.sequence, event.data.value, event.self);
+});
+
+await room.publish("shared.state.updated", { value: 42 });
+await room.setPresence({ status: "active" });
+await room.leave();
+stop();
+```
+
+`expiresInSeconds` is an absolute lifetime from server-side room creation. It
+never extends on publish, presence, or heartbeat. The maximum lifetime is
+24 hours. Room events are live and ordered while connected, with publish ACKs
+and sequence-gap detection; events missed during a disconnect are not replayed.
+
+For high-frequency traffic such as input frames, `room.send(type, data)` skips
+the per-event ACK that would otherwise cap throughput at one round trip per
+event; failures surface through `room.onSendError`. Every connection is its own
+participant by default; create the room with `seatPerUser: true` to give each
+viewer a single seat instead.
 
 For the complete API-to-scope mapping, initialization recipe, capability
 recipes, a full working example, and a pitfalls checklist, see the

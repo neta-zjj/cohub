@@ -41,6 +41,7 @@ type Server struct {
 	sessionsByID            map[string]*connectionSession
 	sessionIDsByIdentity    map[string]map[string]struct{}
 	cleanupTimersByIdentity map[string]*time.Timer
+	fsResyncOnAttach        bool
 
 	healthMu                 sync.Mutex
 	cachedZombieProcessCount int
@@ -77,6 +78,19 @@ func NewServer(
 	}
 	dispatcher.SetRouter(s)
 	return s
+}
+
+func (s *Server) SetFSResyncOnAttach(enabled bool) {
+	s.mu.Lock()
+	s.fsResyncOnAttach = enabled
+	s.mu.Unlock()
+}
+
+func (s *Server) shouldResyncFSOnAttach() bool {
+	s.mu.RLock()
+	enabled := s.fsResyncOnAttach
+	s.mu.RUnlock()
+	return enabled
 }
 
 func (s *Server) Run() error {
@@ -150,8 +164,8 @@ func (s *Server) broadcastAttached(message interface{}, warnMessage string) {
 	}
 }
 
-func (s *Server) BroadcastFSChanged(payload protocol.FSChangedPayload) {
-	message := protocol.FSChanged{
+func (s *Server) fsChangedMessage(payload protocol.FSChangedPayload) protocol.FSChanged {
+	return protocol.FSChanged{
 		BaseMessage: protocol.BaseMessage{
 			Version:   protocol.Version,
 			Type:      "fs.changed",
@@ -161,8 +175,18 @@ func (s *Server) BroadcastFSChanged(payload protocol.FSChangedPayload) {
 		},
 		Payload: payload,
 	}
+}
 
-	s.broadcastAttached(message, "failed to enqueue fs.changed")
+func (s *Server) sendFSResync(session *connectionSession) error {
+	return s.sendToConnection(session, s.fsChangedMessage(protocol.FSChangedPayload{
+		Seq:     0,
+		Resync:  true,
+		Changes: []protocol.FSChange{},
+	}))
+}
+
+func (s *Server) BroadcastFSChanged(payload protocol.FSChangedPayload) {
+	s.broadcastAttached(s.fsChangedMessage(payload), "failed to enqueue fs.changed")
 }
 
 func (s *Server) BroadcastPortsChanged(payload protocol.PortsChangedPayload) {

@@ -11,15 +11,14 @@
     "build": "tsc -p tsconfig.build.json",
     "lint": "biome lint .",
     "lint:fix": "biome lint --write .",
+    "test": "node ../../scripts/test/run.mjs 'tests/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/index.js",
-    "start:system": "node dist/entrances/system-worker.js",
-    "test:trigger-echo": "tsx src/test-helpers.ts trigger-echo",
-    "test:trigger": "tsx src/test-helpers.ts trigger",
-    "test:list-scheduled": "tsx src/test-helpers.ts list-scheduled"
+    "start:system": "node dist/entrances/system-worker.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1087.0",
+    "@aws-sdk/lib-storage": "^3.1087.0",
     "@cohub/billing": "workspace:*",
     "@cohub/core": "workspace:*",
     "@cohub/db": "workspace:*",
@@ -27,7 +26,7 @@
     "@cohub/protocol": "workspace:*",
     "@cohub/sandbox-controller": "workspace:*",
     "@kubernetes/client-node": "^1.4.0",
-    "@neta-art/generation": "^0.1.13",
+    "@neta-art/generation": "^0.1.18",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
     "@opentelemetry/instrumentation": "^0.220.0",

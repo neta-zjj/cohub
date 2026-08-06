@@ -36,6 +36,10 @@ export type SandboxBashUploadJobResult = {
   output?: string;
 };
 
+export class SandboxUploadSizeMismatchError extends Error {
+  override name = "SandboxUploadSizeMismatchError";
+}
+
 export const sandboxBashQueue = createBullmqQueue<SandboxBashUploadJobData, SandboxBashUploadJobResult>(COHUB_AGENT_TURNS_QUEUE, {
   redisUrl: config.bullmqRedisUrl,
   telemetryServiceName: "cohub-api-sandbox-bash",
@@ -57,5 +61,13 @@ export async function enqueueSandboxUploadFilesJob(input: Omit<SandboxBashUpload
     ...defaultJobRetention,
   });
 
-  return job.waitUntilFinished(sandboxBashQueueEvents, 60 * 60 * 1000) as Promise<SandboxBashUploadJobResult>;
+  try {
+    return await job.waitUntilFinished(sandboxBashQueueEvents, 60 * 60 * 1000) as SandboxBashUploadJobResult;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith("upload_size_mismatch:")) {
+      throw new SandboxUploadSizeMismatchError(message.slice("upload_size_mismatch:".length).trim());
+    }
+    throw error;
+  }
 }

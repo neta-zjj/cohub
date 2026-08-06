@@ -38,6 +38,13 @@ export const EnvSchema = z.object({
       message: "WORKSPACE_ROOT must be an absolute path",
     })
     .default("/space-storage"),
+  CHECKPOINT_CACHE_ROOT: z
+    .string()
+    .min(1)
+    .refine((value) => value.startsWith("/"), {
+      message: "CHECKPOINT_CACHE_ROOT must be an absolute path",
+    })
+    .default("/checkpoint-cache"),
   SESSIONS_DIR: z
     .string()
     .min(1)
@@ -65,13 +72,9 @@ export const EnvSchema = z.object({
   TURN_OBJECT_S3_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
   TURN_OBJECT_S3_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   TURN_OBJECT_CDN_BASE_URL: z.string().optional().transform((value) => value?.replace(/\/+$/, "")),
-  PUBLIC_ASSET_OSS_ENDPOINT: z.string().optional().default(process.env.TURN_OBJECT_S3_ENDPOINT ?? ""),
-  PUBLIC_ASSET_OSS_REGION: z.string().min(1).default(process.env.TURN_OBJECT_S3_REGION ?? "us-west-1"),
-  PUBLIC_ASSET_OSS_BUCKET: z.string().optional(),
-  PUBLIC_ASSET_OSS_ACCESS_KEY_ID: z.string().optional().default(process.env.TURN_OBJECT_S3_ACCESS_KEY_ID ?? ""),
-  PUBLIC_ASSET_OSS_SECRET_ACCESS_KEY: z.string().optional().default(process.env.TURN_OBJECT_S3_SECRET_ACCESS_KEY ?? ""),
   PUBLIC_ASSET_CDN_BASE_URL: z.string().optional().transform((value) => value?.replace(/\/+$/, "")),
-  PUBLIC_ASSET_OSS_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+  CHAT_ATTACHMENT_PUBLIC_BASE_URL: z.string().optional().transform((value) => value?.replace(/\/+$/, "")),
+  PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

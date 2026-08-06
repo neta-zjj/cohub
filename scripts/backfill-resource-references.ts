@@ -2,7 +2,7 @@ import "dotenv/config";
 import { config as loadDotenv } from "dotenv";
 loadDotenv({ path: "apps/api/.env", override: false });
 
-import { asc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "@cohub/db";
@@ -25,23 +25,35 @@ import type { ContentBlock } from "@cohub/protocol/core";
  * upserts by identity) and safe to re-run, so it doubles as disaster recovery
  * when live double-writes miss an event.
  *
- * Usage:
- *   tsx scripts/backfill-resource-references.ts [--batch-size N] [--dry-run] [--reset]
+ * Turn content is loaded efficiently through the indexed turn_id column while
+ * retaining the session_id predicate as an integrity boundary.
  *
- *   --reset  Truncate first for a true rebuild (drops references whose source
- *            relationship no longer exists). Without it, runs as idempotent upsert.
+ * Usage:
+ *   tsx scripts/backfill-resource-references.ts \
+ *     [--batch-size N] [--write-batch-size N] [--after-turn UUID] \
+ *     [--max-turns N] [--dry-run] [--reset]
+ *
+ *   --reset       Truncate first for a true rebuild (drops references whose
+ *                 source relationship no longer exists). Without it, runs as
+ *                 idempotent upsert.
+ *   --after-turn  Resume after this turn id (exclusive), keyed on turn.id order.
+ *   --max-turns   Stop after processing this many turns (smoke / canary).
  */
 
 const connectionString =
   process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/cohub";
-const dbClient = postgres(connectionString, { prepare: false });
+const dbClient = postgres(connectionString, { prepare: false, max: 4 });
 const db = drizzle(dbClient, { schema });
 
 const DEFAULT_BATCH_SIZE = 500;
 const MAX_BATCH_SIZE = 5_000;
+const DEFAULT_WRITE_BATCH_SIZE = 2_000;
 
 type Args = {
   batchSize: number;
+  writeBatchSize: number;
+  afterTurn: string | null;
+  maxTurns: number | null;
   dryRun: boolean;
   reset: boolean;
 };
@@ -56,22 +68,48 @@ function parseArgs(rawArgv: string[]): Args {
     Math.max(Number(readValue("--batch-size") ?? DEFAULT_BATCH_SIZE), 1),
     MAX_BATCH_SIZE,
   );
-  return { batchSize, dryRun: argv.includes("--dry-run"), reset: argv.includes("--reset") };
+  const writeBatchSize = Math.min(
+    Math.max(Number(readValue("--write-batch-size") ?? DEFAULT_WRITE_BATCH_SIZE), 1),
+    20_000,
+  );
+  const maxTurnsRaw = readValue("--max-turns");
+  const maxTurns = maxTurnsRaw != null ? Math.max(Number(maxTurnsRaw), 1) : null;
+  return {
+    batchSize,
+    writeBatchSize,
+    afterTurn: readValue("--after-turn") ?? null,
+    maxTurns: Number.isFinite(maxTurns) ? maxTurns : null,
+    dryRun: argv.includes("--dry-run"),
+    reset: argv.includes("--reset"),
+  };
 }
 
 const asContentBlocks = (value: unknown): ContentBlock[] | null =>
   Array.isArray(value) ? (value as ContentBlock[]) : null;
 
-async function flush(references: ReferenceInput[], dryRun: boolean) {
+const formatRate = (count: number, elapsedMs: number) => {
+  if (elapsedMs <= 0) return "n/a";
+  return `${((count * 1000) / elapsedMs).toFixed(1)}/s`;
+};
+
+async function flush(
+  references: ReferenceInput[],
+  dryRun: boolean,
+  writeBatchSize: number,
+) {
   if (references.length === 0) return 0;
-  if (!dryRun) await writeReferences(db, references);
+  if (dryRun) return references.length;
+  for (let offset = 0; offset < references.length; offset += writeBatchSize) {
+    await writeReferences(db, references.slice(offset, offset + writeBatchSize));
+  }
   return references.length;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const startedAt = Date.now();
   console.log(
-    `[backfill-references] start batchSize=${args.batchSize} dryRun=${args.dryRun} reset=${args.reset}`,
+    `[backfill-references] start batchSize=${args.batchSize} writeBatchSize=${args.writeBatchSize} dryRun=${args.dryRun} reset=${args.reset} afterTurn=${args.afterTurn ?? "-"} maxTurns=${args.maxTurns ?? "-"}`,
   );
 
   // With --reset, truncate first so the run is a true rebuild: references whose
@@ -89,6 +127,7 @@ async function main() {
     checkpointFork: 0,
     mod: 0,
     turn: 0,
+    turnsScanned: 0,
   };
 
   // --- Structural: session forks ---
@@ -111,10 +150,11 @@ async function main() {
           createdBy: row.createdBy,
         }),
       );
-      totals.sessionFork += await flush(refs, args.dryRun);
+      totals.sessionFork += await flush(refs, args.dryRun, args.writeBatchSize);
       cursor = rows[rows.length - 1]?.id ?? null;
       if (rows.length < args.batchSize) break;
     }
+    console.log(`[backfill-references] sessionFork done count=${totals.sessionFork}`);
   }
 
   // --- Structural: space forks (spaces with a base checkpoint) ---
@@ -139,10 +179,11 @@ async function main() {
             baseCheckpointId: row.baseCheckpointId as string,
           }),
         );
-      totals.spaceFork += await flush(refs, args.dryRun);
+      totals.spaceFork += await flush(refs, args.dryRun, args.writeBatchSize);
       cursor = rows[rows.length - 1]?.id ?? null;
       if (rows.length < args.batchSize) break;
     }
+    console.log(`[backfill-references] spaceFork done count=${totals.spaceFork}`);
   }
 
   // --- Structural: checkpoint forks ---
@@ -171,10 +212,11 @@ async function main() {
             rootCheckpointId: row.rootCheckpointId,
           }),
         );
-      totals.checkpointFork += await flush(refs, args.dryRun);
+      totals.checkpointFork += await flush(refs, args.dryRun, args.writeBatchSize);
       cursor = rows[rows.length - 1]?.id ?? null;
       if (rows.length < args.batchSize) break;
     }
+    console.log(`[backfill-references] checkpointFork done count=${totals.checkpointFork}`);
   }
 
   // --- Structural: mods ---
@@ -195,21 +237,31 @@ async function main() {
           mountSlug: row.mountSlug,
         }),
       );
-      totals.mod += await flush(refs, args.dryRun);
+      totals.mod += await flush(refs, args.dryRun, args.writeBatchSize);
       cursor = rows[rows.length - 1]?.id ?? null;
       if (rows.length < args.batchSize) break;
     }
+    console.log(`[backfill-references] mod done count=${totals.mod}`);
   }
 
-  // --- Turn-derived: participants, mentions, tool calls ---
+  // --- Turn-derived: mentions, tool calls, agent file access ---
   {
-    let cursor: string | null = null;
+    let cursor: string | null = args.afterTurn;
+    const turnPhaseStartedAt = Date.now();
     for (;;) {
+      if (args.maxTurns != null && totals.turnsScanned >= args.maxTurns) break;
+
+      const limit =
+        args.maxTurns != null
+          ? Math.min(args.batchSize, args.maxTurns - totals.turnsScanned)
+          : args.batchSize;
+      if (limit <= 0) break;
+
+      const batchStartedAt = Date.now();
       const rows = await db
         .select({
           id: schema.sessionTurns.id,
           sessionId: schema.sessionTurns.sessionId,
-          userUuid: schema.sessionTurns.userUuid,
           userContent: schema.sessionTurns.userContent,
           userText: schema.sessionTurns.userText,
           assistantContent: schema.sessionTurns.assistantContent,
@@ -222,30 +274,42 @@ async function main() {
         )
         .where(cursor ? gt(schema.sessionTurns.id, cursor) : undefined)
         .orderBy(asc(schema.sessionTurns.id))
-        .limit(args.batchSize);
+        .limit(limit);
       if (rows.length === 0) break;
+
       // Aggregate assistant content across all messages in each turn so tool
       // calls from intermediate steps are not lost (matches the live indexer).
+      // Query by indexed turn_id and retain session_id as an integrity boundary,
+      // so busy session histories are never materialized as a whole.
       const turnIds = rows.map((row) => row.id);
-      const messageRows = await db
-        .select({
-          turnId: sql<string>`${schema.sessionMessages.meta}->>'turnId'`,
-          role: schema.sessionMessages.role,
-          content: schema.sessionMessages.content,
-        })
-        .from(schema.sessionMessages)
-        .where(
-          inArray(sql`${schema.sessionMessages.meta}->>'turnId'`, turnIds),
-        );
+      const sessionIds = [...new Set(rows.map((row) => row.sessionId))];
       const assistantContentByTurn = new Map<string, ContentBlock[]>();
-      for (const message of messageRows) {
-        if (message.role !== "assistant" || !message.turnId) continue;
-        const blocks = asContentBlocks(message.content);
-        if (!blocks) continue;
-        const existing = assistantContentByTurn.get(message.turnId);
-        if (existing) existing.push(...blocks);
-        else assistantContentByTurn.set(message.turnId, [...blocks]);
+
+      if (sessionIds.length > 0 && turnIds.length > 0) {
+        const messageRows = await db
+          .select({
+            turnId: schema.sessionMessages.turnId,
+            content: schema.sessionMessages.content,
+          })
+          .from(schema.sessionMessages)
+          .where(
+            and(
+              inArray(schema.sessionMessages.sessionId, sessionIds),
+              inArray(schema.sessionMessages.turnId, turnIds),
+              eq(schema.sessionMessages.role, "assistant"),
+            ),
+          );
+
+        for (const message of messageRows) {
+          if (!message.turnId) continue;
+          const blocks = asContentBlocks(message.content);
+          if (!blocks) continue;
+          const existing = assistantContentByTurn.get(message.turnId);
+          if (existing) existing.push(...blocks);
+          else assistantContentByTurn.set(message.turnId, [...blocks]);
+        }
       }
+
       const refs: ReferenceInput[] = [];
       for (const row of rows) {
         refs.push(
@@ -253,7 +317,6 @@ async function main() {
             spaceId: row.spaceId,
             sessionId: row.sessionId,
             turnId: row.id,
-            userUuid: row.userUuid,
             userContent: asContentBlocks(row.userContent),
             userText: row.userText,
             assistantContent:
@@ -261,13 +324,28 @@ async function main() {
           }),
         );
       }
-      totals.turn += await flush(refs, args.dryRun);
+      const written = await flush(refs, args.dryRun, args.writeBatchSize);
+      totals.turn += written;
+      totals.turnsScanned += rows.length;
       cursor = rows[rows.length - 1]?.id ?? null;
-      if (rows.length < args.batchSize) break;
+
+      const batchMs = Date.now() - batchStartedAt;
+      const phaseMs = Date.now() - turnPhaseStartedAt;
+      console.log(
+        `[backfill-references] turn batch turns=${rows.length} refs=${written} scanned=${totals.turnsScanned} turnRefs=${totals.turn} cursor=${cursor} batchMs=${batchMs} msgsByTurn=${assistantContentByTurn.size} rate=${formatRate(totals.turnsScanned, phaseMs)}`,
+      );
+
+      if (rows.length < limit) break;
     }
+    console.log(
+      `[backfill-references] turn done turnsScanned=${totals.turnsScanned} refs=${totals.turn} elapsedMs=${Date.now() - turnPhaseStartedAt}`,
+    );
   }
 
-  console.log("[backfill-references] done", totals);
+  console.log("[backfill-references] done", {
+    ...totals,
+    elapsedMs: Date.now() - startedAt,
+  });
   await dbClient.end();
 }
 

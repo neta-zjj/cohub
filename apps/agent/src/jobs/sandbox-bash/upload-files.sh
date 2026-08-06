@@ -12,6 +12,11 @@ b64_decode() {
 }
 
 root_real="$(mkdir -p "$UPLOAD_ROOT" && cd "$UPLOAD_ROOT" && pwd -P)"
+tmp=""
+cleanup_tmp() {
+  [ -z "$tmp" ] || rm -f "$tmp"
+}
+trap cleanup_tmp EXIT
 
 while IFS=$'\t' read -r rel_b64 expected_size url_b64; do
   [ -n "${rel_b64:-}" ] || continue
@@ -42,23 +47,29 @@ while IFS=$'\t' read -r rel_b64 expected_size url_b64; do
   if command -v curl >/dev/null 2>&1; then
     # No redirects: materialize URLs must already be allowed public-asset origins.
     # Cap download size to declared size (+1) so forged small sizes cannot stream unbounded.
-    curl -fsS --max-redirs 0 --max-filesize "$((expected_size + 1))" --retry 3 --retry-delay 1 --connect-timeout 10 -o "$tmp" "$url"
+    curl -fsS --max-redirs 0 --max-filesize "$((expected_size + 1))" --retry 3 --retry-delay 1 --connect-timeout 10 -o "$tmp" "$url" || {
+      curl_exit=$?
+      if [ "$curl_exit" -eq 63 ]; then
+        echo "download exceeds declared size for $relative_path" >&2
+        exit 3
+      fi
+      exit "$curl_exit"
+    }
   elif command -v wget >/dev/null 2>&1; then
     # wget has no portable max-filesize; size is still verified after download.
     wget -q --max-redirect=0 -O "$tmp" "$url"
   else
     echo "curl or wget is required" >&2
-    rm -f "$tmp"
     exit 127
   fi
 
   actual_size="$(wc -c < "$tmp" | tr -d ' ')"
   if [ "$actual_size" != "$expected_size" ]; then
     echo "size mismatch for $relative_path: expected $expected_size, got $actual_size" >&2
-    rm -f "$tmp"
     exit 3
   fi
 
   mv -f "$tmp" "$target"
+  tmp=""
   printf 'uploaded\t%s\t%s\n' "$relative_path" "$target"
 done

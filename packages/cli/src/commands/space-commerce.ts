@@ -19,6 +19,7 @@ type ProductCreateOptions = JsonOption & {
   productKey?: string;
   name?: string;
   amountUsd?: string;
+  cohubBalanceUsd?: string;
   description?: string;
   status?: string;
   visibility?: string;
@@ -152,6 +153,7 @@ function printProducts(products: SpaceCommerceProduct[]): void {
     status: product.status,
     visibility: product.visibility,
     price: formatUsd(product.pricing.amountUsd),
+    balance: product.cohubBalance ? formatUsd(product.cohubBalance.amountUsd) : "",
     credits: product.display.creditsAmount ?? "",
   })), [
     { key: "key", label: "Key" },
@@ -159,6 +161,7 @@ function printProducts(products: SpaceCommerceProduct[]): void {
     { key: "status", label: "Status" },
     { key: "visibility", label: "Visibility" },
     { key: "price", label: "Price" },
+    { key: "balance", label: "Cohub Balance" },
     { key: "credits", label: "Credits" },
   ]);
 }
@@ -278,16 +281,25 @@ Examples:
     .option("--product-key <key>", "Product key override")
     .option("--name <name>", "Product name")
     .option("--amount-usd <amount>", "One-time price in USD")
+    .option("--cohub-balance-usd <amount>", "Included Cohub Balance in whole USD")
     .option("--description <text>", "Product description")
     .option("--status <status>", "Product status: draft, active")
     .option("--visibility <visibility>", "Product visibility: public, private")
     .option("--json", "Output as JSON")
     .action(async (opts: ProductCreateOptions) => {
+      const amountUsd = parseAmountUsd(opts.amountUsd);
+      const cohubBalanceUsd = opts.cohubBalanceUsd === undefined
+        ? undefined
+        : parseInteger(opts.cohubBalanceUsd, "cohub-balance-usd", { fallback: 0, min: 1 });
+      if (cohubBalanceUsd !== undefined && cohubBalanceUsd > amountUsd) {
+        return error("Invalid Cohub Balance", "--cohub-balance-usd cannot exceed --amount-usd.");
+      }
       const input = {
         key: opts.productKey?.trim() || undefined,
         name: requireText(opts.name, "name", "--name <name>"),
         description: opts.description,
-        amountUsd: parseAmountUsd(opts.amountUsd),
+        amountUsd,
+        cohubBalanceUsd,
         status: parseChoice(opts.status, "status", PRODUCT_STATUSES),
         visibility: parseChoice(opts.visibility, "visibility", PRODUCT_VISIBILITIES),
       };

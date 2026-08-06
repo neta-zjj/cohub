@@ -11,7 +11,7 @@ let redisClient: Redis | null = null;
 /** Get a Redis client (lazy init, reused across calls; ioredis handles auto-reconnect) */
 function getRedisClient(): Redis {
   if (!redisClient) {
-    redisClient = new Redis(env.REDIS_URL);
+    redisClient = new Redis(env.REDIS_URL, { disableClientInfo: true });
     redisClient.on("error", (err) => {
       logger.warn(`[EnvCache] Redis error for space env: ${err.message}`);
     });

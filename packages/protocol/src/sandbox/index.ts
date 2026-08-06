@@ -16,6 +16,7 @@ export type SandboxStatus = (typeof SANDBOX_STATUSES)[number];
 export const RPC_METHODS = [
   "fs.read",
   "fs.write",
+  "fs.mkdir",
   "fs.stat",
   "fs.ls",
   "fs.tree",
@@ -108,6 +109,9 @@ export type OperationScopedMessage = BaseMessage & {
 export type SandboxCapabilities = {
   fsRead: boolean;
   fsWrite: boolean;
+  /** fs.write reports atomic create/modify disposition and created parent directories. */
+  fsWriteDisposition?: boolean;
+  fsMkdir?: boolean;
   fsStat: boolean;
   fsLs: boolean;
   /** Supports the structured recursive fs.tree method. */
@@ -202,7 +206,22 @@ export type FsWriteParams = {
 export type FsWriteResult = {
   path: string;
   bytesWritten: number;
+  /** Whether this write created the target file. */
+  created?: boolean;
+  /** Workspace-relative parent directories created by this write, outermost first. */
+  createdDirs?: string[];
   /** File modification time in epoch milliseconds after the write. */
+  mtimeMs?: number;
+};
+
+export type FsMkdirParams = {
+  path: string;
+  cwd?: string;
+};
+
+export type FsMkdirResult = {
+  path: string;
+  createdDirs: string[];
   mtimeMs?: number;
 };
 
@@ -356,6 +375,10 @@ export type RpcRequestMap = {
   "fs.write": {
     params: FsWriteParams;
     result: FsWriteResult;
+  };
+  "fs.mkdir": {
+    params: FsMkdirParams;
+    result: FsMkdirResult;
   };
   "fs.stat": {
     params: FsStatParams;

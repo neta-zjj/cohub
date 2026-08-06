@@ -14,12 +14,32 @@ export type WorkRuntimeCheckoutState = {
   orderId: string | null;
 };
 
+export type WorkRuntimeNetaCharacter = {
+  uuid: string;
+  name: string;
+  shortName: string;
+  type: string | null;
+  avatarUrl: string | null;
+  headerUrl: string | null;
+  description: string | null;
+  isFavored: boolean;
+};
+
+export type WorkRuntimeNetaCharacterPage = {
+  list: WorkRuntimeNetaCharacter[];
+  total: number;
+  pageIndex: number;
+  pageSize: number;
+  hasNext: boolean;
+};
+
 type RuntimeResponse =
   | { type: "cohub.work.context.result"; requestId: string; context: WorkRuntimeContext }
   | { type: "cohub.work.token.result"; requestId: string; token: string | null }
   | { type: "cohub.work.authorize.result"; requestId: string; token: string | null }
   | { type: "cohub.work.purchase.result"; requestId: string; checkout: { providerKey: string | null; checkoutUrl: string | null; checkoutUsable: boolean; status: string | null; message: string | null; orderId: string; productKey: string } | null }
   | { type: "cohub.work.checkout-state.result"; requestId: string; status: WorkRuntimeCheckoutStatus; orderId: string | null }
+  | { type: "cohub.neta.characters.result"; requestId: string; page?: WorkRuntimeNetaCharacterPage; ok?: boolean }
   | { type: "cohub.work.error"; requestId: string; message: string };
 
 /**
@@ -59,7 +79,8 @@ const getParentOrigin = () => {
 };
 
 const generateRequestId = () =>
-  globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+  globalThis.crypto?.randomUUID?.() ??
+  `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 /**
  * Bridge-mode transport: posts messages to `window.parent` (the Cohub host
@@ -439,9 +460,14 @@ export class WorkRuntimeApi {
     return Boolean(this.token);
   }
 
-  async purchase(input: { productKey: string }) {
+  async purchase(input: { productKey: string; purchaseAttemptId?: string }) {
+    const purchaseAttemptId = input.purchaseAttemptId?.trim() || generateRequestId();
     const response = await this.transport.request<{ checkout: { providerKey: string | null; checkoutUrl: string | null; checkoutUsable: boolean; status: string | null; message: string | null; orderId: string; productKey: string } | null }>(
-      { type: "cohub.work.purchase", productKey: input.productKey },
+      {
+        type: "cohub.work.purchase",
+        productKey: input.productKey,
+        purchaseAttemptId,
+      },
       { timeoutMs: 120_000 },
     );
     return response?.checkout ?? null;
@@ -453,6 +479,57 @@ export class WorkRuntimeApi {
       { timeoutMs: 8_000, retryIntervalMs: 250 },
     );
     return response ?? null;
+  }
+
+  async searchNetaCharacters(input: {
+    keywords?: string;
+    pageIndex?: number;
+    pageSize?: number;
+  } = {}) {
+    const response = await this.transport.request<{
+      page?: WorkRuntimeNetaCharacterPage;
+    }>(
+      {
+        type: "cohub.neta.characters",
+        operation: "search",
+        keywords: input.keywords?.trim() ?? "",
+        pageIndex: input.pageIndex,
+        pageSize: input.pageSize,
+      },
+      { timeoutMs: 20_000 },
+    );
+    return response?.page ?? null;
+  }
+
+  async listNetaCharacterFavorites(input: {
+    pageIndex?: number;
+    pageSize?: number;
+  } = {}) {
+    const response = await this.transport.request<{
+      page?: WorkRuntimeNetaCharacterPage;
+    }>(
+      {
+        type: "cohub.neta.characters",
+        operation: "favorites",
+        pageIndex: input.pageIndex,
+        pageSize: input.pageSize,
+      },
+      { timeoutMs: 20_000 },
+    );
+    return response?.page ?? null;
+  }
+
+  async setNetaCharacterFavorite(uuid: string, isCancel = false) {
+    const response = await this.transport.request<{ ok?: boolean }>(
+      {
+        type: "cohub.neta.characters",
+        operation: "favorite",
+        uuid,
+        isCancel,
+      },
+      { timeoutMs: 20_000 },
+    );
+    return response?.ok === true;
   }
 }
 

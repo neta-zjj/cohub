@@ -13,6 +13,7 @@ export type ModelCost = {
 };
 
 export type ModelThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ModelRequestProfile = "codex";
 export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
 
 export type ModelDef = {
@@ -29,6 +30,7 @@ export type ModelDef = {
   cost?: ModelCost;
   contextWindow?: number;
   maxTokens?: number;
+  requestProfile?: ModelRequestProfile;
   headers?: Record<string, string>;
   compat?: unknown;
   [key: string]: unknown;
@@ -38,6 +40,7 @@ export type ProviderConfig = {
   baseUrl?: string;
   apiKey?: string;
   api?: string;
+  requestProfile?: ModelRequestProfile;
   headers?: Record<string, string>;
   compat?: unknown;
   models?: ModelDef[];
@@ -47,6 +50,25 @@ export type ProviderConfig = {
 export type ModelsConfig = {
   providers: Record<string, ProviderConfig>;
 };
+
+export function mergeHeaders<T extends string | null = string>(
+  ...sources: Array<Record<string, T> | null | undefined>
+): Record<string, T> | undefined {
+  const merged: Record<string, T> = {};
+  const names = new Map<string, string>();
+
+  for (const source of sources) {
+    for (const [name, value] of Object.entries(source ?? {})) {
+      const normalized = name.toLowerCase();
+      const previousName = names.get(normalized);
+      if (previousName) delete merged[previousName];
+      merged[name] = value;
+      names.set(normalized, name);
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
 
 export type CachedModelsConfig = {
   rev: string;
@@ -170,4 +192,18 @@ export function flattenModelsCatalog(config: ModelsConfig | null | undefined): M
     }
   }
   return entries;
+}
+
+export function isRuntimeModelAvailable(
+  configs: Array<ModelsConfig | null | undefined>,
+  provider: string,
+  modelId: string,
+): boolean {
+  const providerConfig = mergeModelsConfigs(...configs).providers[provider];
+  const model = providerConfig?.models?.find((entry) => entry.id === modelId);
+  return Boolean(
+    model &&
+    (model.api ?? providerConfig?.api) &&
+    (model.baseUrl ?? providerConfig?.baseUrl),
+  );
 }

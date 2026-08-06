@@ -36,6 +36,25 @@ describe("space-file-text", () => {
 		assert.equal(recovered.content, content);
 	});
 
+	it("recovers misclassified inline .board binary as JSON text", () => {
+		const content =
+			'{"kind":"cohub.board.manifest","version":1,"boardId":"d1","title":"Board"}\n';
+		const recovered = coerceInlineTextFile({
+			path: "Board.board",
+			name: "Board.board",
+			size: content.length,
+			mimeType: null,
+			mtimeMs: Date.now(),
+			kind: "binary",
+			encoding: "base64",
+			content: Buffer.from(content, "utf8").toString("base64"),
+			delivery: "inline",
+		});
+		assert.equal(recovered.kind, "text");
+		assert.equal(recovered.mimeType, "application/json");
+		assert.equal(recovered.content, content);
+	});
+
 	it("soft-fails CDN hydrate without dropping the file response", async () => {
 		const originalFetch = globalThis.fetch;
 		globalThis.fetch = (async () =>

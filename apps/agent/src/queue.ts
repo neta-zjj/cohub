@@ -6,19 +6,35 @@ import {
   createAgentTurnsQueue,
   AGENT_SANDBOX_BASH_JOB_NAME,
   AGENT_RUN_COMMAND_JOB_NAME,
+  AGENT_SANDBOX_FS_MUTATION_JOB_NAME,
   buildAgentSandboxBashJobId,
   buildAgentRunCommandJobId,
+  buildAgentSandboxFsMutationJobId,
   type AgentSandboxBashUploadJobData,
   type AgentRunCommandJobData,
   type AgentRunCommandJobResult,
+  type AgentSandboxFsMutationJobData,
+  type AgentSandboxFsMutationJobResult,
+  type AgentSandboxFsMutationOperation,
 } from "@cohub/infra/agent-queue";
 import { env } from "./env.js";
 
 export const AGENT_TURN_QUEUE_NAME = COHUB_AGENT_TURNS_QUEUE;
 export const AGENT_TURN_JOB_NAME = "agent_turns";
 export const AGENT_SESSION_FORK_JOB_NAME = "agent_session_fork";
-export { AGENT_SANDBOX_BASH_JOB_NAME, AGENT_RUN_COMMAND_JOB_NAME };
-export type { AgentSandboxBashUploadJobData, AgentRunCommandJobData, AgentRunCommandJobResult };
+export {
+  AGENT_SANDBOX_BASH_JOB_NAME,
+  AGENT_RUN_COMMAND_JOB_NAME,
+  AGENT_SANDBOX_FS_MUTATION_JOB_NAME,
+};
+export type {
+  AgentSandboxBashUploadJobData,
+  AgentRunCommandJobData,
+  AgentRunCommandJobResult,
+  AgentSandboxFsMutationJobData,
+  AgentSandboxFsMutationJobResult,
+  AgentSandboxFsMutationOperation,
+};
 
 export type AgentTurnJobData = {
   spaceId: string;
@@ -39,11 +55,12 @@ export type AgentSessionForkJobData = {
   trace?: Record<string, unknown>;
 };
 
-export type AgentJobData = AgentTurnJobData | AgentSessionForkJobData | AgentSandboxBashUploadJobData | AgentRunCommandJobData;
+export type AgentJobData = AgentTurnJobData | AgentSessionForkJobData | AgentSandboxBashUploadJobData | AgentRunCommandJobData | AgentSandboxFsMutationJobData;
 
 export const agentTurnQueue = createAgentTurnsQueue<AgentJobData, unknown>(env.BULLMQ_REDIS_URL, "cohub-agent");
 export const buildSandboxBashJobId = buildAgentSandboxBashJobId;
 export const buildRunCommandJobId = buildAgentRunCommandJobId;
+export const buildSandboxFsMutationJobId = buildAgentSandboxFsMutationJobId;
 
 export async function enqueueAgentTurnJob(data: AgentTurnJobData, options: JobsOptions = {}) {
   const trace = injectTrace();
@@ -54,6 +71,7 @@ export async function enqueueAgentTurnJob(data: AgentTurnJobData, options: JobsO
     trace: Object.keys(trace).length > 0 ? trace : data.trace,
   }, {
     ...(jobId ? { jobId } : {}),
+    // Covers queue/DB failures before claim; claimed LLM turns retry in session-runtime.
     attempts: 2,
     backoff: { type: "fixed", delay: 1000 },
     removeOnComplete: true,

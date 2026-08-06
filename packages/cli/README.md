@@ -65,6 +65,9 @@ COHUB_SPACE_ID=<spaceId> cohub spaces get
 cohub spaces create --name "<name>" --description "<description>" --json
 cohub spaces update <spaceId> --slug <space-slug>
 cohub spaces rename <spaceId> "<new name>"
+cohub -s <spaceId> spaces invites create --role builder --days 7
+cohub -s <spaceId> spaces invites ls
+cohub -s <spaceId> spaces invites revoke <code> --yes
 cohub -s <spaceId> run -- git status
 ```
 
@@ -120,6 +123,74 @@ cohub -s <spaceId> spaces sessions rename <sessionId> "<new title>"
 ```
 
 Use `spaces prompt --session <sessionId>` to send to a Chat.
+
+## Space turns
+
+List recent turns across all visible Sessions in a Space:
+
+```bash
+cohub -s <spaceId> spaces turns ls
+cohub -s <spaceId> spaces turns ls --author others --limit 50 --json
+cohub -s <spaceId> spaces turns ls --session <sessionId>
+```
+
+Use `pageInfo.nextCursor` with `--cursor` to load older pages. Use a previous
+`snapshotCursor` with `--after` and an explicit `--before` boundary to query
+newer turns:
+
+```bash
+cohub -s <spaceId> spaces turns ls --cursor <nextCursor> --json
+cohub -s <spaceId> spaces turns ls --after <snapshotCursor> --before <snapshotAt> --json
+```
+
+## Boards
+
+Board commands use the selected Space and support `-h` at every level:
+
+```bash
+cohub boards -h
+cohub boards inspect -h
+cohub -s <spaceId> boards create boards/plan.board --title "Plan"
+cohub -s <spaceId> boards inspect <boardId> --json
+cohub -s <spaceId> boards capabilities <boardId>
+cohub -s <spaceId> boards watch <boardId> --json
+```
+
+Pass nodes, effects, and sequences as JSON when creating a Board. The path and
+title stay explicit in the command:
+
+```bash
+cohub -s <spaceId> boards create boards/plan.board \
+  --title "Plan" \
+  --input board-content.json
+```
+
+Transactions are JSON objects without `boardId`; the bound Board supplies it.
+`txId` is generated when omitted, while `baseVersion` must be provided in the
+input or with `--base-version`:
+
+```json
+{
+  "baseVersion": 3,
+  "operations": [
+    {
+      "type": "board.patch",
+      "payload": { "patch": { "title": "Updated plan" } }
+    }
+  ]
+}
+```
+
+```bash
+cohub -s <spaceId> boards validate <boardId> --input transaction.json
+cat transaction.json | cohub -s <spaceId> boards apply <boardId> --input - --json
+cohub -s <spaceId> boards play <boardId> <sequenceId>
+cohub -s <spaceId> boards seek <boardId> <playbackId> 400
+cohub -s <spaceId> boards stop <boardId> <playbackId>
+```
+
+Pass `--tx-id` or `--command-id` when a script needs a stable idempotency key
+across retries.
 
 ## Search
 

@@ -1,16 +1,4 @@
-import { sdk } from "$lib/sdk";
 import type { PageLoad } from "./$types";
 
-export const load: PageLoad = async ({ params }) => {
-	const result = await sdk.works.getBySlug(
-		params.username,
-		params.spaceSlug,
-		params.workSlug,
-	);
-	return {
-		work: result.work,
-		space: result.space,
-		owner: result.owner,
-		content: result.content,
-	};
-};
+/** Server owns data loading; keep a thin universal load for typing / passthrough. */
+export const load: PageLoad = async ({ data }) => data;

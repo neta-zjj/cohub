@@ -1,6 +1,13 @@
 import type { ContentBlock, Usage } from "@cohub/protocol/core";
 import { sessionGenerationSnapshotsRepo } from "$lib/cache/repositories/session-generation-snapshots-repo";
 import { shouldPreserveLivePreviewOnArchive } from "$lib/session-generation-stream-guards";
+import {
+	emptyGenerationStreamResiduals,
+	generationTurnChanged,
+	removeGenerationStatesForSpace,
+	resolveGenerationProgressResiduals,
+	resolveGenerationStreamResiduals,
+} from "$lib/stores/session-generation-state";
 
 export type SessionGenerationStatus =
 	| "idle"
@@ -18,6 +25,7 @@ export type StreamingIntermediateMessage = {
 	content: ContentBlock[];
 	id?: string;
 	sessionId?: string;
+	sequence?: number | null;
 	role?: "user" | "assistant" | "system";
 	text?: string | null;
 	provider?: string | null;
@@ -54,6 +62,13 @@ export type SessionGenerationState = {
 	runtimeProvider: string | null;
 	runtimeModel: string | null;
 	finalizedPreview: boolean;
+	/**
+	 * Server-side emit time (epoch ms) of the latest content chunk, taken from
+	 * the realtime event envelope. Used to stamp the live streaming preview with
+	 * a real time that advances with the stream yet freezes between chunks,
+	 * instead of the client's ever-advancing render clock.
+	 */
+	lastPatchAt: number | null;
 };
 
 const PERSIST_WRITE_DEBOUNCE_MS = 250;
@@ -88,6 +103,7 @@ const createIdleState = (sessionId: string): SessionGenerationState => ({
 	runtimeProvider: null,
 	runtimeModel: null,
 	finalizedPreview: false,
+	lastPatchAt: null,
 });
 
 function sanitizeError(error: string | null | undefined) {
@@ -153,12 +169,18 @@ function isTerminalStatus(status: string | null | undefined) {
 	return Boolean(status && TERMINAL_STATUSES.has(status));
 }
 
-/** True when both ids are present and differ — a real turn handoff. */
-function isTurnSwitch(
-	currentTurnId: string | null | undefined,
-	nextTurnId: string | null | undefined,
-) {
-	return Boolean(currentTurnId && nextTurnId && currentTurnId !== nextTurnId);
+function isValidTimestamp(value: number | null | undefined): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+/** Latest of two chunk emit times; out-of-order safe. */
+function latestPatchAt(
+	current: number | null | undefined,
+	incoming: number | null | undefined,
+): number | null {
+	if (!isValidTimestamp(incoming)) return current ?? null;
+	if (!isValidTimestamp(current)) return incoming;
+	return Math.max(current, incoming);
 }
 
 function parseSnapshotState(
@@ -202,6 +224,7 @@ function parseSnapshotState(
 		runtimeProvider: record.runtimeProvider,
 		runtimeModel: record.runtimeModel,
 		finalizedPreview: record.finalizedPreview,
+		lastPatchAt: record.lastPatchAt ?? null,
 	};
 }
 
@@ -228,6 +251,7 @@ function toSnapshotInput(state: SessionGenerationState) {
 		runtimeModel: state.runtimeModel,
 		startedAt: state.startedAt ?? null,
 		lastEventAt: state.lastEventAt ?? null,
+		lastPatchAt: state.lastPatchAt ?? null,
 		updatedAt: now,
 	};
 }
@@ -372,6 +396,7 @@ class SessionGenerationStore {
 			runtimeProvider: null,
 			runtimeModel: null,
 			finalizedPreview: false,
+			lastPatchAt: null,
 		});
 	}
 
@@ -391,7 +416,11 @@ class SessionGenerationStore {
 		// and a queued follow-up became running). Always drop residual
 		// preview/process data so the handoff intermediate from the previous
 		// turn cannot paint onto the new turn.
-		const turnSwitched = isTurnSwitch(current.turnId, input?.turnId);
+		const turnSwitched = generationTurnChanged(current.turnId, input?.turnId);
+		const residuals = emptyGenerationStreamResiduals<
+			ContentBlock,
+			StreamingIntermediateMessage
+		>();
 		this.setState(sessionId, {
 			...current,
 			sessionId,
@@ -401,12 +430,7 @@ class SessionGenerationStore {
 			errorCode: null,
 			startedAt: Date.now(),
 			lastEventAt: Date.now(),
-			contentBlocks: [],
-			intermediateMessages: [],
-			streamMessageId: null,
-			messageOrdinal: null,
-			truncatedStart: false,
-			patchSeq: 0,
+			...residuals,
 			anchorUserMessageId: turnSwitched
 				? (input?.anchorUserMessageId ?? null)
 				: (input?.anchorUserMessageId ?? current.anchorUserMessageId ?? null),
@@ -417,6 +441,7 @@ class SessionGenerationStore {
 			runtimeProvider: null,
 			runtimeModel: null,
 			finalizedPreview: input?.finalizedPreview ?? false,
+			lastPatchAt: null,
 		});
 	}
 
@@ -433,6 +458,7 @@ class SessionGenerationStore {
 			patchSeq?: number;
 			turnId?: string | null;
 			finalizedPreview?: boolean;
+			patchAt?: number | null;
 		},
 	) {
 		const current = this.get(sessionId) ?? createIdleState(sessionId);
@@ -442,7 +468,12 @@ class SessionGenerationStore {
 		// history / stream identity from the prior turn. Without this the
 		// timeline briefly renders the previous turn's output under the new
 		// turn until the next real stream event arrives.
-		const turnSwitched = isTurnSwitch(current.turnId, input.turnId);
+		const turnSwitched = generationTurnChanged(current.turnId, input.turnId);
+		const residuals = resolveGenerationProgressResiduals(
+			current,
+			input,
+			turnSwitched,
+		);
 		this.setState(sessionId, {
 			...current,
 			spaceId: input.spaceId ?? current.spaceId ?? null,
@@ -452,33 +483,10 @@ class SessionGenerationStore {
 			startedAt: turnSwitched ? Date.now() : (current.startedAt ?? Date.now()),
 			lastEventAt: Date.now(),
 			contentBlocks: input.contentBlocks,
-			intermediateMessages:
-				input.intermediateMessages !== undefined
-					? input.intermediateMessages
-					: turnSwitched
-						? []
-						: (current.intermediateMessages ?? []),
-			streamMessageId:
-				input.streamMessageId !== undefined
-					? input.streamMessageId
-					: turnSwitched
-						? null
-						: current.streamMessageId,
-			messageOrdinal:
-				input.messageOrdinal !== undefined
-					? input.messageOrdinal
-					: turnSwitched
-						? null
-						: current.messageOrdinal,
+			...residuals,
 			anchorUserMessageId: turnSwitched
 				? (input.anchorUserMessageId ?? null)
 				: (input.anchorUserMessageId ?? current.anchorUserMessageId ?? null),
-			truncatedStart: turnSwitched
-				? (input.truncatedStart ?? false)
-				: (input.truncatedStart ?? current.truncatedStart),
-			patchSeq: turnSwitched
-				? (input.patchSeq ?? 0)
-				: (input.patchSeq ?? current.patchSeq),
 			turnId: nextTurnId,
 			runtimePhase: null,
 			runtimePhaseAt: null,
@@ -486,6 +494,10 @@ class SessionGenerationStore {
 			runtimeProvider: null,
 			runtimeModel: null,
 			finalizedPreview: input.finalizedPreview ?? false,
+			lastPatchAt: latestPatchAt(
+				turnSwitched ? null : current.lastPatchAt,
+				input.patchAt,
+			),
 		});
 	}
 
@@ -508,7 +520,7 @@ class SessionGenerationStore {
 		const current = this.get(sessionId) ?? createIdleState(sessionId);
 		// Defense in depth: never fold an intermediate archive from turn A into
 		// generation state that has already advanced to turn B (queued follow-up).
-		if (isTurnSwitch(current.turnId, input.turnId)) {
+		if (generationTurnChanged(current.turnId, input.turnId)) {
 			return;
 		}
 		const archived = input.archived ?? null;
@@ -582,9 +594,13 @@ class SessionGenerationStore {
 		// Lifecycle events are often the first signal that a queued follow-up
 		// has started. Drop residual preview/process data from the previous
 		// turn so the new turn does not render the old output.
-		const turnSwitched = isTurnSwitch(current.turnId, input.turnId);
+		const turnSwitched = generationTurnChanged(current.turnId, input.turnId);
 		const resumeFromTerminal = isTerminalStatus(current.status);
 		const shouldResetResiduals = turnSwitched || resumeFromTerminal;
+		const residuals = resolveGenerationStreamResiduals(
+			current,
+			shouldResetResiduals,
+		);
 		const nextStatus =
 			current.status === "idle" || resumeFromTerminal || turnSwitched
 				? "pending"
@@ -600,15 +616,7 @@ class SessionGenerationStore {
 				? Date.now()
 				: (current.startedAt ?? Date.now()),
 			lastEventAt: Date.now(),
-			contentBlocks: shouldResetResiduals ? [] : current.contentBlocks,
-			intermediateMessages: shouldResetResiduals
-				? []
-				: current.intermediateMessages,
-			streamMessageId: shouldResetResiduals ? null : current.streamMessageId,
-			messageOrdinal: shouldResetResiduals ? null : current.messageOrdinal,
-			truncatedStart: shouldResetResiduals ? false : current.truncatedStart,
-			patchSeq: shouldResetResiduals ? 0 : current.patchSeq,
-			finalizedPreview: shouldResetResiduals ? false : current.finalizedPreview,
+			...residuals,
 			turnId: nextTurnId,
 			anchorUserMessageId: turnSwitched
 				? (input.anchorUserMessageId ?? null)
@@ -622,6 +630,7 @@ class SessionGenerationStore {
 				(shouldResetResiduals ? null : current.runtimeProvider),
 			runtimeModel:
 				input.model ?? (shouldResetResiduals ? null : current.runtimeModel),
+			lastPatchAt: shouldResetResiduals ? null : (current.lastPatchAt ?? null),
 		});
 	}
 
@@ -779,15 +788,14 @@ class SessionGenerationStore {
 	/** Clear only sessions belonging to one space (multi-host safe). */
 	resetSpace(spaceId: string | null | undefined) {
 		if (!spaceId) return;
-		const next: Record<string, SessionGenerationState> = {};
-		for (const [sessionId, state] of Object.entries(this.bySessionId)) {
-			if (state.spaceId === spaceId) {
-				this.clearPersisted(sessionId, spaceId);
-				continue;
-			}
-			next[sessionId] = state;
+		const { remaining, removedSessionIds } = removeGenerationStatesForSpace(
+			this.bySessionId,
+			spaceId,
+		);
+		for (const sessionId of removedSessionIds) {
+			this.clearPersisted(sessionId, spaceId);
 		}
-		this.bySessionId = next;
+		this.bySessionId = remaining;
 	}
 }
 

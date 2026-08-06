@@ -2,7 +2,7 @@ import type { AuthUserProfile } from "@cohub/identity";
 import { AuthorizationError, verifyUserAccessToken } from "@cohub/identity";
 import { buildTraceHeaders, getTraceResponseHeaders, type TraceIdentifiers } from "@cohub/infra/tracing";
 import type { ContentBlock } from "@cohub/protocol/core";
-import type { RealtimeRoom } from "@cohub/protocol/realtime";
+import type { RealtimeRoom, RealtimeRoomDescriptor } from "@cohub/protocol/realtime";
 import type { BillingPayload } from "@cohub/protocol";
 import type { GatewayAuthUser } from "./config.js";
 import { gatewayConfig } from "./config.js";
@@ -134,6 +134,51 @@ export const notifySpacePresenceUpdated = async (spaceId: string): Promise<void>
   }
 };
 
+export const authorizeWorkRoom = async (input: {
+  authToken: string;
+  roomId: string;
+  ticket: string;
+}): Promise<{ room: RealtimeRoomDescriptor; participantId: string; userKey: string }> => {
+  const response = await fetch(`${gatewayConfig.apiBaseUrl}/internal/gateway/authorize-work-room`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-worker-secret": gatewayConfig.workerSecret,
+      authorization: `Bearer ${input.authToken}`,
+      ...buildTraceHeaders(),
+    },
+    body: JSON.stringify({ roomId: input.roomId, ticket: input.ticket }),
+  });
+  const data = await parseJson<{ ok?: boolean; room?: RealtimeRoomDescriptor; participantId?: string; userKey?: string; message?: string }>(response);
+  if (!response.ok || !data?.ok || !data.room || !data.participantId || !data.userKey) {
+    throw new Error(data?.message || `Work room authorization failed ${response.status}`);
+  }
+  return { room: data.room, participantId: data.participantId, userKey: data.userKey };
+};
+
+export const authorizeBoardAwareness = async (input: {
+  authToken: string;
+  boardId: string;
+  spaceId: string;
+  permission: "view" | "edit";
+}): Promise<boolean> => {
+  const response = await fetch(`${gatewayConfig.apiBaseUrl}/internal/gateway/authorize-board-awareness`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-worker-secret": gatewayConfig.workerSecret,
+      authorization: `Bearer ${input.authToken}`,
+      ...buildTraceHeaders(),
+    },
+    body: JSON.stringify({
+      boardId: input.boardId,
+      spaceId: input.spaceId,
+      permission: input.permission,
+    }),
+  });
+  return response.ok;
+};
+
 export const authorizeRealtimeRooms = async (input: {
   authToken: string;
   rooms: string[];
@@ -158,43 +203,6 @@ export const authorizeRealtimeRooms = async (input: {
     rooms: data.rooms as RealtimeRoom[],
     rejected: Array.isArray(data.rejected) ? data.rejected : [],
   };
-};
-
-export const submitCanvasTransaction = async (input: {
-  userId: string;
-  spaceId: string;
-  documentId: string;
-  txId: string;
-  baseVersion?: number | null;
-  clientId?: string | null;
-  undoGroupId?: string | null;
-  ops: Array<Record<string, unknown>>;
-}): Promise<{ document: { version: number }; nodes: unknown[] }> => {
-  const response = await fetch(`${gatewayConfig.apiBaseUrl}/internal/canvas/${input.spaceId}/${input.documentId}/tx`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-worker-secret": gatewayConfig.workerSecret,
-      ...buildTraceHeaders(),
-    },
-    body: JSON.stringify({
-      actorId: input.userId,
-      txId: input.txId,
-      baseVersion: input.baseVersion ?? null,
-      clientId: input.clientId ?? null,
-      undoGroupId: input.undoGroupId ?? null,
-      ops: input.ops,
-    }),
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Internal canvas transaction failed ${response.status}: ${text}`);
-  }
-  const data = await parseJson<{ document?: { version?: number }; nodes?: unknown[] }>(response);
-  if (!data?.document || typeof data.document.version !== "number" || !Array.isArray(data.nodes)) {
-    throw new Error("Internal canvas transaction returned an invalid response");
-  }
-  return { document: { version: data.document.version }, nodes: data.nodes };
 };
 
 /** Carries a standard billing error body from the internal prompt API. */
@@ -228,6 +236,7 @@ export const submitInternalSessionPrompt = async (input: {
   source: string;
   model?: string | null;
   provider?: string | null;
+  thinkingLevel?: string | null;
   context?: Record<string, unknown> | null;
 }): Promise<{ ok: true; turnId: string; userMessageId: string; trace: TraceIdentifiers }> => {
   const requestId = typeof input.context?.requestId === "string" ? input.context.requestId : null;
@@ -246,6 +255,7 @@ export const submitInternalSessionPrompt = async (input: {
       source: input.source,
       model: input.model ?? null,
       provider: input.provider ?? null,
+      thinkingLevel: input.thinkingLevel ?? null,
       context: input.context ?? null,
     }),
   });

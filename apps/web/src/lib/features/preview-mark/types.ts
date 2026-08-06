@@ -4,12 +4,12 @@ export type MarkTool = "pen" | "arrow" | "rect" | "crop";
 
 export type MarkColor = "brand" | "red" | "yellow" | "white";
 
-export const MARK_COLOR_HEX: Record<MarkColor, string> = {
+export const MARK_COLOR_HEX = {
 	brand: "#FF3E00",
 	red: "#EF4444",
 	yellow: "#EAB308",
 	white: "#F8FAFC",
-};
+} satisfies Record<MarkColor, `#${string}`>;
 
 export type FrameSource =
 	| { kind: "image"; path: string }

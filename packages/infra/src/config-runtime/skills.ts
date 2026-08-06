@@ -1,7 +1,10 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
+import { createLogger } from "../logging/index.js";
 
-export const SKILLS_REDIS_KEY_VERSION = "v1";
+const logger = createLogger({ serviceName: "cohub-skills" });
+
+export const SKILLS_REDIS_KEY_VERSION = "v3";
 export const PLATFORM_SKILLS_REDIS_KEY = `configs:skills:${SKILLS_REDIS_KEY_VERSION}:platform`;
 export const USER_SKILLS_REDIS_KEY_PREFIX = `configs:skills:${SKILLS_REDIS_KEY_VERSION}:user`;
 export const PROJECT_SKILLS_REDIS_KEY_PREFIX = `configs:skills:${SKILLS_REDIS_KEY_VERSION}:project`;
@@ -15,6 +18,19 @@ const SAFE_REDIS_KEY_SEGMENT_REGEX = /^[0-9a-zA-Z_-]+$/;
 
 export type SkillScope = "platform" | "mod" | "user" | "project";
 
+export type SkillCatalogSource = {
+  type: "mod";
+  modSpaceId: string;
+  mountSlug: string;
+};
+
+export type ModSkillBinding = {
+  skillsDir: string;
+  sandboxDir: string;
+  modSpaceId: string;
+  mountSlug: string;
+};
+
 export type Skill = {
   name: string;
   description: string;
@@ -24,12 +40,16 @@ export type Skill = {
   baseDir: string;
   sandboxBaseDir: string;
   scope: SkillScope;
+  source?: SkillCatalogSource;
+  /** When true, the skill is hidden from the model's system prompt and can only be invoked explicitly via `/skill:name`. */
+  disableModelInvocation: boolean;
 };
 
 export type SkillCatalogEntry = {
   name: string;
   description: string;
   scope: SkillScope;
+  source?: SkillCatalogSource;
 };
 
 export type SkillsConfig = {
@@ -84,6 +104,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+export function isSkillCatalogSource(value: unknown): value is SkillCatalogSource {
+  return isRecord(value)
+    && value.type === "mod"
+    && typeof value.modSpaceId === "string"
+    && typeof value.mountSlug === "string";
+}
+
 export function isSkill(value: unknown): value is Skill {
   if (!isRecord(value)) return false;
   if (value.scope !== "platform" && value.scope !== "mod" && value.scope !== "user" && value.scope !== "project") return false;
@@ -93,7 +120,9 @@ export function isSkill(value: unknown): value is Skill {
     && typeof value.filePath === "string"
     && typeof value.sandboxFilePath === "string"
     && typeof value.baseDir === "string"
-    && typeof value.sandboxBaseDir === "string";
+    && typeof value.sandboxBaseDir === "string"
+    && (value.source === undefined || isSkillCatalogSource(value.source))
+    && typeof value.disableModelInvocation === "boolean";
 }
 
 export function isSkillsConfig(value: unknown): value is SkillsConfig {
@@ -144,11 +173,75 @@ export function mergeSkillsConfigs(...configs: Array<SkillsConfig | null | undef
   return { skills: [...skills.values()].sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
+function isSafeSkillChildPath(value: string): boolean {
+  if (!value || value.startsWith("/")) return false;
+  return value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+function getSandboxChildPath(rootDir: string, targetPath: string, sandboxDir: string): string {
+  const relativePath = relative(rootDir, targetPath).replaceAll("\\", "/");
+  if (isSafeSkillChildPath(relativePath)) return `${sandboxDir}/${relativePath}`;
+
+  const normalizedPath = targetPath.replaceAll("\\", "/");
+  const skillsMarker = "/.agents/skills/";
+  const markerIndex = normalizedPath.lastIndexOf(skillsMarker);
+  const cachedRelativePath = markerIndex === -1
+    ? ""
+    : normalizedPath.slice(markerIndex + skillsMarker.length);
+  if (!isSafeSkillChildPath(cachedRelativePath)) {
+    throw new Error(`Skill path is outside its source directory: ${targetPath}`);
+  }
+  return `${sandboxDir}/${cachedRelativePath}`;
+}
+
+export function bindModSkillsConfig(
+  config: SkillsConfig,
+  input: ModSkillBinding,
+): SkillsConfig {
+  const source: SkillCatalogSource = {
+    type: "mod",
+    modSpaceId: input.modSpaceId,
+    mountSlug: input.mountSlug,
+  };
+  return {
+    skills: config.skills.map((skill) => ({
+      ...skill,
+      sandboxFilePath: getSandboxChildPath(input.skillsDir, skill.filePath, input.sandboxDir),
+      sandboxBaseDir: getSandboxChildPath(input.skillsDir, skill.baseDir, input.sandboxDir),
+      scope: "mod",
+      source,
+    })),
+  };
+}
+
+function getModSkillBindingKey(source: Pick<SkillCatalogSource, "modSpaceId" | "mountSlug">): string {
+  return `${source.modSpaceId}\0${source.mountSlug}`;
+}
+
+export function bindSpaceModSkillsConfig(config: SkillsConfig, bindings: ModSkillBinding[]): SkillsConfig {
+  const bindingsBySource = new Map(bindings.map((binding) => [getModSkillBindingKey(binding), binding]));
+  return {
+    skills: config.skills.map((skill) => {
+      if (skill.scope !== "mod" || !skill.source) {
+        throw new Error(`Cached Mod skill is missing source metadata: ${skill.name}`);
+      }
+      const binding = bindingsBySource.get(getModSkillBindingKey(skill.source));
+      if (!binding) {
+        throw new Error(`Cached Mod skill has an unknown source: ${skill.name}`);
+      }
+      const [bound] = bindModSkillsConfig({ skills: [skill] }, binding).skills;
+      if (!bound) throw new Error(`Failed to bind cached Mod skill: ${skill.name}`);
+      return bound;
+    }),
+  };
+}
+
 export function toSkillCatalog(skills: Skill[]): SkillCatalogEntry[] {
   return skills.map((skill) => ({
     name: skill.name,
     description: skill.description,
     scope: skill.scope,
+    ...(skill.source ? { source: skill.source } : {}),
   }));
 }
 
@@ -237,6 +330,18 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Parse a frontmatter value as a YAML 1.2 core-schema boolean.
+ * Accepts `true`/`True`/`TRUE` (case-insensitive), tolerates trailing inline
+ * comments (`true # note`) and surrounding quotes. Anything else is false.
+ */
+function parseFrontmatterBoolean(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const withoutComment = value.replace(/\s+#.*$/, "").trim();
+  const unquoted = withoutComment.replace(/^["']|["']$/g, "").trim();
+  return unquoted.toLowerCase() === "true";
+}
+
 export async function loadSkillsFromDirectory(input: {
   dir: string;
   sandboxDir: string;
@@ -291,16 +396,21 @@ export async function loadSkillsFromDirectory(input: {
           baseDir: full,
           sandboxBaseDir: `${input.sandboxDir}/${relativeDir}`,
           scope: input.scope,
+          disableModelInvocation: parseFrontmatterBoolean(attributes["disable-model-invocation"]),
         });
-        continue;
       } catch (error) {
         const code = typeof error === "object" && error !== null && "code" in error
           ? String((error as { code?: unknown }).code)
           : undefined;
-        if (code !== "ENOENT") throw error;
+        // Missing SKILL.md means this is not a skill root; recurse into subdirectories.
+        if (code === "ENOENT") {
+          await walk(full);
+          continue;
+        }
+        // Any other failure (permissions, I/O, parse) isolates to this skill: log and skip
+        // so one broken optional skill never aborts the whole prompt build.
+        logger.warn("failed to load skill", { skillFile, error: error instanceof Error ? error.message : String(error) });
       }
-
-      await walk(full);
     }
   };
 

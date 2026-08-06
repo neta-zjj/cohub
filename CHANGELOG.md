@@ -4,6 +4,319 @@ All notable changes to Cohub are documented in this file.
 
 <!-- Generated from apps/web/src/lib/changelog/entries.json. Do not edit. -->
 
+## v2.11 — 2026-08-06
+
+- **Realtime rooms**: Works can now create or join code-scoped rooms through `client.work.realtime` and exchange generic JSON events over the existing Gateway WebSocket — with member presence, room-scoped sequencing, publish ACKs, and short-lived admission tickets — so a published Work can run multiplayer state with no backend of its own.
+- **High-frequency sends**: `room.send()` omits the per-event acknowledgment round trip that caps `publish` at ~1000/RTT events per second, making it suitable for input frames and other high-rate traffic; failures surface via `room.onSendError()` instead of rejected promises.
+- **Per-viewer seats**: rooms created with `seatPerUser` give each viewer at most one seat — a second tab or a rejoin after an unclean disconnect takes over the existing seat — while members carry an opaque `userKey` so applications can group a viewer's connections without seeing the account id.
+- **Redis-only room infrastructure**: rooms are backed by renewable membership leases, a bounded serialized mutation queue, per-connection rate limits, 16KB payload caps, and an absolute 24-hour lifetime that activity never extends; each Work is limited to 512 active rooms with quota enforced at creation (HTTP 429 `ROOM_QUOTA_EXCEEDED`).
+
+### Bug Fixes
+
+- Fixed a join race where a member joining between the snapshot read and the local subscription was delivered to neither; the subscription is now established before the snapshot is taken.
+- Fixed an event leak where a connection holding a valid ticket for a full room could briefly enter the routing table and receive room events during the capacity check.
+- Restored the client-side sequence filter so pub/sub can no longer replay an event already reflected in the snapshot, which could re-run custom events or revert presence to a stale value.
+- Unified membership teardown in the Gateway so a swept or superseded connection stops receiving room events and is closed with reason `superseded` instead of lingering in the member list.
+
+## v2.10 — 2026-08-05
+
+- **Cohub Balance**: platform-managed prepaid balance for Space commerce products — a whole-dollar `cohubBalanceUsd` provisions a Billing product plus a global USD credit benefit, buyers receive the full balance on purchase, and the amount is configurable end-to-end via the API, SDK, CLI (`--cohub-balance-usd`), and web product editor
+- **Purchase idempotency**: Work commerce purchases now carry a stable `purchaseAttemptId` (or `Idempotency-Key` header) that maps to a Billing order idempotency key, so client retries after timeouts resolve to the original order instead of creating duplicates
+- **Resolve fan-out hardening**: the public work-commerce product resolve endpoint now fans out to Billing with a bounded concurrency pool (max 4) and caps on product key count and length, and bound benefit keys are read from authoritative Billing bindings instead of product meta — bounding upstream load and eliminating stale benefit attribution
+- **New Chat background accessibility**: HTML new-chat backgrounds are live documents with focusable controls, so only image/video backgrounds are treated as decorative (`aria-hidden`); HTML backgrounds stay in the accessibility tree, with regression tests added to the protocol package
+
+### Bug Fixes
+
+- HTML new-chat backgrounds are no longer hidden from assistive technology while their controls remained keyboard-focusable (WCAG 4.1.2)
+- Bound benefit keys are resolved from Billing bindings instead of product meta, fixing stale benefit attribution in commerce resolve and serialize paths
+- Cohub Balance products are provisioned active-and-private instead of draft — Billing refuses binding a benefit to a draft product — with compensation rollback when provisioning fails
+
+## v2.9 — 2026-08-04
+
+- **Sandbox filesystem mutations**: File writes, directory creation, deletes, and moves in cloud spaces are now executed inside the sandbox by the agent over its existing connection pool, so sandbox-local watchers observe every change and the direct PVC write path is only used when no sandbox is dialable
+- **Idempotent file mutations**: All filesystem operations and board creation accept a mutationId that maps to a stable, space-scoped BullMQ job id (canonical payload hashing included), so client retries reuse the same job instead of re-applying a mutation; board create derives deterministic board/transaction ids and safely reuses or cleans up orphaned manifests on retry
+- **Interactive mutation queue**: A new sandbox_fs_mutation job type with a 30-second interactive timeout and fail-fast errors, best-effort cancellation of queued jobs on timeout, and automatic redaction of file content from Redis once a job settles
+- **Save reliability in the web editor**: Autosave retries reuse the persisted mutationId so a save interrupted by reload dedupes on the backend instead of issuing a second mutation, and sandbox-inotify echoes during an in-flight save are no longer misread as external edits
+
+### Bug Fixes
+
+- Inline write limits hardened: base64 payloads could bypass the decoded-size cap with whitespace padding and reach Redis — both raw and decoded sizes are now bounded with a 413 response
+- mutationId validation (length and format) is now enforced on dir, delete, and move routes, not just file writes
+
+## v2.8 — 2026-08-03
+
+- **Image-to-text fallback**: images sent to text-only models are now transparently described by a configured vision model, with descriptions persisted per turn (JSONL sidecar plus DB) so they are reused instead of re-billed, and per-call provider/model/usage/cost recorded on the turn. Configuration lives in a shared `config-runtime/image-to-text` module with Redis-cached platform and per-user overrides, wired through API completions, the agent runtime, and the message postprocess worker.
+- **Upload transfer progress**: file uploads report real byte-level progress across the composer, space file pane, and profile/space settings, with an accessible indeterminate-to-determinate progress bar and cancellation via `AbortSignal`. The SDK gained `onProgress` and `signal` on public asset and chat attachment uploads, switching to XHR to expose upload events.
+- **Runtime reliability hardening**: agent session JSONL files now recover from truncated trailing entries and missing final newlines by archiving the partial file and fsyncing the repair before reopening; sandbox uploads verify transferred size and surface a typed mismatch error; prompt submission validates the requested provider/model against platform and user model configs; the QQ gateway classifies 4xx config failures to back off for five minutes instead of hot-looping, adds handshake timeouts and tracing spans, and the Go relay client applies the same retry classification.
+- **LLM image plumbing refactor**: remote-image URL marshaling moved out of `stream-completion.ts` into a dedicated `llm/image-content` module shared by the completion and image-to-text paths, and model-config loading was factored into reusable `config-runtime/models` helpers consumed by API, worker, and agent.
+
+### Bug Fixes
+
+- Image-to-text config cache now refreshes when a checkpoint publishes new config, so model changes take effect without waiting for TTL expiry.
+- Agent context projection no longer deep-clones the whole context, preserving tool function references and leaving the original context unmutated.
+- Upload progress is scoped per attachment instead of shared across a batch, so concurrent uploads no longer overwrite each other's state.
+- Danmaku speed, lane spacing, and visible-item caps retuned for smoother density under bursts.
+
+## v2.7 — 2026-08-03
+
+- **Friendly space invitations**: invite links now resolve through `/username/space-slug/join/<token>` with a shared invite page, plus Redis Lua-backed atomic usage reservation, per-space invite caps, and revocation — exposed end-to-end through the SDK and new `cohub spaces invites create/ls/revoke` commands
+- **Filesystem cache reconciliation rewrite**: the web space-fs repository moved to IndexedDB v14 with a dedicated epoch store, a transactional `idbRunTransaction` helper, sequence-gap detection that escalates to full resync, and a refresh coordinator that merges pending batches per lane so concurrent change events no longer thrash the cache or the UI
+- **Mod resources served from checkpoint snapshots**: agent now loads mod skills, rules, and append-system prompts from the `latest` checkpoint cache instead of the live workspace, so mounted mods and sandboxes always agree on one immutable snapshot; deploy manifests mount `CHECKPOINT_CACHE_ROOT` read-only
+- **Preview navigation state machine**: workspace file preview extracted into a standalone transition-id based navigation module, replacing the ad-hoc clip transition and eliminating stale renders when route, user, and restore sources race
+- Project skills load directly from the live workspace, dropping the revision-keyed Redis cache layer for immediate freshness after edits
+
+### Bug Fixes
+
+- Abort signals and other non-plain objects are preserved in completion payloads — image URL restoration no longer walks class instances and strips them
+- Preview panel open and close transitions are now reliable instead of intermittently dropping frames or getting stuck
+
+## v2.6 — 2026-07-31
+
+- **Space turn browsing**: a new permission-aware `GET /api/spaces/:id/turns` endpoint lists turns across all visible Sessions with author, session, and time-boundary filters plus stable cursor pagination, exposed through protocol types, the SDK (`SpaceTurnsApi`), and a new `cohub spaces turns ls` command with table and JSON output. The web workspace replays recent turns from other members through the existing danmaku layer, using local cursors, cross-tab lease coordination, deduplication, and live-message priority so catch-up never crowds out real-time activity.
+- **1 GiB Work publishes**: file, HTML, Board, and directory Works now accept up to 1 GiB, up from 5 MB for assets and 100 MB for sites. The publish job was rewritten to stream from disk through S3 multipart uploads (`@aws-sdk/lib-storage`) instead of buffering whole files and directories in memory, with HTML metadata parsing bounded to a 5 MB prefix read.
+- **500 MB gateway attachments**: inbound and outbound media limits are consolidated behind a shared `GATEWAY_ATTACHMENT_MAX_BYTES` constant and raised to 500 MB. A new `temp-media-file` module streams responses and base64 payloads to mode-`0600` temp files with byte-limit transforms and stream timeouts, replacing the buffer-everything path in the WeChat and Feishu providers.
+- **Indexed turn queries**: message lookups across the agent, API snapshot, and turn finalization paths now filter on the indexed `turn_id` column instead of the unindexed `meta->>'turnId'` JSONB expression, removing sequential scans over the full messages table on large deployments.
+- **Model in tool environment**: sandbox commands receive `COHUB_MODEL_PROVIDER` and `COHUB_MODEL_ID`, so tools and scripts can adapt to the model driving the current turn.
+
+### Bug Fixes
+
+- Raised the Work publish asset job wait timeout from 15 to 30 minutes so large publishes are no longer cut short.
+
+## v2.5 — 2026-07-31
+
+- **Recoverable context compaction**: compaction now runs at any LLM round boundary instead of only between turns, records structured metadata (scope, owner turn, trigger reason, token deltas, usage, duration), and rolls the session back to its pre-compaction archive when summarization fails, so a bad compaction no longer poisons the running turn. The web client renders it as an inline notice with expandable summary, token savings, and cost, streamed live through the SDK.
+- **Indexed turn IDs on messages**: session messages persist a dedicated `turn_id` column with a partial `(turn_id, sequence)` index, replacing JSON metadata lookups for turn-scoped reads, with a backfill script that keeps legacy `meta.turnId` rows readable during migration.
+- **Mod skill provenance**: skills mounted from mods carry a structured source (mod space and mount slug) through the config runtime, API, SDK, and CLI, so the slash command menu and `cohub skills` show which mod a skill comes from rather than a bare scope.
+- **Shared public identifier rules**: username and Space slug validation moved into a single `@cohub/protocol/public-identifiers` module with one reserved platform path list, so server and web enforce identical rules and new identities can no longer shadow platform routes. Existing stored values stay readable.
+
+### Bug Fixes
+
+- Compaction stats no longer inflate provider call counts when a summarization retry succeeds, and the turn ordinal shows the compaction's position within its turn instead of the global message sequence.
+- Model status heartbeats are resampled into a fixed 96-bucket window, so the hover chart stays legible regardless of upstream sample density.
+- Feishu bot identity is read from the correct response shape, restoring bot open_id resolution and channel readiness.
+
+## v2.4 — 2026-07-29
+
+- **Agent-actionable board viewport context**: chat viewport context now carries the viewed board's `boardId` instead of raw camera coordinates, so the agent can inspect and render the exact board a user is looking at, while `visibleRect` and selected nodes still convey focus. `ViewportCamera` is removed from the protocol and from the `BoardViewState`/`BoardRuntimeViewState` report contract.
+- **Trusted identity resolution for user profiles**: profile provisioning resolves a Logto identity only from a verified token subject or a previously verified binding, returning a transient profile otherwise. Usernames are never minted or promoted under a guessed binding, and cached handles are only reused when they belong to the same verified identity.
+- **Owner profiles ensured at resource boundaries**: every owned-space path, including Home ensure, now goes through `createOwnedSpace`, which establishes the owner's durable profile before the Space row is inserted; principals without a sign-in get an explicit 403 instead of a half-provisioned space.
+
+### Bug Fixes
+
+- Cross-origin board covers now recover through an anonymous image-element loader when Pixi's worker/ImageBitmap path rejects them, keeping the fast path intact and surfacing the underlying error in retry logs.
+- Fallback board textures are disposed alongside the Pixi cache entry on unload, closing a GPU texture leak and the reload race for the same URL.
+- Work public identity resolves the space owner's username for any owner, not only when the acting user happens to be that owner.
+
+## v2.3 — 2026-07-28
+
+- **Board playback policy**: Boards can persist an autoplay policy in metadata (`sequenceId`, `delayMs`, `loop`), so opening a Board plays the right sequence with local, per-viewer timing instead of ad-hoc client wiring. Wired end-to-end through the protocol schema, API board ops, SDK, and CLI.
+- **Filesystem event pipeline hardening**: The sandbox watcher closes the recursive inotify race by registering each directory before reading its children, recovers from `ErrEventOverflow` by re-walking and requesting an authoritative resync, emits deterministically ordered batches, and falls back to resync instead of allocating unbounded change lists. `fs.write` now reports create/modify disposition and the parent directories it created, and a new `fs.mkdir` RPC plus capability flags let clients update trees precisely.
+- **Mobile-safe board navigation**: Touch devices default to the hand tool, with tap-to-select gated behind a pointer-type check and an 8px slop threshold, so panning a Board on a phone no longer causes accidental edits.
+- **Public profile pages removed**: The `(public)/[username]` route, its loaders, and the identity affordances linking into it are gone, cutting roughly 590 lines and simplifying `UserIdentity`, presence stacks, and the explore/trending surfaces.
+
+### Bug Fixes
+
+- Board preview state, including animation poses and video playback, survives switching between workspace preview tabs.
+- Persistent animation poses no longer drift when a Board re-mounts or replays.
+- Board links sent in chat open in the board preview instead of the generic file view.
+- Work publish ensures the owner has a username before publishing, avoiding broken public URLs.
+- Immersive preview panel chrome and Board text editing alignment polish.
+
+## v2.2 — 2026-07-27
+
+- **PDF file preview**: continuous scroll viewer with header controls, plus a layout and scroll hot path that no longer scales linearly with page count on long documents
+- **Board tool styles**: per-tool creation defaults (colors, sizes, stroke) now live in the protocol and SDK, shared by web, SDK and CLI, with black/white palette colors and a larger default text size
+- **Figma-style rotation**: rotate selections from corner control zones, backed by shared Board geometry
+- **Board moves into the SDK**: the standalone board package is gone, split into dependency-scoped entries (headless, render) so lightweight consumers no longer pull in PixiJS; note nodes removed and Markdown file-card titles now come from frontmatter
+- **Live Work versions**: typed work.version.published Space realtime events, replayed onto list responses so clients stay in sync without refetching
+
+### Bug Fixes
+
+- Freehand Board strokes render stable rounded outlines through sharp turns and self-intersections
+- Transform controls stay attached to dragged items, and boards reconcile by identity
+- Board file-card covers preserve image proportions; metadata footer removed
+- Themed image backdrops stay behind the transparent canvas
+- Board history stays reachable on small touch screens
+- Previews persist across new chat navigation
+
+## v2.1 — 2026-07-26
+
+- **Board image export**: renderers, geometry, palette and document codec now share the SDK Board module, so one set of PixiJS card renderers draws a board on screen and in a headless Node render. `cohub boards export <board> -o out.png` supports `--frame`/`--items`/`--rect` regions, `--scale`, `--theme`, transparent backgrounds and PNG/JPEG/WebP; in the editor Shift+Cmd/Ctrl+E opens an export dialog with live pixel-size readout, download and copy. Source textures are capped at 64 unique previews and output size budgets are now hard guarantees.
+- **Board realtime awareness**: cursors, selections, creation gestures, drawing and transforms broadcast through the gateway with a protocol-level awareness schema and SDK subscriptions. Identity renders in a screen-space DOM overlay with avatars and device badges, mobile touch shows as a fading contact ring, and CLI or Agent edits surface as chip markers backed by request provenance stored on `board_transactions.metadata`; Agent markers open the originating chat.
+- **Video previews on boards**: video cards decode one bounded first frame through the same asset manager as images, sharing reference counting, the LRU cooling pool and viewport-bounded loading, capped at 2 concurrent decode slots. File change events now carry path and metadata, so an overwritten video drops stale keys and adopts its real aspect ratio.
+- **Theme-driven rendering**: card colors resolve from the active board theme instead of hard-coded palettes, so a space's `theme.css` applies to both canvas and exports. Node transform controls gained rotation-aware selection geometry and semantic resize capability helpers.
+
+### Bug Fixes
+
+- Switching board tabs kept publishing awareness for the previous board; runtime resources are now keyed on `boardId` with sequence numbers owned by a single page-level allocator
+- Zoom is faster and no longer drifts under rapid or clamped input
+- File-card content is clipped to node bounds with line-clamped title and excerpt
+- Agent auto-compaction now counts inline base64 images against a provider-aware bound, so sessions stop stalling on repeated 413s; summarize calls also get a retry budget
+- Gateway admits board awareness before queueing it
+- Board tool menus are toggleable and one-shot tools return to select
+- Board chrome stays visible while a board loads
+
+## v2.0 — 2026-07-26
+
+- **Board runtime v1**: the board domain is rebuilt around boards, nodes, effects, sequences, clips, transactions, operations, checkpoints, and playback state, replacing the document-centric canvas service with inspect/validate/apply transaction APIs plus playback commands and realtime events. Ships end-to-end: bound `BoardClient` entities with transaction and playback subscriptions in the SDK, space-scoped `boards` CLI commands for create/inspect/transaction/playback/watch, a new web animation core with Pixi-based playback, and worker checkpoints aligned to the new model. The former `canvas` domain is renamed to `board` across schema, routes, SDK, and web.
+- **Any workspace file on a board**: a new `file` node accepts every file that is not natively an image or video, binaries and unknown extensions included, deriving its presentation tier from the path rather than storing display state. Snapshots are an mtime-versioned cache over the authoritative workspace file, reads are deduplicated and concurrency-capped, and availability is intentionally never persisted so one client's outage never becomes everyone's.
+- **Order keys minted between neighbours**: node ordering moved off array indexes, so deleting the first node of a 1000-node board emits 1 delete instead of 999 patches, and a move re-keys one node via longest-increasing-subsequence selection. With the churn gone, node and operation caps rise to 50k, server-side apply plans node writes in memory and flushes bulk upserts in bounded chunks, and dense boards collapse into one batched layer so per-frame cost tracks the viewport instead of the document.
+- **Resize transforms content, not just the box**: a data-driven `aspectLocked` capability keeps text, media, and strokes from distorting while container shapes still honour Shift-to-constrain, images and videos adopt intrinsic pixel size once the texture resolves, and selection outlines hug visible pixels. Live previews run through GPU transforms with authoritative geometry written once on pointer-up, and label rasterization is deferred during the drag.
+- **Touch gestures for boards and notifications**: file tree rows can be long-pressed and dragged onto a board on touch and pen, with hit testing via `elementsFromPoint` against a zone registry, drawer retraction to expose the board, and targets re-resolved after autoscroll and at release. Turn notifications gain a reusable `swipeDismiss` action that locks direction after 8px so vertical scrolling still wins.
+
+### Bug Fixes
+
+- Protocol subpath aliases resolve in the web build; SvelteKit's prefix aliasing had rewritten `@cohub/protocol/board-constants` into a path under `index.ts`
+- Local undo survives draw gestures and remote rebases, and realtime echoes of your own transactions no longer clear `canUndo`
+- Board create input is validated against a shared schema before side effects, recreate soft-deletes and revives nodes instead of hard deleting, and only `VERSION_CONFLICT` is treated as rebaseable rather than every HTTP 409
+- Mobile navigation drops `?preview=` when switching sessions, so full-screen board preview no longer traps you
+- Session scroll position is restored after layout settles
+- Workspace previews open reliably, with streamlined space startup previews
+
+## v1.111 — 2026-07-24
+
+- **Space-local New Chat backgrounds**: New chat boards can load HTML backgrounds from a relative Space file path via authenticated preview sessions.
+
+### Bug Fixes
+
+- Unified workspace route context so sidebar layout prefs and turn notifications stay consistent across space/session targets.
+
+## v1.110 — 2026-07-23
+
+- **User-scoped label system for space pinning**: Replaced legacy space marks with a unified user-scoped label architecture (`user:pinned`), extending space bookmarking across core services, REST APIs, SDK, CLI (`spaces pin/unpin`), realtime events, and UI components.
+- **Real-time model availability monitoring**: Introduced a slim Redis-cached `/api/models/status` endpoint aggregating probe telemetry and observed traffic metrics to display operational health dots and 8-hour heartbeat charts in the model selector.
+- **Command palette space picker & tab filtering**: Added space tab filters (All, Mine, Pinned) with preference persistence, paginated scroll loading for space selection, and keyboard shortcuts to toggle sidebars.
+- **Channel help and model management commands**: Introduced `/help` and `/models` channel commands to inspect model configurations, catalog options, and session status directly within gateway chat channels.
+
+### Bug Fixes
+
+- Restored migrated user-scoped sidebar labels following schema transition.
+- Prevented file preview URLs from reverting to previously selected tabs when opened.
+- Optimistically update space pin states in command palette items to eliminate toggle latency.
+
+## v1.109 — 2026-07-23
+
+- **Model availability in selector**: Live per-model status (operational / degraded / outage) with success-rate dots driven by observed traffic first, probe history as fallback, plus hover charts from 8h online heartbeats and 24h history.
+- **Models status API & protocol**: New slim Redis-cached `/models/status` route and `@cohub/protocol` status types that compress the large router-status probe payload into UI-ready fields (rates, latency, heartbeats, history).
+- **Thinking level presentation**: Clearer thinking-level UX across the composer, message bubble, and model catalog.
+
+### Bug Fixes
+
+- File preview URL no longer reverts to the previous tab when opening a preview.
+- Hover-card availability tooltip no longer thrashing from a render cycle; history buckets and bar colors aligned with router-status windows.
+
+## v1.108 — 2026-07-23
+
+- **Conflict-aware file autosave**: File writes carry optional baselines and `mutationId`s so concurrent edits surface as 409 conflicts instead of silent overwrites; the web client keeps pending drafts, shows sync status, and recovers safely across File and Canvas previews.
+- **Unified Preview Float mode**: File, Canvas, and Port previews share one `PreviewFloatChrome` shell with centralized layout coordination, adaptive Chat/Files mutual exclusion, and restore-friendly auto-collapse that does not pollute the layout snapshot.
+- **Space default workspace layout**: Spaces can declare `ui.workspace.defaultLayout` in `.cohub/space.json` as a first-entry fallback; explicit `?preview=` and existing local prefs always win, and async config never clobbers a layout the user just changed.
+- **Per-prompt thinking level**: Optional `thinkingLevel` flows through protocol, API, Agent, Worker, Gateway, SDK, CLI, and web—with a model-driven selector, one-shot overrides, and effective level persisted on turn meta for multi-client recovery.
+- **Codex request profiles**: Models can opt into a Codex affinity profile that stamps session/thread headers, and forked sessions preserve affinity so prompt caching stays stable across continuations.
+
+### Bug Fixes
+
+- Recover context overflow from Chinese proxy messages and HTTP 413 with force-compact retry; allow turn finalize to recover from a premature interrupted status.
+- Recover from stale dynamic imports; stop file preview crashes and duplicate reads on space switch; re-fit preview width after workspace geometry settles.
+- Align sidebar highlight with the active preview, protect system sidebar labels, and fix Float-mode rail/tabs plus mobile thinking-level UX.
+
+## v1.107 — 2026-07-22
+
+- **Unified preview workspace**: File, port, and canvas previews now share one responsive shell with consistent tabs, mobile chrome, and pinned Focus / Float controls.
+- **Canvas media and editing**: Native image and video renderers preserve aspect ratio and natural sizing, while continuous creation tools, snapping, resize behavior, and text auto-size make editing more predictable.
+- **Theme-aware canvas**: Shape colors resolve from CSS theme tokens, including per-Space `theme.css`, with an expanded color parser and SVG export that preserve custom appearance.
+- **Stable Mermaid interaction**: Rendered SVG survives DOM cleanup, and touch gestures stay isolated from the surrounding message timeline.
+
+### Bug Fixes
+
+- Prevent file, port, and canvas preview surfaces from overlapping during navigation.
+- Retry upstream response failures in the Agent runtime.
+
+## v1.106 — 2026-07-22
+
+- **tldraw-inspired infinite canvas**: Rebuild `.covas` around a renderer-independent shape core and editor model (select/hand/text/note/geo/draw/arrow/eraser/frame) with branded coordinates, serial commit queue, multi-tab realtime sync, txId idempotency, and 409 rebase recovery that never drops local work.
+- **Canvas rendering scale-up**: Quadtree spatial index, viewport culling, dirty per-item updates, texture LRU, and on-demand Pixi draws so idle canvases stop burning CPU and large boards stay responsive under pan/zoom/drag.
+- **Urgency-layered agent streaming**: Flush text/thinking near frame time (~24ms) while tool progress stays coarser (250ms), with urgent events preempting coarser timers for smoother live replies.
+- **Reliable Space Hook dispatch**: Match definitions in an internal `space_hook.dispatch` job and only create user-visible tasks when something matches; skip enqueue entirely when a space has no hooks.
+- **Public Work SEO + SDK canvas conflicts**: Publish extracts `lang` / `theme-color` into Work meta for SSR `og:locale`, theme-color, and JSON-LD; SDK/CLI export `CanvasTransactionError` for structured canvas conflict recovery.
+
+### Bug Fixes
+
+- Retry transient LLM failures in the agent session runtime.
+- Persist preview focus/float layout across reloads; pin session task tray with better turn-rail clearance.
+- Stop IndexedDB open-timeout warn storms; escape raw HTML in markdown; clip mobile chat selection to the timeline.
+- Stamp streaming previews with server chunk time; resolve Work PWA icons against content URL and skip SVG for og:image.
+
+## v1.105 — 2026-07-20
+
+- **Product docs site**: Self-hosted `/docs` surface with English and Chinese guides, client search, language switch, TOC, copy-markdown, and SEO (canonical, hreflang, JSON-LD, sitemap alternates).
+- **Work page meta on publish + public SSR**: Publish extracts title/description/icon/image from HTML head, packs companion assets for single-file Works, and materializes them into work/version meta; public Work and profile pages SSR share/OG tags, Work favicons, short Cache-Control, and soft-fail to client load when the API is unreachable.
+- **Share branding with `hideCohubBar`**: Public preview meta follows presentation entitlement — default keeps a light Cohub host signal; `hideCohubBar` switches title/site_name to minimal Work branding and resolves root-relative media against the published content URL.
+- **Home bootstrap checkpoint**: First-time Home spaces fork from `HOME_BOOTSTRAP_CHECKPOINT_ID` when set, otherwise still create a blank workspace.
+- **Process cost in chat**: Collapsed ProcessCard shows intermediate-only usage cost (not full turn totals), with shared token/cost format helpers.
+
+### Bug Fixes
+
+- WorkSurface no longer SSR-crashes on public Work pages; mount surface only on the client.
+- Public header is sticky/unified across pages with a mobile hamburger menu and overflow fixes.
+- Open `.covas` canvas manifests as text (`application/json`) and recover legacy base64 binary previews.
+- Billing catalog scoped to Cohub products.
+
+## v1.104 — 2026-07-20
+
+- **Turn-finalize hook filters**: `session.turn.finalized` hooks can match with `sessionIds`, `ignoreSessionIds`, and turn `sources` (e.g. `web_app`, `cli`), keeping trigger filters orthogonal to `prompt.sessionId`.
+- **Stable hook env for shell scripts**: Optional `COHUB_HOOK_*` keys are always exported (empty string when absent), so `run` scripts under `set -u` stay safe.
+- **Smarter hook definition cache**: Empty hook sets use a 30s negative cache TTL to cut readdir IO while recovering quickly from transient PVC misses; task results expose `definitionsCount` and `cache` hit/miss for easier debugging.
+
+### Bug Fixes
+
+- Optional hook context env vars no longer disappear when unbound, avoiding `set -u` failures in hook scripts.
+
+## v1.103 — 2026-07-20
+
+- **Space Hooks**: File-declared automation under `.cohub/hooks/*` — trigger `run` (sandbox shell) or `prompt` (session) actions on domain events (`space.fs.changed`, `space.workspace.ready`, `session.turn.finalized`, `checkpoint.created`).
+- **Local event fan-out**: API, Worker, Agent, and Gateway enqueue hook tasks directly via BullMQ alongside realtime publish — no HTTP hop or second PubSub consumer.
+- **Hook execution pipeline**: Worker resolves Space owner, caches definitions in Redis (5 min TTL with invalidation on hook file changes), matches with picomatch globs, and reuses existing `run_command` / session prompt chains with curated `COHUB_HOOK_*` env.
+- **Architecture cleanup**: Hook envelope lives in `@cohub/protocol`; enqueue helper in `@cohub/infra/space-hooks` to keep package boundaries clean and drop core→infra coupling.
+
+### Bug Fixes
+
+- BullMQ-safe run jobIds; hook failures no longer fail or retry-storm the parent task
+- FS matching always ignores `.cohub/**` to prevent self-trigger loops; skip hook enqueue on workspace resync
+
+## v1.102 — 2026-07-18
+
+- **Request provenance headers**: Introduce `X-Cohub-Source-*` (space, session, turn, tool call, via) across protocol, SDK, CLI, and API so HTTP calls carry caller identity into session channels and work/space/generation/checkpoint meta without touching authz.
+- **Cross-space reference indexing**: Successful `/api/spaces/:id` requests from another space (e.g. `cohub -s` in a sandbox) now record `tool_call` edges with route method/path/pattern, requiring `turnId` and incrementing per hit within a turn.
+- **Reference write modes**: `writeReferences` supports `set` (idempotent retries/backfill) and `increment` (live cross-space accumulation), written in separate statements so modes never corrupt each other.
+- **Backfill performance**: Resource-references backfill queries by indexed `session_id` plus batched turn ids, with write batching, resume, and progress logging for large DBs.
+
+### Bug Fixes
+
+- Alias `@cohub/protocol/provenance` in the web Vite build so provenance imports resolve correctly.
+
+## v1.101 — 2026-07-16
+
+- **Resource references graph**: Rebuild `resource_references` as a directed graph — turn-level content edges, structural edges with denormalized `sourceSpaceId`/`sourceSessionId`, agent file-access kinds (`read`/`write`/`edit`/`ls`/`find`/`grep`), batch space authz, and `groupBy=target` aggregates for file-heat rankings.
+- **Home space bootstrap**: Empty accounts now get a blank Home space (`slug=home`) via `GET /spaces/default`, so first entry lands in a real space instead of `/spaces/new`; POST and ensure share one create/provision path.
+- **Landing narrative**: Refresh the public site around @space and Live Work — How it works, differentiators, a more realistic hero demo, and Web/CLI/API/Scheduled as primary surfaces.
+- **References surface cleanup**: Drop redundant participant edges (authorship already lives on turns), query by `turn:<uuid>`, and expose the graph model through SDK and CLI.
+
+### Bug Fixes
+
+- Keep dismissed composer viewport-context chips sticky until the active preview source actually changes, so they no longer reappear after every send.
+
+## v1.100 — 2026-07-16
+
+- **Default usernames via Logto**: New accounts get a username from the email local part (slugified, with wide random suffixes and a UUID fallback), written to Logto first so identity never diverges from the source of truth.
+- **Account email on profile**: `/api/me` resolves and returns the signed-in user’s email; Settings → Profile surfaces it next to the account ID.
+- **Session scroll restore**: Re-entering a chat re-applies the leave anchor immediately, survives `{#key}` remounts and markdown reflow, and keeps restore state isolated per session so scroll no longer lands at the top.
+- **Profile updates for execution tokens**: Profile writes fall back to the stored Logto user id when the token has no `sub`, so non-browser principals can still update profile.
+
+### Bug Fixes
+
+- Media lightbox: right-click on images opens the browser context menu again (copy image / save), instead of being captured by pan/zoom.
+- Scroll anchor Map writes reassign under `$state.raw` so persisted leave positions actually notify consumers.
+
 ## v1.99 — 2026-07-15
 
 - **Preview mark**: Capture port/HTML iframes or image previews into a frozen frame, then crop, annotate, and attach the result to chat through the existing image pipeline.

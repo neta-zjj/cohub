@@ -51,6 +51,7 @@ export class ReferencesApi {
       groupBy?: ReferenceAggregateGroupBy;
       kinds?: ReferenceKind[];
       days?: number;
+      limit?: number;
     },
     customFetch?: Fetch,
   ) {
@@ -58,6 +59,7 @@ export class ReferencesApi {
     if (input.groupBy) params.set("groupBy", input.groupBy);
     if (input.kinds && input.kinds.length > 0) params.set("kinds", input.kinds.join(","));
     if (input.days !== undefined) params.set("days", String(input.days));
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
     return this.transport.request<ReferenceAggregateResponse>(
       `/api/references/aggregate?${params.toString()}`,
       { fetch: customFetch },

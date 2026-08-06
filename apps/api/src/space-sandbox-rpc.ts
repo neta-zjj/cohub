@@ -107,6 +107,10 @@ async function ensureConnection(spaceId: string): Promise<SandboxConnection> {
   }
 }
 
+export async function getSandboxCapabilities(spaceId: string) {
+  return (await ensureConnection(spaceId)).capabilities;
+}
+
 /**
  * Issue a single sandbox RPC on behalf of a web/API request. Connection
  * failures surface as SandboxOfflineError; RPC-level failures surface as the

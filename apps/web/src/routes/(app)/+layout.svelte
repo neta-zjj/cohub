@@ -7,12 +7,14 @@ import { scheduleCacheCleanup } from "$lib/cache/cleanup";
 import BillingConversionCenter from "$lib/components/BillingConversionCenter.svelte";
 import CenteredLoading from "$lib/components/CenteredLoading.svelte";
 import CommandPalette from "$lib/components/CommandPalette.svelte";
+import DragGhostLayer from "$lib/components/DragGhostLayer.svelte";
 import HelpPanel from "$lib/components/HelpPanel.svelte";
 import MediaLightbox from "$lib/components/MediaLightbox.svelte";
 import MobileSidebarDrawer from "$lib/components/MobileSidebarDrawer.svelte";
 import Sidebar from "$lib/components/Sidebar.svelte";
 import TurnNotificationStack from "$lib/components/TurnNotificationStack.svelte";
 import { createDeferredMount } from "$lib/deferred-mount.svelte";
+import { pointerDrag } from "$lib/drag/pointer-drag.svelte";
 import GlobalMarkCapture from "$lib/features/preview-mark/ui/GlobalMarkCapture.svelte";
 import {
 	type DrawerGestureDirection,
@@ -36,6 +38,7 @@ import {
 	resolveMobileSessionNavTransition,
 } from "$lib/navigation-transition";
 import { authStore } from "$lib/stores/auth.svelte";
+import { initSpacePinRealtime } from "$lib/stores/space-pins.svelte";
 import { turnNotifications } from "$lib/stores/turn-notifications.svelte";
 import {
 	LEFT_SIDEBAR_MAX,
@@ -43,6 +46,7 @@ import {
 	LEFT_SIDEBAR_RAIL,
 	uiState,
 } from "$lib/stores/ui.svelte";
+import { resolveWorkspaceSpaceId } from "$lib/workspace-route";
 
 const { children } = $props();
 
@@ -59,18 +63,15 @@ const currentPath = $derived(page.url.pathname);
 const sidebarMode = $derived(
 	currentPath.startsWith("/settings") ? "settings" : "space",
 );
-// Per-space layout prefs (sidebar width/collapsed). Only real /spaces/* workspaces.
-// Never take sessions new-chat draft space from page.data — that caused the left
-// rail to jump when switching New chat target spaces on /sessions.
-const currentLayoutSpaceId = $derived.by(() => {
-	if (!currentPath.startsWith("/spaces/")) return null;
-	const data = page.data as { spaceId?: unknown };
-	if (typeof data.spaceId === "string" && data.spaceId.length > 0) {
-		return data.spaceId;
-	}
-	const id = page.params.id;
-	return typeof id === "string" && id.length > 0 && id !== "new" ? id : null;
-});
+// Per-space layout prefs (sidebar width/collapsed). Workspace space only —
+// never sessions-inbox draft targets (those use newChatSpaceId, not spaceId).
+const currentLayoutSpaceId = $derived(
+	resolveWorkspaceSpaceId({
+		pathname: currentPath,
+		pageData: page.data as { spaceId?: unknown },
+		params: { id: page.params.id },
+	}),
+);
 
 let showHelpPanel = $state(false);
 let authReady = $state(false);
@@ -185,6 +186,8 @@ function findTrackedTouch(touches: TouchList) {
 function handleTouchStart(e: TouchEvent) {
 	if (window.innerWidth >= DESKTOP_SHELL_MIN_WIDTH_PX || activeTouchId !== null)
 		return;
+	// A resource drag owns the pointer; the drawer must not also swipe.
+	if (pointerDrag.active) return;
 	const touch = e.changedTouches[0];
 	if (!touch) return;
 
@@ -407,6 +410,19 @@ $effect(() => {
 			if (isEditableShortcutTarget(e.target)) return;
 			e.preventDefault();
 			showHelpPanel = true;
+			return;
+		}
+		if (e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey) {
+			if (e.key === "ArrowLeft") {
+				e.preventDefault();
+				uiState.toggleLeftSidebarCollapsed();
+				return;
+			}
+			if (e.key === "ArrowRight") {
+				e.preventDefault();
+				uiState.toggleRightSidebarCollapsed();
+				return;
+			}
 		}
 	}
 	window.addEventListener("cohub:open-help-panel", openHelpPanel);
@@ -454,6 +470,13 @@ $effect(() => {
 		document.removeEventListener("touchend", onTouchEnd);
 		document.removeEventListener("touchcancel", onTouchCancel);
 	};
+});
+
+// A long-press drag can activate after a drawer gesture already started
+// tracking the same finger. The drag wins: drop the tracking so the drawer
+// stops following the pointer and only the ghost moves.
+$effect(() => {
+	if (pointerDrag.active && activeTouchId !== null) resetGestureState();
 });
 
 $effect(() => {
@@ -507,6 +530,7 @@ onMount(() => {
 		authReady = true;
 		scheduleCacheCleanup();
 		if (authStore.isAuthenticated) turnNotifications.start();
+		initSpacePinRealtime();
 	});
 
 	// Register PWA Service Worker (conservative update: closes all tabs to activate)
@@ -530,6 +554,11 @@ onMount(() => {
 // on hover for desktop sidebars and in the session/file headers for mobile.
 </script>
 
+<svelte:head>
+	<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+	<link rel="apple-touch-icon" href="/pwa/icon-192x192.png" />
+</svelte:head>
+
 {#if !authReady}
   <main class="app-shell min-h-screen text-text-primary">
     <CenteredLoading label="Loading…" size="page" />
@@ -545,7 +574,7 @@ onMount(() => {
       inert={leftSidebarCollapsing ? true : undefined}
     >
       <div
-        class="panel-shell-inner relative {leftSidebarContentCollapsed ? 'overflow-visible' : 'overflow-hidden border-r border-[color:var(--sidebar-border)]'}"
+        class="panel-shell-inner relative {leftSidebarContentCollapsed ? 'overflow-visible' : 'overflow-hidden'} {!leftSidebarContentCollapsed ? 'border-r border-[color:var(--sidebar-border)]' : ''}"
         style={`width: ${leftSidebarInnerWidth}px`}
       >
         <Sidebar mode={sidebarMode} collapsed={leftSidebarContentCollapsed} />
@@ -582,6 +611,7 @@ onMount(() => {
   <!-- Global media lightbox -->
   <MediaLightbox />
   <CommandPalette />
+  <DragGhostLayer />
   <HelpPanel open={showHelpPanel} onClose={() => { showHelpPanel = false; }} />
   <BillingConversionCenter />
   <TurnNotificationStack />

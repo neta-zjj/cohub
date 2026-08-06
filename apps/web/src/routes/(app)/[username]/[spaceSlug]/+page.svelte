@@ -7,7 +7,7 @@ const props = $props<{
 		view: "session";
 		sessionId?: string | null;
 		filePath?: string | null;
-		previewKind?: "file" | "canvas" | "port" | null;
+		previewKind?: "file" | "board" | "port" | null;
 		previewKey?: string | null;
 	};
 }>();

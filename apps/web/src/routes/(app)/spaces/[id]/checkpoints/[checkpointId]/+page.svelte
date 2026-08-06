@@ -8,7 +8,7 @@ const props = $props<{
 		sessionId?: string | null;
 		filePath?: string | null;
 		checkpointId?: string | null;
-		previewKind?: "file" | "canvas" | "port" | null;
+		previewKind?: "file" | "board" | "port" | null;
 		previewKey?: string | null;
 	};
 }>();

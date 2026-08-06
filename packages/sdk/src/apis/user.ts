@@ -1,13 +1,17 @@
 import { HttpError, type HttpTransport, type Fetch } from "../transport.js";
-import type { MeResponse, SessionRecord, SpaceRecord, UserProfile, UserRulesResponse, UserSessionsResponse, SpaceUsageResponse } from "../types.js";
+import type { LabelAssignmentRecord, LabelResourceType, MeResponse, SessionRecord, SpaceRecord, UserProfile, UserRulesResponse, UserSessionsResponse, SpaceUsageResponse } from "../types.js";
 
 export class UserApi {
+  readonly labels: UserLabelsApi;
+
   constructor(
     private readonly transport: HttpTransport,
     private readonly transportBaseUrl: string,
     private readonly setStoredAuthToken?: (token: string) => void,
     private readonly clearStoredAuthToken?: () => void,
-  ) {}
+  ) {
+    this.labels = new UserLabelsApi(transport);
+  }
 
   getMe(
     options?: Fetch | { fetch?: Fetch; skipUnauthorizedHandler?: boolean },
@@ -88,5 +92,29 @@ export class UserApi {
   async clearAuthToken() {
     this.clearStoredAuthToken?.();
     return null;
+  }
+}
+
+/** User-scoped labels — same label/assignment model as space labels, but private to the viewer. */
+export class UserLabelsApi {
+  constructor(private readonly transport: HttpTransport) {}
+
+  getResourceLabels(resourceType: LabelResourceType, resourceRef: string) {
+    const params = new URLSearchParams({ resourceRef });
+    return this.transport.request<{ assignments: LabelAssignmentRecord[] }>(
+      `/api/me/resources/${resourceType}/labels?${params.toString()}`,
+    );
+  }
+
+  patchResourceLabels(resourceType: LabelResourceType, resourceRef: string, input: { addLabelRefs?: string[]; removeLabelRefs?: string[] }) {
+    const params = new URLSearchParams({ resourceRef });
+    return this.transport.request<{ assignments: LabelAssignmentRecord[] }>(
+      `/api/me/resources/${resourceType}/labels?${params.toString()}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
   }
 }

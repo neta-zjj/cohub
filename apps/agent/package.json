@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.build.json && tsx scripts/copy-shell-assets.ts",
     "lint": "biome lint .",
     "lint:fix": "biome lint --write .",
+    "test": "node ../../scripts/test/run.mjs --test-isolation=none 'src/tests/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/index.js",
     "smoke:runtime": "tsx scripts/smoke-runtime.ts"
@@ -23,8 +24,8 @@
     "@cohub/protocol": "workspace:*",
     "@cohub/sandbox-client": "workspace:*",
     "@cohub/sandbox-controller": "workspace:*",
-    "@earendil-works/pi-agent-core": "0.80.7",
-    "@earendil-works/pi-ai": "0.80.7",
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
     "@opentelemetry/instrumentation": "^0.220.0",

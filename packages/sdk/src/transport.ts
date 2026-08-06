@@ -1,3 +1,5 @@
+import type { RequestSource } from "@cohub/protocol/provenance";
+import { requestSourceToHeaders } from "@cohub/protocol/provenance";
 import type { CohubEnvironment } from "./environment.js";
 import { resolveApiBaseUrl } from "./environment.js";
 import type { WebsocketClientOptions } from "./websocket.js";
@@ -48,6 +50,8 @@ export type CohubClientOptions = {
   voice?: VoiceInputCreateOptions;
   /** Work runtime mode configuration (bridge vs broker). */
   work?: WorkRuntimeModeConfig;
+  /** Optional X-Cohub-Source-* headers (static or per-request getter). */
+  requestSource?: RequestSource | null | (() => RequestSource | null | undefined);
 };
 
 function errorCodeFromBody(body: unknown): string | null {
@@ -112,12 +116,30 @@ export class HttpTransport {
   private readonly fetcher: Fetch;
   private readonly getAccessToken?: (options?: { forceRefresh?: boolean }) => Promise<string | null> | string | null;
   private readonly onUnauthorized?: () => Promise<void> | void;
+  private readonly requestSource?: RequestSource | null | (() => RequestSource | null | undefined);
 
   constructor(options: CohubClientOptions = {}) {
     this.baseUrl = resolveApiBaseUrl(options);
     this.fetcher = options.fetch ?? fetch;
     this.getAccessToken = options.getAccessToken;
     this.onUnauthorized = options.onUnauthorized;
+    this.requestSource = options.requestSource;
+  }
+
+  private resolveRequestSource(): RequestSource | null {
+    if (!this.requestSource) return null;
+    if (typeof this.requestSource === "function") {
+      return this.requestSource() ?? null;
+    }
+    return this.requestSource;
+  }
+
+  private applyRequestSourceHeaders(headers: Headers): void {
+    const sourceHeaders = requestSourceToHeaders(this.resolveRequestSource());
+    for (const [name, value] of Object.entries(sourceHeaders)) {
+      // Explicit per-request headers win over the client-level defaults.
+      if (!headers.has(name)) headers.set(name, value);
+    }
   }
 
   private async withAuthorization(
@@ -139,6 +161,8 @@ export class HttpTransport {
     } else {
       headers.delete("Authorization");
     }
+
+    this.applyRequestSourceHeaders(headers);
 
     return {
       ...requestInit,

@@ -1,19 +1,5 @@
 export const buildSpaceRootRoute = (spaceId: string) => `/spaces/${spaceId}`;
 
-export const buildUserProfileRoute = (username: string) =>
-	`/${encodeURIComponent(username)}`;
-
-/** Public guest profile href when the user has a username; otherwise null. */
-export function buildUserProfileHref(
-	profile: { username?: string | null } | string | null | undefined,
-): string | null {
-	const username =
-		typeof profile === "string"
-			? profile.trim()
-			: profile?.username?.trim() || "";
-	return username ? buildUserProfileRoute(username) : null;
-}
-
 export const buildSessionsRoute = () => "/sessions";
 
 export const buildUserSessionRoute = (sessionId: string) =>

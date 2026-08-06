@@ -6,8 +6,9 @@ import {
   COHUB_BILLING_FEATURES,
 } from "@cohub/billing";
 import { createLogger } from "@cohub/infra/logging";
-import type { CreditsBenefit, Product } from "./commerce-types.js";
-import { ApiError, isBillingApiError } from "./billing-api-error.js";
+import type { CreditsBenefit } from "./commerce-types.js";
+import { isBillingApiError } from "./billing-api-error.js";
+import type { SpaceCommerceSdk } from "./space-commerce-provider.js";
 
 const BILLING_NAMESPACE = "cohub_space";
 
@@ -46,20 +47,7 @@ export class SpaceCommerceNotInitializedError extends Error {
   }
 }
 
-type SpaceCommerceProvider = {
-  ApiError: typeof ApiError;
-  createSpaceCommerceSdk: () => any;
-  createSpaceBusinessBillingOperations: (businessKey: string) => any;
-  loadBusinessCreditBenefits: (input: {
-    sdk: any;
-    businessKey: string;
-  }) => Promise<Map<string, CreditsBenefit>>;
-  readBoundBenefitKeys: (product: Product) => string[];
-  createBillingBusiness: (input: {
-    businessKey: string;
-    name: string;
-  }) => Promise<void>;
-};
+type SpaceCommerceProvider = typeof import("./space-commerce-provider.js");
 
 let providerPromise: Promise<SpaceCommerceProvider> | null = null;
 
@@ -69,11 +57,11 @@ function loadProvider(): Promise<SpaceCommerceProvider> {
     throw new Error(
       `Space commerce provider is unavailable. Install @talesofai-billing/sdk for hosted commerce. (${detail})`,
     );
-  }) as Promise<SpaceCommerceProvider>;
+  });
   return providerPromise;
 }
 
-export type SpaceCommerceSdk = any;
+export type { SpaceCommerceSdk };
 
 export async function createSpaceCommerceSdk(): Promise<SpaceCommerceSdk> {
   return (await loadProvider()).createSpaceCommerceSdk();
@@ -90,8 +78,12 @@ export async function loadBusinessCreditBenefits(input: {
   return (await loadProvider()).loadBusinessCreditBenefits(input);
 }
 
-export async function readBoundBenefitKeys(product: Product): Promise<string[]> {
-  return (await loadProvider()).readBoundBenefitKeys(product);
+export async function loadBoundBenefitKeys(input: {
+  sdk: SpaceCommerceSdk;
+  businessKey: string;
+  productKey: string;
+}): Promise<string[]> {
+  return (await loadProvider()).loadBoundBenefitKeys(input);
 }
 
 function normalizeBusinessKeyValue(value: string) {
@@ -225,6 +217,3 @@ export function buildWorkCheckoutReturnUrls(input: { workUrl: string; orderId?: 
     cancelRedirectUrl: appendCheckoutQuery(input.workUrl, { status: "cancel", orderId: input.orderId }),
   };
 }
-
-// Re-export ApiError for routes that catch commerce errors from provider.
-export { ApiError };

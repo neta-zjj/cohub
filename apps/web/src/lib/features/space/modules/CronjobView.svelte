@@ -308,4 +308,5 @@ function payloadProviderLabel(payload: unknown) {
 	onSelect={cronjob.selectModel}
 	models={cronjob.modelsCatalog ?? []}
 	currentModel={mode === "create" ? cronjob.newModel : cronjob.formModel}
+	currentThinkingLevel={mode === "create" ? cronjob.newModel?.thinkingLevel ?? null : cronjob.formModel?.thinkingLevel ?? null}
 />

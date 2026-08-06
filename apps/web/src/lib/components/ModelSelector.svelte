@@ -1,8 +1,23 @@
 <script lang="ts">
 import type { PublicGenerationDeclaration } from "@cohub/protocol/generation";
-import { ChevronDown, Image } from "lucide-svelte";
+import type { ModelStatusEntry } from "@cohub/protocol/model/status";
+import { Brain, Check, ChevronDown, Image } from "lucide-svelte";
 import Dialog from "$lib/components/Dialog.svelte";
+import { getGenerationModelPickerItems } from "$lib/generation-model-catalog";
 import { isComposingKeyboardEvent } from "$lib/keyboard";
+import {
+	AVAILABILITY_LABEL,
+	type AvailabilityLevel,
+	availabilityLevel,
+} from "$lib/model-availability";
+import {
+	clampThinkingLevel,
+	formatThinkingLevelFull,
+	formatThinkingLevelShort,
+	getModelDefaultThinkingLevel,
+	getSupportedThinkingLevels,
+	type ModelThinkingLevel,
+} from "$lib/model-catalog";
 
 type ModelItem = {
 	provider: string;
@@ -22,9 +37,17 @@ type BooleanGenerationConstraint = {
 type Props = {
 	open: boolean;
 	onClose: () => void;
-	onSelect: (item: { provider: string; id: string }) => void;
+	onSelect: (item: {
+		provider: string;
+		id: string;
+		thinkingLevel?: ModelThinkingLevel;
+	}) => void;
 	models: ModelItem[];
 	currentModel?: { provider: string; id: string } | null;
+	/** Model the session thinking level is bound to. Defaults to currentModel. */
+	thinkingLevelModel?: { provider: string; id: string } | null;
+	currentThinkingLevel?: ModelThinkingLevel | null;
+	modelStatus?: Record<string, ModelStatusEntry> | null;
 	generationModels?: PublicGenerationDeclaration[];
 	generationPolicyMode?: "auto" | "limited";
 	selectedGenerationModels?: Set<string>;
@@ -64,6 +87,9 @@ const {
 	onSelect,
 	models,
 	currentModel = null,
+	thinkingLevelModel = null,
+	currentThinkingLevel = null,
+	modelStatus = null,
 	generationModels = [],
 	generationPolicyMode = "auto",
 	selectedGenerationModels = new Set<string>(),
@@ -79,6 +105,7 @@ const {
 }: Props = $props();
 
 let searchQuery = $state("");
+let generationSearchQuery = $state("");
 let selectedIndex = $state(0);
 let navigationMode: "mouse" | "keyboard" = $state("mouse");
 let activeTab: "chat" | "generation" = $state("chat");
@@ -86,6 +113,77 @@ let expandedGenerationModels = $state<Set<string>>(new Set());
 let expandedGenerationParameters = $state<Set<string>>(new Set());
 let containerEl = $state<HTMLElement | null>(null);
 let searchInputEl = $state<HTMLInputElement | null>(null);
+let thinkingMenuOpenFor = $state<string | null>(null);
+let thinkingMenuPos = $state<{ top: number; right: number } | null>(null);
+let thinkingMenuTrigger = $state<HTMLElement | null>(null);
+
+function closeThinkingMenu() {
+	thinkingMenuOpenFor = null;
+	thinkingMenuPos = null;
+	thinkingMenuTrigger = null;
+}
+
+function positionThinkingMenu(trigger: HTMLElement, menuHeight = 240) {
+	const rect = trigger.getBoundingClientRect();
+	const menuWidth = 148;
+	const gap = 4;
+	const viewportPad = 8;
+	const spaceBelow = window.innerHeight - rect.bottom - gap - viewportPad;
+	const spaceAbove = rect.top - gap - viewportPad;
+	const openUpward = spaceBelow < menuHeight && spaceAbove > spaceBelow;
+	let top: number;
+	if (openUpward) {
+		top = Math.max(viewportPad, rect.top - menuHeight - gap);
+	} else {
+		top = Math.min(
+			window.innerHeight -
+				Math.min(menuHeight, spaceBelow + viewportPad) -
+				viewportPad,
+			rect.bottom + gap,
+		);
+	}
+	const right = Math.max(viewportPad, window.innerWidth - rect.right);
+	// Keep menu fully on-screen when trigger is near left edge.
+	const maxRight = window.innerWidth - menuWidth - viewportPad;
+	thinkingMenuPos = {
+		top: Math.max(viewportPad, top),
+		right: Math.min(right, Math.max(viewportPad, maxRight)),
+	};
+}
+
+function thinkingMenuAnchor(menuEl: HTMLElement) {
+	const trigger = thinkingMenuTrigger;
+	if (!trigger) return {};
+	const frame = requestAnimationFrame(() => {
+		const height = menuEl.getBoundingClientRect().height;
+		if (height > 0) positionThinkingMenu(trigger, height);
+	});
+	return {
+		destroy() {
+			cancelAnimationFrame(frame);
+		},
+	};
+}
+
+$effect(() => {
+	if (!thinkingMenuOpenFor || !open) return;
+	const onViewportChange = () => closeThinkingMenu();
+	window.addEventListener("resize", onViewportChange);
+	// Close when the model list scrolls so the fixed menu doesn't float off the trigger.
+	const scrollRoot = containerEl;
+	scrollRoot?.addEventListener("scroll", onViewportChange, { passive: true });
+	return () => {
+		window.removeEventListener("resize", onViewportChange);
+		scrollRoot?.removeEventListener("scroll", onViewportChange);
+	};
+});
+
+// Hover card for model availability detail.
+let hoveredModelId = $state<string | null>(null);
+let hoverCardEl = $state<HTMLElement | null>(null);
+let hoverAnchorRect = $state<DOMRect | null>(null);
+let hoverShowTimer: ReturnType<typeof setTimeout> | null = null;
+let hoverHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 function getVisibleSearchInput() {
 	if (searchInputEl && searchInputEl.getClientRects().length > 0) {
@@ -114,6 +212,55 @@ function getDisplayName(item: ModelItem): string {
 function hasVision(item: ModelItem): boolean {
 	const input = item.model.input as string[] | undefined;
 	return input?.includes("image") ?? false;
+}
+
+function thinkingLevels(item: ModelItem): ModelThinkingLevel[] {
+	return getSupportedThinkingLevels(item as never);
+}
+
+function candidateThinkingLevel(item: ModelItem): ModelThinkingLevel {
+	// Thinking level follows the model: only the session's recorded model
+	// shows the session level; all others show their own default.
+	const bound = thinkingLevelModel ?? currentModel;
+	const isBound =
+		bound !== null && item.provider === bound.provider && item.id === bound.id;
+	return clampThinkingLevel(
+		item as never,
+		isBound
+			? (currentThinkingLevel ?? getModelDefaultThinkingLevel(item as never))
+			: getModelDefaultThinkingLevel(item as never),
+	);
+}
+
+function isDefaultLevel(item: ModelItem, level: ModelThinkingLevel): boolean {
+	return level === getModelDefaultThinkingLevel(item as never);
+}
+
+function thinkingMenuKey(item: ModelItem): string {
+	return `${item.provider}/${item.id}`;
+}
+
+function toggleThinkingMenu(item: ModelItem, e: MouseEvent) {
+	e.stopPropagation();
+	e.preventDefault();
+	const key = thinkingMenuKey(item);
+	if (thinkingMenuOpenFor === key) {
+		closeThinkingMenu();
+		return;
+	}
+	const trigger = e.currentTarget as HTMLElement | null;
+	thinkingMenuTrigger = trigger;
+	if (trigger) positionThinkingMenu(trigger);
+	thinkingMenuOpenFor = key;
+}
+
+function selectThinkingLevel(item: ModelItem, level: ModelThinkingLevel) {
+	closeThinkingMenu();
+	onSelect({ provider: item.provider, id: item.id, thinkingLevel: level });
+}
+
+function handleModelClick(item: ModelItem) {
+	onSelect({ provider: item.provider, id: item.id });
 }
 
 function isHiddenModel(item: ModelItem): boolean {
@@ -438,11 +585,20 @@ const filteredModels = $derived.by(() => {
 	return result;
 });
 
+const filteredGenerationModels = $derived(
+	getGenerationModelPickerItems(generationModels, {
+		query: generationSearchQuery,
+		selectedModelIds: selectedGenerationModels,
+	}),
+);
+
 $effect(() => {
 	if (open) {
 		searchQuery = "";
+		generationSearchQuery = "";
 		selectedIndex = 0;
 		navigationMode = "mouse";
+		closeThinkingMenu();
 		// Focus search input after render — skip on mobile to avoid keyboard popup
 		const isMobile =
 			typeof window !== "undefined" &&
@@ -461,6 +617,7 @@ function moveSelection(delta: number) {
 		selectedIndex = 0;
 		return;
 	}
+	hideHoverCard();
 	navigationMode = "keyboard";
 	selectedIndex = Math.min(
 		Math.max(selectedIndex + delta, 0),
@@ -553,7 +710,147 @@ function subsequenceScore(query: string, text: string): number {
 	if (qi < query.length) return 0;
 	return query.length / (query.length + gaps);
 }
+
 const selectedGenerationCount = $derived(selectedGenerationModels.size);
+
+// ── Availability helpers ─────────────────────────────────────────────────────
+
+function getModelStatusEntry(modelId: string): ModelStatusEntry | null {
+	return modelStatus?.[modelId] ?? null;
+}
+
+function getAvailabilityLevel(modelId: string): AvailabilityLevel {
+	return availabilityLevel(getModelStatusEntry(modelId));
+}
+
+function fmtMs(ms: number | null | undefined): string {
+	if (typeof ms !== "number" || !ms) return "—";
+	const s = ms / 1000;
+	if (s < 1) return `${Math.round(s * 1000)}ms`;
+	if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+	const m = Math.floor(s / 60);
+	const rs = Math.round(s % 60);
+	return `${m}m${rs}s`;
+}
+
+function fmtAgoSec(s: number): string {
+	s = Math.max(0, Math.round(s));
+	if (s < 60) return `${s}s ago`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m ago`;
+	return `${Math.floor(m / 60)}h ago`;
+}
+
+function fmtAgo(iso: string | null | undefined): string {
+	if (!iso) return "—";
+	return fmtAgoSec((Date.now() - new Date(iso).getTime()) / 1000);
+}
+
+function fmtAgoMs(ms: number): string {
+	return fmtAgoSec(ms / 1000);
+}
+
+function fmtRate(rate: number | null | undefined): string {
+	return typeof rate === "number" ? `${Math.round(rate)}%` : "—";
+}
+
+/**
+ * Rate-based bar color, matching router-status.neta.art's 6-tier scheme.
+ * Used for hover-card history bars; the selector dot itself stays 3-level.
+ */
+function rateToBarColor(rate: number | null | undefined): string {
+	if (rate == null) return "#94a3b8"; // no samples — gray
+	if (rate >= 95) return "#16a34a"; // green
+	if (rate >= 90) return "#84cc16"; // yellow-green
+	if (rate >= 85) return "#f59e0b"; // yellow-orange
+	if (rate >= 80) return "#f97316"; // orange
+	if (rate >= 75) return "#c2410c"; // red-orange
+	return "#dc2626"; // red
+}
+
+// ── Hover card ───────────────────────────────────────────────────────────────
+
+function onDotMouseEnter(modelId: string, e: MouseEvent) {
+	const target = e.currentTarget as HTMLElement;
+	clearTimeout(hoverHideTimer ?? undefined);
+	if (hoveredModelId) {
+		hoveredModelId = modelId;
+		hoverAnchorRect = target.getBoundingClientRect();
+	} else {
+		clearTimeout(hoverShowTimer ?? undefined);
+		hoverShowTimer = setTimeout(() => {
+			hoveredModelId = modelId;
+			hoverAnchorRect = target.getBoundingClientRect();
+		}, 120);
+	}
+}
+
+function onDotMouseLeave() {
+	clearTimeout(hoverShowTimer ?? undefined);
+	hoverHideTimer = setTimeout(() => {
+		hoveredModelId = null;
+		hoverAnchorRect = null;
+	}, 140);
+}
+
+function onCardMouseEnter() {
+	clearTimeout(hoverHideTimer ?? undefined);
+}
+
+function onCardMouseLeave() {
+	hoverHideTimer = setTimeout(() => {
+		hoveredModelId = null;
+		hoverAnchorRect = null;
+	}, 140);
+}
+
+// Hide the card immediately on keyboard navigation to avoid stale anchoring.
+function hideHoverCard() {
+	clearTimeout(hoverShowTimer ?? undefined);
+	clearTimeout(hoverHideTimer ?? undefined);
+	hoveredModelId = null;
+	hoverAnchorRect = null;
+}
+
+const hoveredEntry = $derived(
+	hoveredModelId ? getModelStatusEntry(hoveredModelId) : null,
+);
+const hoveredLevel = $derived(
+	hoveredModelId ? getAvailabilityLevel(hoveredModelId) : "available",
+);
+
+/** Bar-chart series (96 buckets): online traffic first, probe history fallback. */
+const hoveredHeartbeats = $derived(hoveredEntry?.heartbeats8h ?? []);
+/** Total minutes the bar series spans (reported online window / history fallback 1440). */
+const hoveredHeartbeatWindowMin = $derived(
+	hoveredEntry?.heartbeatsWindowMinutes ?? 480,
+);
+const hoveredHeartbeatHours = $derived(
+	Math.round(hoveredHeartbeatWindowMin / 60),
+);
+const hoveredHeartbeatPerBucketMin = $derived(
+	hoveredHeartbeats.length
+		? hoveredHeartbeatWindowMin / hoveredHeartbeats.length
+		: 5,
+);
+
+// Card width is fixed at 288px (see .model-avail-card). Estimate height for
+// flip-above calculation; we don't depend on hoverCardEl here to avoid a
+// render cycle: card renders only when hoverCardPos is non-null, but
+// hoverCardEl is only bound once the card renders.
+const HOVER_CARD_WIDTH = 288;
+const HOVER_CARD_EST_HEIGHT = 240;
+
+const hoverCardPos = $derived.by(() => {
+	if (!hoverAnchorRect) return null;
+	const cw = HOVER_CARD_WIDTH;
+	const ch = hoverCardEl?.offsetHeight ?? HOVER_CARD_EST_HEIGHT;
+	let left = hoverAnchorRect.left + hoverAnchorRect.width / 2 - cw / 2;
+	let top = hoverAnchorRect.bottom + 8;
+	if (top + ch > window.innerHeight - 8) top = hoverAnchorRect.top - ch - 8;
+	left = Math.max(8, Math.min(left, window.innerWidth - cw - 8));
+	return { left, top };
+});
 </script>
 
 <Dialog {open} {onClose} title="Models" maxWidth="540px">
@@ -603,26 +900,34 @@ const selectedGenerationCount = $derived(selectedGenerationModels.size);
 			{:else}
 				{#each filteredModels as item, index (item.provider + "/" + item.id)}
 					{@const costText = formatModelCost(item)}
-					<button
-						type="button"
-						class={`group relative w-full cursor-pointer px-4 py-2 text-left transition-colors duration-100 ${
+					{@const tLevels = thinkingLevels(item)}
+					{@const showThinking = tLevels.length > 1}
+					{@const tMenuKey = thinkingMenuKey(item)}
+					{@const activeLevel = candidateThinkingLevel(item)}
+					{@const thinkingOpen = thinkingMenuOpenFor === tMenuKey}
+					<div
+						role="presentation"
+						class={`group relative px-4 py-2 transition-colors duration-100 ${
 							navigationMode === "mouse" ? "hover:bg-bg-hover" : ""
 						} ${index === selectedIndex ? "bg-bg-hover" : ""}`}
 						data-model-item
-						onclick={() => onSelect({ provider: item.provider, id: item.id })}
 						onmouseenter={() => {
 							if (navigationMode === "mouse") {
 								selectedIndex = index;
 							}
 						}}
-						aria-pressed={isCurrentModel(item)}
 						data-selected={index === selectedIndex}
 					>
 						{#if isCurrentModel(item)}
 							<span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r bg-brand"></span>
 						{/if}
 						<div class="flex items-start justify-between gap-3">
-							<div class="min-w-0 flex-1">
+							<button
+								type="button"
+								class="min-w-0 flex-1 cursor-pointer text-left"
+								aria-pressed={isCurrentModel(item)}
+								onclick={() => handleModelClick(item)}
+							>
 								<div class="flex min-w-0 items-center gap-1.5">
 									<span class="truncate text-[13px] font-medium text-text-primary">
 										{getDisplayName(item)}
@@ -630,19 +935,99 @@ const selectedGenerationCount = $derived(selectedGenerationModels.size);
 									{#if hasVision(item)}
 										<Image class="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
 									{/if}
+									{#if modelStatus}
+										<span
+											class="avail-dot-target"
+											onmouseenter={(e) => onDotMouseEnter(item.id, e)}
+											onmouseleave={onDotMouseLeave}
+											role="presentation"
+										>
+											<span class={`avail-dot avail-dot--${getAvailabilityLevel(item.id)}`}></span>
+										</span>
+									{/if}
 								</div>
 								{#if costText}
 									<div class="mt-0.5 truncate text-[11px] tabular-nums text-text-tertiary/75">
 										{costText}
 									</div>
 								{/if}
-							</div>
+							</button>
 
-							<span class="shrink-0 pt-0.5 text-[11px] text-text-tertiary/70">
-								{item.provider}
-							</span>
+							<div class="flex shrink-0 flex-col items-end">
+								<span class="max-w-[7.5rem] truncate text-right text-[11px] leading-4 text-text-tertiary/70">
+									{item.provider}
+								</span>
+								{#if showThinking}
+									<div class="relative self-end">
+										<button
+											type="button"
+											class={`inline-flex h-5 items-center justify-end gap-1 rounded border px-1 text-[10px] leading-none transition-colors ${
+												thinkingOpen
+													? "border-border-subtle bg-bg-surface text-text-secondary"
+													: "border-transparent text-text-tertiary hover:border-border-subtle/80 hover:bg-bg-surface hover:text-text-secondary"
+											}`}
+											title={`Thinking: ${formatThinkingLevelFull(activeLevel)}`}
+											aria-label={`Thinking level ${formatThinkingLevelFull(activeLevel)}`}
+											aria-expanded={thinkingOpen}
+											aria-haspopup="listbox"
+											onclick={(e) => toggleThinkingMenu(item, e)}
+										>
+											<Brain class="h-3 w-3 opacity-70" />
+											<span class="tabular-nums">{formatThinkingLevelShort(activeLevel)}</span>
+											<ChevronDown class={`h-2.5 w-2.5 opacity-50 transition-transform ${thinkingOpen ? "rotate-180" : ""}`} />
+										</button>
+										{#if thinkingOpen && thinkingMenuPos}
+											<button
+												type="button"
+												class="fixed inset-0 z-[120] cursor-default"
+												aria-hidden="true"
+												tabindex="-1"
+												onclick={(e) => {
+													e.stopPropagation();
+													closeThinkingMenu();
+												}}
+											></button>
+											<div
+												class="fixed z-[121] min-w-[8.5rem] overflow-hidden rounded-md border border-border-subtle bg-bg-surface py-0.5 shadow-lg"
+												style={`top: ${thinkingMenuPos.top}px; right: ${thinkingMenuPos.right}px;`}
+												role="listbox"
+												aria-label="Thinking level"
+												use:thinkingMenuAnchor
+											>
+												{#each tLevels as level (level)}
+													{@const selected = level === activeLevel}
+													<button
+														type="button"
+														role="option"
+														aria-selected={selected}
+														class={`flex w-full min-h-[36px] items-center gap-2 px-2.5 text-left text-[12px] transition-colors ${
+															selected
+																? "bg-bg-hover text-text-primary"
+																: "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+														}`}
+														onclick={(e) => {
+															e.stopPropagation();
+															selectThinkingLevel(item, level);
+														}}
+													>
+														<span class="w-3.5 shrink-0">
+															{#if selected}
+																<Check class="h-3.5 w-3.5 text-brand" />
+															{/if}
+														</span>
+														<span class="min-w-0 flex-1">{formatThinkingLevelFull(level)}</span>
+														{#if isDefaultLevel(item, level)}
+															<span class="shrink-0 text-[9px] uppercase tracking-wide text-text-placeholder">Default</span>
+														{/if}
+													</button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/if}
+							</div>
 						</div>
-					</button>
+					</div>
 				{/each}
 			{/if}
 		</div>
@@ -668,17 +1053,27 @@ const selectedGenerationCount = $derived(selectedGenerationModels.size);
 				</button>
 			</div>
 
+			<div class="mt-3">
+				<input
+					type="text"
+					placeholder="Search generation models"
+					aria-label="Search generation models"
+					bind:value={generationSearchQuery}
+					class="w-full rounded-md border-0 bg-bg-input px-3 py-2 text-[13px] text-text-primary outline-none ring-1 ring-border-subtle placeholder:text-text-placeholder transition-shadow duration-100 focus:ring-brand/45"
+				/>
+			</div>
+
 			<div class="mt-3 px-1 text-[11px] font-medium uppercase tracking-wider text-text-tertiary">
 				Generation models
 			</div>
 
-			{#if generationModels.length === 0}
+			{#if filteredGenerationModels.length === 0}
 				<div class="mt-2 px-3 py-6 text-center text-[13px] text-text-tertiary">
-					No generation models available
+					{generationSearchQuery ? "No matching models" : "No generation models available"}
 				</div>
 			{:else}
 				<div class="mt-1.5 -mx-3">
-					{#each generationModels as model (model.model)}
+					{#each filteredGenerationModels as model (model.model)}
 						<div class="px-3 py-2 transition-colors duration-100 hover:bg-bg-hover/60">
 							<div class="flex items-start gap-2.5">
 								<input
@@ -778,3 +1173,144 @@ const selectedGenerationCount = $derived(selectedGenerationModels.size);
 		</div>
 	{/if}
 </Dialog>
+
+{#if hoveredModelId && hoverCardPos}
+	<div
+		bind:this={hoverCardEl}
+		class="model-avail-card"
+		style={`left:${hoverCardPos.left}px;top:${hoverCardPos.top}px`}
+		onmouseenter={onCardMouseEnter}
+		onmouseleave={onCardMouseLeave}
+		role="tooltip"
+	>
+		<div class="flex items-center justify-between gap-2">
+			<span class="flex items-center gap-1.5 text-[12px] font-semibold text-text-primary">
+				<span class={`avail-dot avail-dot--${hoveredLevel}`}></span>
+				{AVAILABILITY_LABEL[hoveredLevel]}
+			</span>
+			<span class="text-[16px] font-semibold tabular-nums leading-none {`avail-rate--${hoveredLevel}`}">
+				{hoveredEntry?.successRate5m != null ? fmtRate(hoveredEntry.successRate5m) : "—"}{#if hoveredEntry?.successRate5m != null}<span class="text-[10px] font-medium text-text-tertiary">% 5m</span>{/if}
+			</span>
+		</div>
+		<div class="mt-0.5 font-mono text-[10px] text-text-tertiary">{hoveredModelId}</div>
+		<div class="my-2 h-px bg-border-subtle"></div>
+		{#if hoveredEntry}
+			<div class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">Past {hoveredHeartbeatHours} hours</div>
+			{#if hoveredHeartbeats.length}
+				<div class="flex items-stretch gap-px h-[26px]">
+					{#each hoveredHeartbeats as rate, i}
+						<i
+							class="avail-bar"
+							style={`background:${rateToBarColor(rate)}`}
+							title={`${fmtAgoMs((hoveredHeartbeats.length - 1 - i) * hoveredHeartbeatPerBucketMin * 60 * 1000)} · ${fmtRate(rate)}`}
+						></i>
+					{/each}
+				</div>
+				<div class="mt-1 flex justify-between text-[9px] text-text-tertiary">
+					<span>{hoveredHeartbeatHours}h ago</span><span>now</span>
+				</div>
+			{:else}
+				<div class="text-[11px] text-text-tertiary">No history</div>
+			{/if}
+			<div class="mt-1.5 flex gap-3 text-[11px] tabular-nums">
+				{#if hoveredEntry.successRate2h != null}
+					<span><b class="font-semibold text-text-secondary">{fmtRate(hoveredEntry.successRate2h)}</b> <small class="text-text-tertiary">2h</small></span>
+				{/if}
+				{#if hoveredEntry.successRate24h != null}
+					<span><b class="font-semibold text-text-secondary">{fmtRate(hoveredEntry.successRate24h)}</b> <small class="text-text-tertiary">24h</small></span>
+				{/if}
+			</div>
+			<div class="my-2 h-px bg-border-subtle"></div>
+			<dl class="grid grid-cols-[auto_1fr] gap-x-2.5 gap-y-0.5">
+				<dt class="text-[11px] text-text-tertiary">Latency 1h</dt>
+				<dd class="text-right text-[11px] tabular-nums text-text-secondary">
+					{hoveredEntry.latencyAvgMs != null ? `${fmtMs(hoveredEntry.latencyAvgMs)} avg · ${fmtMs(hoveredEntry.latencyP90Ms)} p90` : "—"}
+				</dd>
+				<dt class="text-[11px] text-text-tertiary">Checked</dt>
+				<dd class="text-right text-[11px] text-text-secondary">
+					{hoveredEntry.checkedAt ? `${fmtAgo(hoveredEntry.checkedAt)}${hoveredEntry.probeIntervalSeconds ? ` · every ${hoveredEntry.probeIntervalSeconds}s` : ''}` : '—'}
+				</dd>
+				<dt class="text-[11px] text-text-tertiary">Samples 1h</dt>
+				<dd class="text-right text-[11px] tabular-nums text-text-secondary">{hoveredEntry.samples1h ?? '—'}</dd>
+			</dl>
+		{:else}
+			<div class="py-1 text-[11px] text-text-tertiary">No status data available for this model yet.</div>
+		{/if}
+	</div>
+{/if}
+
+<style>
+	.avail-dot-target {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex: 0 0 18px;
+		width: 18px;
+		height: 18px;
+		margin: -6px;
+		cursor: help;
+	}
+	.avail-dot-target .avail-dot {
+		margin-left: 0;
+	}
+	.avail-dot {
+		display: inline-block;
+		flex: 0 0 auto;
+		width: 6px;
+		height: 6px;
+		border-radius: 999px;
+		background: var(--neutral-40);
+		margin-left: 2px;
+		cursor: help;
+	}
+	.avail-dot--available {
+		background: var(--success-500);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--success-500) 14%, transparent);
+	}
+	.avail-dot--degraded {
+		background: var(--warning-500);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning-500) 16%, transparent);
+		animation: avail-pulse 1.8s ease-in-out infinite;
+	}
+	.avail-dot--outage {
+		background: var(--error-500);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--error-500) 14%, transparent);
+	}
+	.avail-dot--unknown {
+		background: var(--neutral-40);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--neutral-40) 20%, transparent);
+	}
+	@keyframes avail-pulse {
+		0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning-500) 16%, transparent); }
+		50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--warning-500) 8%, transparent); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.avail-dot--degraded { animation: none; }
+	}
+
+	.model-avail-card {
+		position: fixed;
+		z-index: 300;
+		width: 288px;
+		border-radius: 10px;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-surface);
+		box-shadow: 0 12px 32px -8px oklch(0% 0 0 / 0.55);
+		padding: 10px 12px;
+		font-size: 12px;
+		color: var(--text-secondary);
+		transition: opacity 0.12s ease, transform 0.12s ease;
+	}
+	.avail-rate--available { color: var(--success-500); }
+	.avail-rate--degraded { color: var(--warning-500); }
+	.avail-rate--outage { color: var(--error-500); }
+	.avail-rate--unknown { color: var(--text-tertiary); }
+
+	.avail-bar {
+		flex: 1 1 0;
+		min-width: 1px;
+		border-radius: 1px 1px 0 0;
+		background: var(--neutral-60);
+		opacity: 0.85;
+	}
+</style>

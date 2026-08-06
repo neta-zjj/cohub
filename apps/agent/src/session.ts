@@ -10,6 +10,7 @@ import { sendOutput } from "./redis.js";
 import { logger } from "./logger.js";
 import { getAgentTracer } from "@cohub/infra/tracing/agent";
 import type { CohubModelRegistry } from "./runtime/model-registry.js";
+import type { ImageToTextConfig } from "@cohub/infra/config-runtime/image-to-text";
 import {
   ensureAgentSpaceSessionPath,
   getAgentSessionFilePath,
@@ -37,6 +38,11 @@ import {
   projectAssistantStreamState,
   type AssistantStreamState,
 } from "./stream/assistant-stream-state.js";
+import {
+  resolveStreamFlushDelayMs,
+  shouldReplaceStreamFlushTimer,
+  type StreamFlushUrgency,
+} from "./stream/flush-policy.js";
 
 
 export type PendingUserMessage = {
@@ -135,6 +141,8 @@ export type SessionHandle = {
     pendingBoundary?: boolean;
     flushPromise?: Promise<void> | null;
     flushTimer?: ReturnType<typeof setTimeout> | null;
+    /** Delay used by the currently armed flushTimer; used to escalate text over tool. */
+    flushDelayMs?: number | null;
     assistantContext?: AssistantMessageContext | null;
   };
   interruptedSnapshotTurnIds: Set<string>;
@@ -224,8 +232,6 @@ function addLifecycleEvent(name: string, attributes?: Record<string, string | nu
   span.addEvent(name, cleanAttributes);
 }
 
-const STREAM_UPDATE_DEBOUNCE_MS = Number(process.env.AGENT_STREAM_UPDATE_DEBOUNCE_MS ?? 100);
-
 async function emitProviderRenderUpdate(handle: SessionHandle) {
   const assistantContext = handle.streamState.assistantContext ?? handle.activeAssistantContext;
   if (!assistantContext) return;
@@ -309,7 +315,7 @@ async function emitProviderRenderUpdate(handle: SessionHandle) {
   // Only re-schedule against the same state. If reset replaced it, the
   // pending data should already have been drained by drainStreamStateBeforeReset().
   if (handle.streamState === stateAtStart && stateAtStart.pendingFlush) {
-    scheduleProviderRenderUpdate(handle, "flush_pending", { immediate: true });
+    scheduleProviderRenderUpdate(handle, "flush_pending", { urgency: "immediate" });
   }
 }
 
@@ -333,6 +339,7 @@ export async function drainStreamStateBeforeReset(handle: SessionHandle) {
     if (handle.streamState.flushTimer) {
       clearTimeout(handle.streamState.flushTimer);
       handle.streamState.flushTimer = null;
+      handle.streamState.flushDelayMs = null;
     }
     try {
       await emitProviderRenderUpdate(handle);
@@ -356,15 +363,33 @@ export async function drainStreamStateBeforeReset(handle: SessionHandle) {
 function scheduleProviderRenderUpdate(
   handle: SessionHandle,
   reason: string,
-  options?: { immediate?: boolean },
+  options?: { urgency?: StreamFlushUrgency },
 ) {
   handle.streamState.pendingFlush = true;
 
-  if (handle.streamState.flushTimer || handle.streamState.flushPromise) return;
+  // Inflight send already owns the next pass via pendingFlush.
+  if (handle.streamState.flushPromise) return;
 
-  const delayMs = options?.immediate ? 0 : STREAM_UPDATE_DEBOUNCE_MS;
+  const urgency = options?.urgency ?? "text";
+  const delayMs = resolveStreamFlushDelayMs(urgency);
+
+  // Keep a coarser timer unless a more urgent request arrives (text over tool).
+  if (
+    handle.streamState.flushTimer
+    && !shouldReplaceStreamFlushTimer(handle.streamState.flushDelayMs, delayMs)
+  ) {
+    return;
+  }
+
+  if (handle.streamState.flushTimer) {
+    clearTimeout(handle.streamState.flushTimer);
+    handle.streamState.flushTimer = null;
+  }
+
+  handle.streamState.flushDelayMs = delayMs;
   handle.streamState.flushTimer = setTimeout(() => {
     handle.streamState.flushTimer = null;
+    handle.streamState.flushDelayMs = null;
     void emitProviderRenderUpdate(handle).catch((error) => {
       logger.error(`[Agent] Provider render update failed (${reason}) for session ${handle.sessionId}:`, error);
     });
@@ -372,11 +397,7 @@ function scheduleProviderRenderUpdate(
 }
 
 function flushProviderRenderUpdate(handle: SessionHandle, reason: string) {
-  if (handle.streamState.flushTimer) {
-    clearTimeout(handle.streamState.flushTimer);
-    handle.streamState.flushTimer = null;
-  }
-  scheduleProviderRenderUpdate(handle, reason, { immediate: true });
+  scheduleProviderRenderUpdate(handle, reason, { urgency: "immediate" });
 }
 
 function schedulePersistence(handle: SessionHandle, label: string, task: () => Promise<void>) {
@@ -413,6 +434,7 @@ export function resetStreamState(handle: SessionHandle) {
     dirty: false,
     flushPromise: null,
     flushTimer: null,
+    flushDelayMs: null,
     assistantContext: null,
   };
 }
@@ -534,6 +556,7 @@ export async function persistInterruptedAssistantSnapshot(
       startedAt: handle.activeAssistantContext?.startedAt ?? null,
       completedAt: now,
       messageOrdinal: handle.activeAssistantContext?.assistantOrdinal ?? null,
+      thinkingLevel: handle.session.agent.state.thinkingLevel,
     });
   });
 
@@ -816,7 +839,7 @@ export function subscribeSessionEvents(handle: SessionHandle) {
         event.assistantMessageEvent as Parameters<typeof applyAssistantMessageEvent>[1],
       );
       handle.streamState.dirty = true;
-      scheduleProviderRenderUpdate(handle, "message_update");
+      scheduleProviderRenderUpdate(handle, "message_update", { urgency: "text" });
     }
 
     if (event.type === "message_end") {
@@ -829,6 +852,9 @@ export function subscribeSessionEvents(handle: SessionHandle) {
         const content = handle.currentUserMessageContent;
         const meta = handle.currentUserMessageMeta;
         const startedAt = handle.currentUserMessageStartedAt;
+        const agentSessionEntryId = typeof message.sessionEntryId === "string"
+          ? message.sessionEntryId
+          : null;
         handle.currentUserMessageContent = null;
         handle.currentUserMessageStartedAt = null;
 
@@ -843,11 +869,14 @@ export function subscribeSessionEvents(handle: SessionHandle) {
             },
           });
           try {
+            const turnId = handle.currentTurnId;
+            if (!turnId) throw new Error("User message turn id is required");
             await persistUserMessage({
               spaceId: handle.spaceId,
               sessionId: handle.sessionId,
               userMessageId,
-              turnId: typeof meta?.turnId === "string" ? meta.turnId : handle.currentTurnId ?? null,
+              turnId,
+              agentSessionEntryId,
               content,
               meta,
               startedAt,
@@ -889,7 +918,7 @@ export function subscribeSessionEvents(handle: SessionHandle) {
           content: resultContent,
         });
         handle.streamState.dirty = true;
-        scheduleProviderRenderUpdate(handle, "tool_execution_update");
+        scheduleProviderRenderUpdate(handle, "tool_execution_update", { urgency: "tool" });
       }
     }
 
@@ -987,6 +1016,7 @@ export function subscribeSessionEvents(handle: SessionHandle) {
             startedAt: assistantContext.startedAt,
             completedAt,
             messageOrdinal: assistantContext.assistantOrdinal,
+            thinkingLevel: handle.session.agent.state.thinkingLevel,
           });
         } catch (error) {
           if (error instanceof Error) span.recordException(error);
@@ -1039,6 +1069,7 @@ export async function loadOrCreateSessionHandle(input: {
   sessionId: string;
   userId?: string | null;
   modelRegistry: CohubModelRegistry;
+  imageToTextConfig?: ImageToTextConfig | null;
   tools: ReturnType<typeof createSandboxCodingTools>;
   model?: { provider: string; id: string };
   sessionHandles: Map<string, SessionHandle>;
@@ -1084,7 +1115,7 @@ export async function loadOrCreateSessionHandle(input: {
   let sessionManager: SessionManager;
   if (await pathExists(existingSessionFile)) {
     logger.debug(`[Session] restore sessionId=${input.sessionId} spaceId=${input.spaceId}`);
-    sessionManager = await SessionManager.open(existingSessionFile, spaceSessionsDir);
+    sessionManager = await SessionManager.open(existingSessionFile, spaceSessionsDir, { recoverTrailingPartial: true });
   } else {
     const tmpManager = SessionManager.create(spaceWorkspaceDir, spaceSessionsDir);
     tmpManager.newSession({ id: input.sessionId });
@@ -1102,6 +1133,7 @@ export async function loadOrCreateSessionHandle(input: {
     spaceOwnerUserId,
     sessionManager,
     modelRegistry: input.modelRegistry,
+    imageToTextConfig: input.imageToTextConfig,
     tools: input.tools,
     spaceMods,
     ...(resolvedModel ? { model: resolvedModel } : {}),
@@ -1153,6 +1185,7 @@ export async function loadOrCreateSessionHandle(input: {
       dirty: false,
       flushPromise: null,
       flushTimer: null,
+      flushDelayMs: null,
       assistantContext: null,
     },
     interruptedSnapshotTurnIds: new Set(),

@@ -11,9 +11,10 @@ import type {
   StoredToolCall,
   TurnIntermediateMessagesFile,
 } from "@cohub/protocol/model";
+import type { ModelThinkingLevel } from "@cohub/protocol";
 import { db } from "./db/index.js";
 import { sessionMessages, sessionTurnSegments, sessionTurns, spaceSessions } from "@cohub/db";
-import { addSessionParticipantMeta } from "@cohub/core/sessions";
+import { addSessionParticipantMeta, summarizeSessionTurnCompactions } from "@cohub/core/sessions";
 import { sanitizePostgresJsonValue, sanitizeContentBlocksForPostgresJson } from "@cohub/core/content/sanitize";
 import { ensureSessionTurnSegments, findSegmentForTurn } from "./session-forks.js";
 import { fallbackPublicUserProfile, getProfilesByUuids } from "./user-profiles.js";
@@ -29,6 +30,16 @@ const toIso = (value: Date | string | null | undefined) => {
 
 const normalizeRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+const THINKING_LEVEL_SET = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** Extracts the effective thinking level from turn meta, if present. */
+function extractThinkingLevel(meta: unknown): ModelThinkingLevel | null {
+  const record = normalizeRecord(meta);
+  if (!record) return null;
+  const level = record.effectiveThinkingLevel;
+  return typeof level === "string" && THINKING_LEVEL_SET.has(level) ? level as ModelThinkingLevel : null;
+}
 
 const addUsage = (a: Usage | null | undefined, b: Usage | null | undefined): Usage | null => {
   if (!a && !b) return null;
@@ -183,6 +194,7 @@ const toTurnRecord = (row: typeof sessionTurns.$inferSelect): SessionTurnRecord 
   intermediateIndex: row.intermediateIndex ?? null,
   intermediateSummary: row.intermediateSummary ?? null,
   meta: normalizeRecord(row.meta),
+  thinkingLevel: extractThinkingLevel(row.meta),
   startedAt: row.startedAt ? toIso(row.startedAt) : null,
   completedAt: row.completedAt ? toIso(row.completedAt) : null,
   durationMs: row.durationMs ?? null,
@@ -202,7 +214,7 @@ export async function hydrateTurnAuthorProfiles(turns: SessionTurnRecord[]) {
   });
 }
 
-type SessionTurnIndexRow = {
+export type SessionTurnIndexRow = {
   id: string;
   sessionId: string;
   sequence: number;
@@ -223,7 +235,7 @@ type SessionTurnIndexRow = {
   errorMessage: string | null;
 };
 
-const toTurnIndexItem = (row: SessionTurnIndexRow): SessionTurnIndexItem => ({
+export const toTurnIndexItem = (row: SessionTurnIndexRow): SessionTurnIndexItem => ({
   id: row.id,
   sessionId: row.sessionId,
   sequence: row.sequence,
@@ -244,7 +256,7 @@ const toTurnIndexItem = (row: SessionTurnIndexRow): SessionTurnIndexItem => ({
   errorMessage: previewText(row.errorMessage, 220),
 });
 
-const hydrateTurnIndexAuthorProfiles = async (turns: SessionTurnIndexItem[]) => {
+export const hydrateTurnIndexAuthorProfiles = async (turns: SessionTurnIndexItem[]) => {
   const userUuids = turns
     .map((turn) => turn.userUuid)
     .filter((value): value is string => Boolean(value));
@@ -432,7 +444,7 @@ export const getSessionTurnById = async (sessionId: string, turnId: string) => {
 export const buildIntermediateObjectsForTurn = async (input: { spaceId: string; sessionId: string; turnId: string }) => {
   const rows = await db.select().from(sessionMessages).where(and(
     eq(sessionMessages.sessionId, input.sessionId),
-    sql`${sessionMessages.meta}->>'turnId' = ${input.turnId}`,
+    eq(sessionMessages.turnId, input.turnId),
   )).orderBy(asc(sessionMessages.sequence), asc(sessionMessages.createdAt));
 
   const intermediateRows = rows.filter((row) => {
@@ -471,6 +483,7 @@ export const buildIntermediateObjectsForTurn = async (input: { spaceId: string; 
     messages.push({
       id: row.id,
       sessionId: row.sessionId,
+      sequence: row.sequence,
       role: row.role as "user" | "assistant" | "system",
       content: summarizeIntermediateContent(content, details),
       text: row.text ?? null,
@@ -493,6 +506,7 @@ export const buildIntermediateObjectsForTurn = async (input: { spaceId: string; 
     durationMs: totalDurationMs,
     lastMessageText: messages.at(-1)?.text ?? null,
     hasError,
+    compaction: summarizeSessionTurnCompactions(messages),
   };
   if (messages.length === 0) {
     return {
@@ -531,7 +545,7 @@ export const failSessionTurn = async (input: { sessionId: string; turnId: string
     completedAt,
     durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`,
     updatedAt: completedAt,
-  }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["queued", "running", "abort_requested"]))).returning();
+  }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["queued", "running", "abort_requested", "interrupted"]))).returning();
   return row ? toTurnRecord(row) : null;
 };
 
@@ -580,7 +594,7 @@ export const finalizeSessionTurnFromMessage = async (input: {
     completedAt,
     durationMs: sql<number>`greatest(0, floor(extract(epoch from (${completedAtIso}::timestamptz - ${sessionTurns.startedAt})) * 1000)::int)`,
     updatedAt: completedAt,
-  }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["running", "abort_requested"]))).returning();
+  }).where(and(eq(sessionTurns.id, input.turnId), eq(sessionTurns.sessionId, input.sessionId), inArray(sessionTurns.status, ["running", "abort_requested", "interrupted"]))).returning();
   return row ? toTurnRecord(row) : null;
 };
 
@@ -600,8 +614,8 @@ const finalizeInterruptedTurn = async (input: {
   if (existing.status === "interrupted" && !shouldPromoteSteerSummary && !shouldFillInterruptedContent) return toTurnRecord(existing);
   const rows = await db.select().from(sessionMessages).where(and(
     eq(sessionMessages.sessionId, input.sessionId),
+    eq(sessionMessages.turnId, input.turnId),
     eq(sessionMessages.role, "assistant"),
-    sql`${sessionMessages.meta}->>'turnId' = ${input.turnId}`,
   )).orderBy(desc(sessionMessages.sequence)).limit(1);
   const last = rows[0] ?? null;
   const intermediate = await buildIntermediateObjectsForTurn(input).catch((error) => {

@@ -103,6 +103,7 @@ function spaceToItem(
 		updatedAt: activityAt,
 		source: "local",
 		localScore: scored.score,
+		isPinned: space.isPinned ?? false,
 		...scored,
 	};
 }

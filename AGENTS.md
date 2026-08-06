@@ -8,7 +8,6 @@
 8. Default data loading strategy: prefer local data for interaction, silently fetch related server data to refresh cache and UI, minimize layout-disrupting loading states, and avoid render thrashing or layout jumps
 9. Care about multi-client sync experience; design elegant and efficient real-time events
 10. All copy should be in English and stay concise
-11. Push directly to main; no feature branches
 
 ## Release Workflow
 

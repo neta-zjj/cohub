@@ -5,6 +5,68 @@
 @import "./themes/neta-studio.css";
 
 /* ============================================================
+   Board shape palette
+   Driven by current data-theme tokens. Space `.cohub/theme.css`
+   can override any of these to recolor board shapes end-to-end.
+   ============================================================ */
+:where(:root, [data-theme]) {
+	/* Shared fallbacks; individual themes only override where semantics differ. */
+	--status-running: var(--success-400);
+	--board-selection-accent: var(--brand);
+	--board-background-image-url: "";
+	--board-background-tile-width: 0;
+	--board-background-tile-height: 0;
+}
+
+:root,
+[data-theme] {
+	--board-color-brand-stroke: var(--brand);
+	--board-color-brand-fill: var(--brand);
+	--board-color-brand-label: var(--text-primary);
+
+	--board-color-neutral-stroke: var(--text-tertiary);
+	--board-color-neutral-fill: var(--text-tertiary);
+	--board-color-neutral-label: var(--text-primary);
+
+	--board-color-black-stroke: #000000;
+	--board-color-black-fill: #000000;
+	--board-color-black-label: var(--text-primary);
+
+	--board-color-white-stroke: #ffffff;
+	--board-color-white-fill: #ffffff;
+	--board-color-white-label: var(--text-primary);
+
+	--board-color-blue-stroke: var(--info-400);
+	--board-color-blue-fill: var(--info-400);
+	--board-color-blue-label: var(--text-primary);
+
+	--board-color-green-stroke: var(--success-400);
+	--board-color-green-fill: var(--success-400);
+	--board-color-green-label: var(--text-primary);
+
+	--board-color-amber-stroke: var(--warning-400);
+	--board-color-amber-fill: var(--warning-400);
+	--board-color-amber-label: var(--text-primary);
+
+	/* Violet has no dedicated semantic scale — soft brand-adjacent hue. */
+	--board-color-violet-stroke: var(--info-500);
+	--board-color-violet-fill: var(--info-500);
+	--board-color-violet-label: var(--text-primary);
+
+	--board-color-rose-stroke: var(--error-400);
+	--board-color-rose-fill: var(--error-400);
+	--board-color-rose-label: var(--text-primary);
+
+	/* Collaboration identity colors — assigned per actor, theme-driven. */
+	--board-collaboration-1: var(--brand);
+	--board-collaboration-2: var(--info-400);
+	--board-collaboration-3: var(--success-400);
+	--board-collaboration-4: var(--error-400);
+	--board-collaboration-5: var(--warning-400);
+	--board-collaboration-6: var(--info-500);
+}
+
+/* ============================================================
    Tailwind v4 @theme — semantic design tokens
    ============================================================ */
 @theme {
@@ -21,6 +83,7 @@
 	--color-bg-surface: var(--bg-surface);
 	--color-bg-surface-hover: var(--bg-surface-hover);
 	--color-bg-elevated: var(--bg-elevated);
+	--color-bg-subtle: var(--bg-subtle);
 	--color-bg-input: var(--bg-input);
 	--color-bg-code: var(--bg-code);
 	--color-bg-header-alt: var(--bg-header-alt);
@@ -50,6 +113,8 @@
 
 	/* Borders */
 	--color-border-primary: var(--border-primary);
+	--color-border-default: var(--border-default);
+	--color-border-strong: var(--border-strong);
 	--color-border-subtle: var(--border-subtle);
 	--color-chat-panel-border: var(--chat-panel-border);
 	--color-chat-composer-border: var(--chat-composer-border);
@@ -114,7 +179,7 @@
 	--color-heatmap-4: var(--heatmap-4);
 
 	/* Status */
-	--color-status-running: var(--success-400);
+	--color-status-running: var(--status-running);
 	--color-status-starting: var(--warning-400);
 	--color-status-error: var(--error-400);
 	--color-status-hibernated: var(--neutral-40);

@@ -1,7 +1,6 @@
 import { HttpError, type Permission, type WorkCreateInput, type WorkMeta, type WorkStatus, type WorkTargetType, type WorkUpdateInput, type WorkVisibility } from "@neta-art/cohub";
 import type { Command } from "commander";
 import { createClient } from "../client.js";
-import { mergeSourceMeta } from "../env-context.js";
 import { error, handleHttp, json as outJson, jsonRequested, ok, table } from "../output.js";
 import { resolveSpace } from "../space.js";
 import { registerWorkCommerce } from "./work-commerce.js";
@@ -103,15 +102,10 @@ async function confirmDelete(opts: { yes?: boolean }): Promise<void> {
   if (answer !== "y" && answer !== "yes") return error("Cancelled");
 }
 
-function resolveVersionMeta(): WorkMeta | undefined {
-  return mergeSourceMeta(undefined) as WorkMeta | undefined;
-}
-
 async function publishWorkVersion(id: string, opts: { json?: boolean }): Promise<void> {
   const client = createClient();
   try {
-    const versionMeta = resolveVersionMeta();
-    const result = await client.works.publishVersion(id, versionMeta ? { meta: versionMeta } : undefined);
+    const result = await client.works.publishVersion(id);
     if (jsonRequested(opts)) return outJson(result);
     ok(`Work version updated: v${result.version.version}`);
     printWork(result.work);
@@ -215,7 +209,7 @@ export function registerWorks(program: Command): void {
   worksCmd
     .command("publish <slug>")
     .description("Create or publish a work in the target space")
-    .option("--file <path>", "Publish a HTML file")
+    .option("--file <path>", "Publish a file (HTML page, board, or any other file)")
     .option("--dir <path>", "Publish a directory site")
     .option("--port <port>", "Publish a public sandbox port")
     .option("--disabled", "Create as disabled")
@@ -239,7 +233,6 @@ export function registerWorks(program: Command): void {
         hideCohubBar: opts.hideCohubBar,
         showCohubBar: opts.showCohubBar,
       });
-      const versionMeta = resolveVersionMeta();
       const input: WorkCreateInput = {
         spaceId,
         slug,
@@ -250,7 +243,6 @@ export function registerWorks(program: Command): void {
         workScopes: opts.workScope as Permission[],
         allowedViewerScopes: opts.viewerScope as Permission[],
         meta,
-        versionMeta,
       };
       try {
         const result = await client.works.create(input);
@@ -273,7 +265,7 @@ export function registerWorks(program: Command): void {
             meta,
           });
           const publishedVersion = status === "published"
-            ? await client.works.publishVersion(work.id, versionMeta ? { meta: versionMeta } : undefined)
+            ? await client.works.publishVersion(work.id)
             : null;
           const result = publishedVersion ?? { work };
           if (jsonRequested(opts)) return outJson(result);
@@ -289,7 +281,7 @@ export function registerWorks(program: Command): void {
     .command("update <id>")
     .description("Update work settings")
     .option("--slug <slug>", "New work slug")
-    .option("--file <path>", "Use a HTML file target")
+    .option("--file <path>", "Use a file target (HTML page, board, or any other file)")
     .option("--dir <path>", "Use a directory site target")
     .option("--port <port>", "Use a public sandbox port target")
     .option("--disabled", "Set status to disabled")
@@ -341,9 +333,8 @@ export function registerWorks(program: Command): void {
       if (Object.keys(input).length === 0) return error("Nothing to update", "Pass --slug, --file, --dir, --port, --status, --visibility, --work-scope, --viewer-scope, --clear-work-scopes, --clear-viewer-scopes, --meta, --hide-cohub-bar, or --show-cohub-bar.");
       try {
         const updated = await client.works.update(id, input);
-        const versionMeta = resolveVersionMeta();
         const publishedVersion = nextStatus === "published" && currentWork?.status !== "published"
-          ? await client.works.publishVersion(updated.work.id, versionMeta ? { meta: versionMeta } : undefined)
+          ? await client.works.publishVersion(updated.work.id)
           : null;
         const result = publishedVersion ?? updated;
         if (jsonRequested(opts)) return outJson(result);

@@ -1,8 +1,16 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { mergeModelsConfigs, type ModelDef, type ModelsConfig, type ModelThinkingLevel } from "@cohub/infra/config-runtime/models";
+import {
+  mergeHeaders,
+  mergeModelsConfigs,
+  type ModelDef,
+  type ModelRequestProfile,
+  type ModelsConfig,
+  type ModelThinkingLevel,
+} from "@cohub/infra/config-runtime/models";
 
 export type CohubModel<TApi extends Api = Api> = Model<TApi> & {
   defaultThinkingLevel?: ModelThinkingLevel;
+  requestProfile?: ModelRequestProfile;
 };
 
 function resolveApiKey(value: string | undefined): string | undefined {
@@ -27,7 +35,6 @@ function normalizeModelCost(cost: ModelDef["cost"] | undefined): Model<Api>["cos
 export class CohubModelRegistry {
   private models: CohubModel[] = [];
   private providerApiKeys = new Map<string, string>();
-  private providerHeaders = new Map<string, Record<string, string>>();
   private loadError: string | undefined;
   private readonly configs: ModelsConfig[];
 
@@ -39,7 +46,6 @@ export class CohubModelRegistry {
   refresh(): void {
     this.models = [];
     this.providerApiKeys.clear();
-    this.providerHeaders.clear();
     this.loadError = undefined;
 
     const mergedConfig = mergeModelsConfigs(...this.configs);
@@ -48,7 +54,6 @@ export class CohubModelRegistry {
     for (const [provider, providerConfig] of Object.entries(mergedConfig.providers)) {
       const apiKey = resolveApiKey(providerConfig.apiKey);
       if (apiKey) this.providerApiKeys.set(provider, apiKey);
-      if (providerConfig.headers) this.providerHeaders.set(provider, providerConfig.headers);
 
       for (const modelDef of providerConfig.models ?? []) {
         const api = modelDef.api ?? providerConfig.api;
@@ -67,7 +72,8 @@ export class CohubModelRegistry {
           cost: normalizeModelCost(modelDef.cost),
           contextWindow: modelDef.contextWindow ?? 128000,
           maxTokens: modelDef.maxTokens ?? 16384,
-          headers: modelDef.headers,
+          requestProfile: modelDef.requestProfile ?? providerConfig.requestProfile,
+          headers: mergeHeaders(providerConfig.headers, modelDef.headers),
           compat: (modelDef.compat ?? providerConfig.compat) as Model<Api>["compat"],
         } as CohubModel);
       }
@@ -97,7 +103,6 @@ export class CohubModelRegistry {
   }
 
   getHeaders(provider: string, modelId?: string): Record<string, string> | undefined {
-    const model = modelId ? this.find(provider, modelId) : undefined;
-    return model?.headers ?? this.providerHeaders.get(provider);
+    return modelId ? this.find(provider, modelId)?.headers : undefined;
   }
 }

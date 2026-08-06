@@ -5,17 +5,22 @@ import {
   cacheBuster,
   createPresignedPostObject,
   createPresignedPutObjectUrl,
-  getBucketPublicEndpoint,
   type PresignStorageConfig,
 } from "./object-presign.js";
 import { redisCommandClient } from "./redis.js";
+import {
+  buildChatAttachmentPublicUrl,
+  createUserUploadPutUrl,
+} from "./user-upload-storage.js";
 
 const IMMUTABLE_PUBLIC_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 export type PublicAssetPurpose = "user_avatar" | "space_avatar" | "chat_attachment";
+export type PublicAssetUploadProtocol = "s3_post_v1" | "presigned_put_v1";
 
 export type CreatePublicAssetUploadInput = {
   purpose: PublicAssetPurpose;
+  uploadProtocol?: PublicAssetUploadProtocol;
   spaceId?: string;
   sessionId?: string;
   file: {
@@ -26,26 +31,25 @@ export type CreatePublicAssetUploadInput = {
   };
 };
 
+type PublicAssetUploadBase = {
+  purpose: PublicAssetPurpose;
+  objectKey: string;
+  publicUrl: string;
+  uploadUrl: string;
+};
+
 export type CreatePublicAssetUploadResponse = {
   expiresAt: string;
-  asset: {
-    purpose: PublicAssetPurpose;
-    objectKey: string;
-    publicUrl: string;
-    uploadMethod: "POST";
-    uploadUrl: string;
-    uploadFields: Record<string, string>;
-  };
+  asset: PublicAssetUploadBase & (
+    | { uploadMethod: "POST"; uploadFields: Record<string, string> }
+    | { uploadMethod: "PUT"; uploadHeaders?: Record<string, string> }
+  );
 };
 
 export type CreateInternalPublicAssetUploadResponse = {
   expiresAt: string;
-  asset: {
-    purpose: PublicAssetPurpose;
-    objectKey: string;
-    publicUrl: string;
+  asset: PublicAssetUploadBase & {
     uploadMethod: "PUT";
-    uploadUrl: string;
     uploadHeaders?: Record<string, string>;
   };
 };
@@ -85,7 +89,7 @@ const CHAT_MIME_EXTENSIONS: Record<string, string> = {
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 /**
  * Chat durable object (any file). Public URL; UUID-unguessable.
- * Body goes client → OSS via presign (not through API). Align with space upload single-file cap.
+ * Body goes directly to object storage via presign. Align with the Space upload single-file cap.
  */
 export const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024 * 1024;
 /** Avatar-only abuse guard. */
@@ -174,7 +178,11 @@ const normalizeChatMimeType = (mimeType: unknown) => {
 const chatAttachmentContentDisposition = (filename?: string) => {
   const raw = (filename ?? "attachment").split(/[/\\]/).pop()?.trim() || "attachment";
   const safe = raw.replace(/[\r\n"]/g, "_").slice(0, 180) || "attachment";
-  return `attachment; filename="${safe}"`;
+  const fallback = safe.replace(/[^\x20-\x7e]/g, "_");
+  const encoded = encodeURIComponent(safe).replace(/['()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 };
 
 export const buildPublicAssetObjectKey = (input: {
@@ -200,16 +208,13 @@ export const buildPublicAssetObjectKey = (input: {
   return `${envPrefix()}chat-attachments/${input.userUuid}/${randomUUID()}.${extension}`;
 };
 
-export const buildPublicAssetUrl = (objectKey: string) => {
+const buildLegacyPublicAssetUrl = (objectKey: string) => {
   return config.publicAssetCdnBaseUrl
     ? `${config.publicAssetCdnBaseUrl}/${objectKey.split("/").map(encodeURIComponent).join("/")}`
     : buildPublicObjectUrl(requirePublicAssetConfig(), objectKey);
 };
 
-export const buildVersionedPublicAssetUrl = (objectKey: string) => `${buildPublicAssetUrl(objectKey)}?v=${cacheBuster()}`;
-
-const encodeObjectKeyPath = (objectKey: string) =>
-  objectKey.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+const buildVersionedPublicAssetUrl = (objectKey: string) => `${buildLegacyPublicAssetUrl(objectKey)}?v=${cacheBuster()}`;
 
 const tryParseOrigin = (value: string | undefined) => {
   if (!value) return null;
@@ -220,11 +225,13 @@ const tryParseOrigin = (value: string | undefined) => {
   }
 };
 
-/** Origins clients may pass as chat durable downloadUrl (CDN / public OSS). */
+/** Trusted legacy and current origins clients may pass as durable chat download URLs. */
 export const listPublicAssetClientOrigins = () => {
   const origins = new Set<string>();
-  const cdn = tryParseOrigin(config.publicAssetCdnBaseUrl);
-  if (cdn) origins.add(cdn);
+  const legacyCdn = tryParseOrigin(config.publicAssetCdnBaseUrl);
+  if (legacyCdn) origins.add(legacyCdn);
+  const chatCdn = tryParseOrigin(config.chatAttachmentPublicBaseUrl);
+  if (chatCdn) origins.add(chatCdn);
   if (config.publicAssetOssBucket) {
     const publicEndpoint =
       config.publicAssetOssPublicEndpoint ??
@@ -255,62 +262,6 @@ export const isAllowedPublicAssetDownloadUrl = (value: string) => {
   if (url.username || url.password) return false;
   const origins = listPublicAssetClientOrigins();
   return origins.size > 0 && origins.has(url.origin);
-};
-
-/** Extract object key from a known public CDN / public OSS URL. */
-export const publicAssetObjectKeyFromUrl = (value: string): string | null => {
-  if (!isAllowedPublicAssetDownloadUrl(value)) return null;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  let path = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-  // Strip CDN base path prefix when CDN is mounted under a subpath.
-  if (config.publicAssetCdnBaseUrl) {
-    try {
-      const cdn = new URL(config.publicAssetCdnBaseUrl.replace(/\/+$/, ""));
-      if (url.origin === cdn.origin) {
-        const prefix = cdn.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
-        if (prefix && (path === prefix || path.startsWith(`${prefix}/`))) {
-          path = path === prefix ? "" : path.slice(prefix.length + 1);
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  if (!path || path.includes("..")) return null;
-  return path;
-};
-
-/**
- * Rewrite a public durable URL to the internal OSS endpoint for sandbox materialize.
- * Falls back to the original URL when internal endpoint is unavailable or URL is not ours.
- */
-export const resolvePublicAssetDownloadUrlForInternal = (value: string): string | null => {
-  if (!isAllowedPublicAssetDownloadUrl(value)) return null;
-  const objectKey = publicAssetObjectKeyFromUrl(value);
-  if (!objectKey) return null;
-
-  // Prefer internal OSS endpoint when configured (in-cluster / VPC pull).
-  const internalEndpoint = config.publicAssetOssEndpoint;
-  const bucket = config.publicAssetOssBucket;
-  if (internalEndpoint && bucket) {
-    try {
-      const base = getBucketPublicEndpoint({
-        endpoint: internalEndpoint,
-        publicEndpoint: internalEndpoint,
-        region: config.publicAssetOssRegion,
-        bucket,
-      });
-      return `${base.replace(/\/+$/, "")}/${encodeObjectKeyPath(objectKey)}`;
-    } catch {
-      // fall through to original public URL
-    }
-  }
-  return value;
 };
 
 export const assertPublicAssetUploadFile = (input: {
@@ -362,19 +313,36 @@ export const consumePublicAssetUploadQuota = async (
   }
 };
 
+const createChatAttachmentPutPlan = (input: {
+  objectKey: string;
+  mimeType: string;
+  filename?: string;
+}) => {
+  const signed = createUserUploadPutUrl({
+    kind: "chat_attachment",
+    objectKey: input.objectKey,
+    contentType: input.mimeType,
+    cacheControl: IMMUTABLE_PUBLIC_CACHE_CONTROL,
+    contentDisposition: chatAttachmentContentDisposition(input.filename),
+  });
+  return {
+    signed,
+    publicUrl: buildChatAttachmentPublicUrl(input.objectKey),
+  };
+};
+
 export const createPublicAssetUploadPlan = (input: {
   purpose: PublicAssetPurpose;
+  uploadProtocol?: PublicAssetUploadProtocol;
   userUuid: string;
   spaceId?: string;
   sessionId?: string;
   file: CreatePublicAssetUploadInput["file"];
 }): CreatePublicAssetUploadResponse => {
   assertPublicAssetUploadFile({ purpose: input.purpose, file: input.file });
-  const storage = requirePublicAssetConfig();
-  const mimeType =
-    input.purpose === "chat_attachment"
-      ? normalizeChatMimeType(input.file.mimeType)
-      : input.file.mimeType;
+  const mimeType = input.purpose === "chat_attachment"
+    ? normalizeChatMimeType(input.file.mimeType)
+    : input.file.mimeType;
   const objectKey = buildPublicAssetObjectKey({
     purpose: input.purpose,
     userUuid: input.userUuid,
@@ -383,24 +351,44 @@ export const createPublicAssetUploadPlan = (input: {
     mimeType,
     filename: input.file.filename,
   });
-  const maxBytes = input.purpose === "chat_attachment" ? MAX_CHAT_ATTACHMENT_BYTES : MAX_AVATAR_BYTES;
+
+  if (input.purpose === "chat_attachment" && input.uploadProtocol === "presigned_put_v1") {
+    const { signed, publicUrl } = createChatAttachmentPutPlan({
+      objectKey,
+      mimeType,
+      filename: input.file.filename,
+    });
+    return {
+      expiresAt: signed.expiresAt,
+      asset: {
+        purpose: input.purpose,
+        objectKey,
+        publicUrl,
+        uploadMethod: "PUT",
+        uploadUrl: signed.uploadUrl,
+        uploadHeaders: signed.headers,
+      },
+    };
+  }
+
   const signed = createPresignedPostObject({
-    storage,
+    storage: requirePublicAssetConfig(),
     objectKey,
     contentType: mimeType,
-    maxBytes,
+    maxBytes: input.purpose === "chat_attachment" ? MAX_CHAT_ATTACHMENT_BYTES : MAX_AVATAR_BYTES,
     cacheControl: input.purpose === "chat_attachment" ? IMMUTABLE_PUBLIC_CACHE_CONTROL : undefined,
-    contentDisposition:
-      input.purpose === "chat_attachment"
-        ? chatAttachmentContentDisposition(input.file.filename)
-        : undefined,
+    contentDisposition: input.purpose === "chat_attachment"
+      ? chatAttachmentContentDisposition(input.file.filename)
+      : undefined,
   });
   return {
     expiresAt: signed.expiresAt,
     asset: {
       purpose: input.purpose,
       objectKey,
-      publicUrl: input.purpose === "chat_attachment" ? buildPublicAssetUrl(objectKey) : buildVersionedPublicAssetUrl(objectKey),
+      publicUrl: input.purpose === "chat_attachment"
+        ? buildLegacyPublicAssetUrl(objectKey)
+        : buildVersionedPublicAssetUrl(objectKey),
       uploadMethod: "POST",
       uploadUrl: signed.uploadUrl,
       uploadFields: signed.fields,
@@ -416,11 +404,9 @@ export const createInternalPublicAssetUploadPlan = (input: {
   file: CreatePublicAssetUploadInput["file"];
 }): CreateInternalPublicAssetUploadResponse => {
   assertPublicAssetUploadFile({ purpose: input.purpose, file: input.file });
-  requirePublicAssetConfig();
-  const mimeType =
-    input.purpose === "chat_attachment"
-      ? normalizeChatMimeType(input.file.mimeType)
-      : input.file.mimeType;
+  const mimeType = input.purpose === "chat_attachment"
+    ? normalizeChatMimeType(input.file.mimeType)
+    : input.file.mimeType;
   const objectKey = buildPublicAssetObjectKey({
     purpose: input.purpose,
     userUuid: input.userUuid,
@@ -429,18 +415,20 @@ export const createInternalPublicAssetUploadPlan = (input: {
     mimeType,
     filename: input.file.filename,
   });
-  const signed = createPresignedPutObjectUrl(
+  const chatPlan = input.purpose === "chat_attachment"
+    ? createChatAttachmentPutPlan({ objectKey, mimeType, filename: input.file.filename })
+    : null;
+  const signed = chatPlan?.signed ?? createPresignedPutObjectUrl(
     getInternalStorageConfig(),
     objectKey,
     mimeType,
-    input.purpose === "chat_attachment" ? IMMUTABLE_PUBLIC_CACHE_CONTROL : undefined,
   );
   return {
     expiresAt: signed.expiresAt,
     asset: {
       purpose: input.purpose,
       objectKey,
-      publicUrl: input.purpose === "chat_attachment" ? buildPublicAssetUrl(objectKey) : buildVersionedPublicAssetUrl(objectKey),
+      publicUrl: chatPlan?.publicUrl ?? buildVersionedPublicAssetUrl(objectKey),
       uploadMethod: "PUT",
       uploadUrl: signed.uploadUrl,
       uploadHeaders: signed.headers,

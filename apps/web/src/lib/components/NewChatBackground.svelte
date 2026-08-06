@@ -1,36 +1,64 @@
 <script lang="ts">
 import { page } from "$app/state";
+import NewChatSpaceBackground from "$lib/components/NewChatSpaceBackground.svelte";
 import NewChatWorkBackground from "$lib/components/NewChatWorkBackground.svelte";
 import { parseNewChatBackgroundAction } from "$lib/new-chat-background-bridge";
 import type { NewChatBackgroundConfig } from "$lib/space-config";
 import { emitSpaceConfigBackgroundAction } from "$lib/space-config";
-import { parseCohubWorkUrl } from "$lib/work-url";
+import { isDecorativeNewChatBackground } from "$lib/space-config-parse";
+import { type CohubWorkUrl, parseCohubWorkUrl } from "$lib/work-url";
 
 type Props = {
 	background: NewChatBackgroundConfig;
+	/** Current Space, used to serve space-local file backgrounds. */
+	spaceId?: string | null;
 };
 
-const { background }: Props = $props();
+const { background, spaceId = null }: Props = $props();
+
+const externalUrl = $derived(
+	background.source.kind === "url" ? background.source.url : null,
+);
+const spacePath = $derived(
+	background.type === "html" && background.source.kind === "space"
+		? background.source.path
+		: null,
+);
 
 const objectFit = $derived(background.fit === "fill" ? "fill" : background.fit);
 let iframeEl = $state<HTMLIFrameElement | null>(null);
 
+// An html background is a live document with focusable controls, so it must
+// stay in the accessibility tree; only image/video are safe to hide.
+const decorative = $derived(isDecorativeNewChatBackground(background));
+
 function getBackgroundOrigin() {
+	if (!externalUrl) return null;
 	try {
-		return new URL(background.url, page.url.href).origin;
+		return new URL(externalUrl, page.url.href).origin;
 	} catch {
 		return null;
 	}
 }
 
-const workUrl = $derived(
-	background.type === "html"
-		? parseCohubWorkUrl(background.url, page.url.href)
-		: null,
-);
+// Memoize by origin+pathname so ?preview= changes don't produce a new
+// object identity and trigger a guide refetch.
+let workUrlKey = "";
+let workUrlCache: CohubWorkUrl | null = null;
+const workUrl = $derived.by((): CohubWorkUrl | null => {
+	if (background.type !== "html" || !externalUrl) return null;
+	const key = `${externalUrl}|${page.url.origin}${page.url.pathname}`;
+	if (key === workUrlKey) return workUrlCache;
+	workUrlKey = key;
+	workUrlCache = parseCohubWorkUrl(
+		externalUrl,
+		`${page.url.origin}${page.url.pathname}`,
+	);
+	return workUrlCache;
+});
 
 const sandbox = $derived.by(() => {
-	if (background.type !== "html" || workUrl) return undefined;
+	if (background.type !== "html" || !externalUrl || workUrl) return undefined;
 	const origin = getBackgroundOrigin();
 	if (typeof window !== "undefined" && origin === window.location.origin) {
 		return "allow-scripts";
@@ -40,7 +68,7 @@ const sandbox = $derived.by(() => {
 
 $effect(() => {
 	if (typeof document === "undefined") return;
-	if (background.type !== "html" || workUrl) return;
+	if (background.type !== "html" || !externalUrl || workUrl) return;
 	const origin = getBackgroundOrigin();
 	if (!origin) return;
 	const link = document.createElement("link");
@@ -52,7 +80,7 @@ $effect(() => {
 });
 
 function handleMessage(event: MessageEvent) {
-	if (background.type !== "html" || workUrl) return;
+	if (background.type !== "html" || !externalUrl || workUrl) return;
 	if (event.source !== iframeEl?.contentWindow) return;
 	const origin = getBackgroundOrigin();
 	if (!origin) return;
@@ -67,18 +95,29 @@ function handleWorkBackgroundError(error: unknown) {
 }
 
 $effect(() => {
-	if (typeof window === "undefined" || background.type !== "html" || workUrl)
+	if (
+		typeof window === "undefined" ||
+		background.type !== "html" ||
+		!externalUrl ||
+		workUrl
+	)
 		return;
 	window.addEventListener("message", handleMessage);
 	return () => window.removeEventListener("message", handleMessage);
 });
 </script>
 
-<div class="new-chat-background" style:opacity={background.opacity} aria-hidden="true">
+<div
+  class="new-chat-background"
+  style:opacity={background.opacity}
+  aria-hidden={decorative ? "true" : undefined}
+>
   {#if background.type === "image"}
-    <img src={background.url} alt="" style:object-fit={objectFit} style:object-position={background.position} draggable="false" />
+    <img src={background.source.url} alt="" style:object-fit={objectFit} style:object-position={background.position} draggable="false" />
   {:else if background.type === "video"}
-    <video src={background.url} style:object-fit={objectFit} style:object-position={background.position} autoplay muted loop playsinline preload="metadata"></video>
+    <video src={background.source.url} style:object-fit={objectFit} style:object-position={background.position} autoplay muted loop playsinline preload="metadata"></video>
+  {:else if spacePath && spaceId}
+    <NewChatSpaceBackground spaceId={spaceId} path={spacePath} />
   {:else if workUrl}
     <svelte:boundary onerror={handleWorkBackgroundError}>
       <NewChatWorkBackground workUrl={workUrl} />
@@ -86,8 +125,10 @@ $effect(() => {
         <div class="new-chat-background-state">Work background is unavailable.</div>
       {/snippet}
     </svelte:boundary>
+  {:else if externalUrl}
+    <iframe bind:this={iframeEl} src={externalUrl} title="New chat content" sandbox={sandbox} referrerpolicy="no-referrer" loading="eager"></iframe>
   {:else}
-    <iframe bind:this={iframeEl} src={background.url} title="New chat background" sandbox={sandbox} referrerpolicy="no-referrer" loading="eager"></iframe>
+    <div class="new-chat-background-state">Background is unavailable.</div>
   {/if}
 </div>
 
@@ -107,11 +148,11 @@ $effect(() => {
     right: 0;
     bottom: 0;
     left: 0;
-    height: min(34dvh, 260px);
+    height: min(22dvh, 160px);
     background: linear-gradient(
       to top,
-      var(--bg-content) 0%,
-      color-mix(in srgb, var(--bg-content) 76%, transparent) 42%,
+      color-mix(in srgb, var(--bg-content) 82%, transparent) 0%,
+      color-mix(in srgb, var(--bg-content) 40%, transparent) 50%,
       transparent 100%
     );
     pointer-events: none;

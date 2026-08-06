@@ -128,6 +128,56 @@ const getContextUsageText = async (spaceId: string, provider?: string | null, mo
 
 const formatModelSelection = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
 
+const getHelpText = () => {
+  return [
+    "Cohub Commands:",
+    "",
+    "/help",
+    "  Show available commands and usage info.",
+    "",
+    "/new",
+    "  Start a new Cohub session for this conversation.",
+    "",
+    "/status",
+    "  Show current session status and context usage.",
+    "",
+    "/model [provider/model_id]",
+    "  Show current model & available model list, or change model (alias: /models).",
+  ].join("\n");
+};
+
+const getModelListText = async (spaceId: string, resolved: ResolvedGatewayInbound) => {
+  const current = await getBindingModelConfig(resolved);
+  const currentText = current.model
+    ? `${formatModelSelection(current.model)} (${current.source})`
+    : `default (${current.source})`;
+
+  const catalog = await loadMergedModelsCatalog(db, spaceId);
+  const providerEntries = Object.entries(catalog.providers ?? {});
+
+  const modelLines: string[] = [];
+  for (const [provider, providerConfig] of providerEntries) {
+    const visibleModels = (providerConfig.models ?? []).filter((model) => !model.hidden);
+    if (visibleModels.length === 0) continue;
+
+    modelLines.push(`• ${provider}`);
+    for (const model of visibleModels) {
+      modelLines.push(`  /model ${provider}/${model.id}`);
+    }
+  }
+
+  return [
+    `Current Model: ${currentText}`,
+    "",
+    "Available Models:",
+    modelLines.length > 0 ? modelLines.join("\n") : "  (none)",
+    "",
+    "Usage:",
+    "/model <provider/model-id>",
+    "/model default (reset to space default)",
+  ].join("\n");
+};
+
 const getBindingModelConfig = async (resolved: ResolvedGatewayInbound) => {
   const [binding] = await db.select({ meta: spaceSessionBindings.meta }).from(spaceSessionBindings).where(and(eq(spaceSessionBindings.spaceChannelId, resolved.spaceChannelId), eq(spaceSessionBindings.bindingKey, resolved.bindingKey))).limit(1);
   const bindingModel = normalizeChannelModelConfig(getRecord(binding?.meta)?.model);
@@ -283,6 +333,19 @@ const createFreshSessionForBinding = async (
   return session.id;
 };
 
+const handleHelpCommand: ChannelCommandHandler = async (input) => {
+  const { event, resolved, command, deps } = input;
+  await createInboundCommandRef({ deps, event, resolved, command });
+  await dispatchCommandReply({
+    deps,
+    event,
+    resolved,
+    sessionId: resolved.sessionId,
+    text: getHelpText(),
+  });
+  return true;
+};
+
 const handleStatusCommand: ChannelCommandHandler = async (input) => {
   const { event, resolved, command, deps } = input;
   await createInboundCommandRef({ deps, event, resolved, command });
@@ -316,15 +379,13 @@ const handleModelCommand: ChannelCommandHandler = async (input) => {
   await createInboundCommandRef({ deps, event, resolved, command });
 
   if (!args) {
-    const current = await getBindingModelConfig(resolved);
+    const text = await getModelListText(resolved.spaceId, resolved);
     await dispatchCommandReply({
       deps,
       event,
       resolved,
       sessionId: resolved.sessionId,
-      text: current.model
-        ? `Model: ${formatModelSelection(current.model)}\nSource: ${current.source}`
-        : "Model: default",
+      text,
     });
     return true;
   }
@@ -347,7 +408,9 @@ const handleModelCommand: ChannelCommandHandler = async (input) => {
 };
 
 const channelCommandHandlers: Record<GatewayChannelCommandName, ChannelCommandHandler> = {
+  help: handleHelpCommand,
   model: handleModelCommand,
+  models: handleModelCommand,
   new: handleNewCommand,
   status: handleStatusCommand,
 };

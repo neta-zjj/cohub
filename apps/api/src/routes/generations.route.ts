@@ -25,6 +25,7 @@ import { getSessionTurnById } from "../session-turns.js";
 import { enqueueTask } from "../tasks.js";
 import { defaultJobRetention } from "@cohub/infra/bullmq";
 import { createLogger } from "@cohub/infra/logging";
+import { getRequestSource } from "../lib/request-source.js";
 
 
 const logger = createLogger({ serviceName: "cohub-api" });
@@ -62,6 +63,8 @@ router.post("/", async (c) => {
 
   const sessionId = request.sessionId?.trim() || null;
   const turnId = request.turnId?.trim() || null;
+  const meta = request.meta;
+  const requestSource = getRequestSource(c);
   if (sessionId) {
     const session = await getSpaceSessionById(sessionId);
     if (!session || session.spaceId !== request.spaceId) {
@@ -93,7 +96,7 @@ router.post("/", async (c) => {
       model: request.model,
       content: request.content,
       parameters: request.parameters,
-      meta: request.meta,
+      meta,
     });
     parameters = resolved.parameters;
   } catch (error) {
@@ -168,7 +171,8 @@ router.post("/", async (c) => {
         model: request.model,
         content: request.content,
         parameters,
-        meta: request.meta,
+        meta,
+        requestSource,
         modelDiscount,
       },
     }, {

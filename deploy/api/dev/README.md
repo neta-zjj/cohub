@@ -30,7 +30,8 @@ vim secrets.yaml
 - `APP_ENCRYPTION_KEY` - 应用级加密密钥（用于加密存储影子账号密码和 access token）
 - `WORKER_SECRET` - Worker 通信密钥
 - `TURN_OBJECT_S3_ACCESS_KEY_ID` / `TURN_OBJECT_S3_SECRET_ACCESS_KEY` - Turn 中间消息 OSS 写入凭证
-- `PUBLIC_ASSET_OSS_ACCESS_KEY_ID` / `PUBLIC_ASSET_OSS_SECRET_ACCESS_KEY` - 公开资产 OSS 写入凭证（用于用户 / Space 头像上传）
+- `PUBLIC_ASSET_OSS_ACCESS_KEY_ID` / `PUBLIC_ASSET_OSS_SECRET_ACCESS_KEY` - 公开资产 OSS 写入凭证（用于头像和旧客户端附件上传）
+- `USER_UPLOAD_S3_ACCESS_KEY_ID` / `USER_UPLOAD_S3_SECRET_ACCESS_KEY` - R2 用户上传凭证（用于聊天附件和 Space 临时上传）
 - `LOGTO_M2M_APP_ID` / `LOGTO_M2M_APP_SECRET` - Logto M2M 应用凭证
 
 可选字段：
@@ -40,7 +41,10 @@ Billing 启用后，Cohub 使用 `usd_micro_cent` credit type：`1 usd_micro_cen
 
 同时请确认 `values.yaml` 中已填写：
 - `GITEA_MANAGED_EMAIL_DOMAIN` - 托管 Gitea 影子账号使用的邮箱域名后缀
-- `PUBLIC_ASSET_OSS_ENDPOINT` / `PUBLIC_ASSET_OSS_PUBLIC_ENDPOINT` / `PUBLIC_ASSET_OSS_REGION` / `PUBLIC_ASSET_OSS_BUCKET` / `PUBLIC_ASSET_CDN_BASE_URL` / `WORK_ASSET_CDN_BASE_URL` - 公开资产上传与 Work asset 访问配置
+- `PUBLIC_ASSET_OSS_ENDPOINT` / `PUBLIC_ASSET_OSS_PUBLIC_ENDPOINT` / `PUBLIC_ASSET_OSS_REGION` / `PUBLIC_ASSET_OSS_BUCKET` / `PUBLIC_ASSET_CDN_BASE_URL` / `WORK_ASSET_CDN_BASE_URL` - 头像、旧附件和 Work asset 配置
+- `USER_UPLOAD_S3_ENDPOINT` / `USER_UPLOAD_S3_REGION` / `CHAT_ATTACHMENT_S3_BUCKET` / `CHAT_ATTACHMENT_PUBLIC_BASE_URL` / `SPACE_UPLOAD_S3_BUCKET` - R2 用户上传配置；聊天 Bucket 绑定公开域名，Space Bucket 保持私有并为 `uploads/`、`dev/uploads/` 配置 3 天生命周期
+
+两个 R2 Bucket 都需要为 `WEB_ORIGIN` 配置浏览器直传 CORS：允许 `PUT`，允许 `Content-Type`、`Cache-Control`、`Content-Disposition` 请求头，并暴露 `ETag`。聊天附件 Bucket 绑定 `CHAT_ATTACHMENT_PUBLIC_BASE_URL` 对应的 Custom Domain；Space 上传 Bucket 不开放公共访问。
 
 CI 构建还需要配置 `GITEA_NPM_TOKEN` secret。该 token 只在构建期用于读取 `git.talesofai.com/api/packages/talesofai/npm/` 中的私有 npm 包，不是 API 运行时 secret。
 

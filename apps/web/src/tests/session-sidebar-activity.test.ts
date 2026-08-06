@@ -26,6 +26,7 @@ function streamingState(contentBlocks: ContentBlock[]): SessionGenerationState {
 		runtimeProvider: null,
 		runtimeModel: null,
 		finalizedPreview: false,
+		lastPatchAt: null,
 	};
 }
 

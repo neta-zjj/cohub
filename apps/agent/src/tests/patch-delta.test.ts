@@ -98,5 +98,3 @@ function runningTool(partialResult: string): ContentBlock {
     },
   ]);
 }
-
-console.log("patch-delta checks passed");

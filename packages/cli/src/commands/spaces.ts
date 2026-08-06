@@ -10,6 +10,8 @@ import { createClient } from "../client.js";
 import { table, json as outJson, jsonRequested, ok, error, handleHttp } from "../output.js";
 import { resolveSpace } from "../space.js";
 import { registerSpaceCommerce } from "./space-commerce.js";
+import { registerSpaceInvitations } from "./space-invitations.js";
+import { registerSpaceTurns } from "./space-turns.js";
 
 type ModOptions = {
   json?: boolean;
@@ -27,9 +29,9 @@ type SpaceUpdateOptions = {
 type PromptOptions = {
   session?: string;
   title?: string;
-  source?: string;
   model?: string;
   provider?: string;
+  thinkingLevel?: string;
   readOnly?: boolean;
   steer?: boolean;
   delayMs?: string;
@@ -244,6 +246,14 @@ async function sendPrompt(command: Command, words: string[], opts: PromptOptions
   if (scheduleFlags.length > 1) return error("Conflicting schedule", "Use only one of --delay-ms, --at, or --cron");
   if (opts.cron && !opts.timezone) return error("Missing timezone", "--timezone is required with --cron");
 
+  const thinkingLevel = opts.thinkingLevel?.trim() || undefined;
+  if (
+    thinkingLevel
+    && !new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).has(thinkingLevel)
+  ) {
+    return error("Invalid thinking level", "Use off|minimal|low|medium|high|xhigh|max");
+  }
+
   const spaceId = resolveSpace(command);
   const client = createClient();
   try {
@@ -285,10 +295,10 @@ async function sendPrompt(command: Command, words: string[], opts: PromptOptions
     const result = await client.space(spaceId).prompt({
       sessionId,
       title: sessionId === opts.session ? opts.title : undefined,
-      source: opts.source?.trim() || "cli",
       content: promptContent,
       model: opts.model,
       provider: opts.provider,
+      thinkingLevel: thinkingLevel as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined,
       accessMode: opts.readOnly ? "read_only" : "full_access",
       intent: opts.steer ? "steer" : undefined,
       env: parseEnvOptions(opts.env),
@@ -330,9 +340,9 @@ async function runCompletionCommand(command: Command, words: string[], opts: Com
   const thinkingLevel = opts.thinkingLevel?.trim() || undefined;
   if (
     thinkingLevel
-    && !new Set(["off", "minimal", "low", "medium", "high", "xhigh"]).has(thinkingLevel)
+    && !new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).has(thinkingLevel)
   ) {
-    return error("Invalid thinking level", "Use off|minimal|low|medium|high|xhigh");
+    return error("Invalid thinking level", "Use off|minimal|low|medium|high|xhigh|max");
   }
 
   const client = createClient();
@@ -343,7 +353,7 @@ async function runCompletionCommand(command: Command, words: string[], opts: Com
     messages: [{ role: "user" as const, content: [{ type: "text" as const, text }] }],
     temperature,
     maxTokens,
-    thinkingLevel: thinkingLevel as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined,
+    thinkingLevel: thinkingLevel as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined,
   };
 
   try {
@@ -390,9 +400,9 @@ export function registerPrompt(program: Command): void {
     .description("Send or schedule a prompt in a space")
     .option("--session <id>", "Target session ID")
     .option("--title <title>", "Title for a newly created session or schedule")
-    .option("--source <source>", "Prompt source for newly created sessions", "cli")
     .option("-m, --model <model>", "Model name")
     .option("-p, --provider <provider>", "Provider name")
+    .option("--thinking-level <level>", "Thinking level: off|minimal|low|medium|high|xhigh|max")
     .option("--read-only", "Use read-only tools")
     .option("--steer", "Interrupt the current turn and run immediately")
     .option("--delay-ms <ms>", "Delay sending by milliseconds")
@@ -421,21 +431,34 @@ export function registerPrompt(program: Command): void {
 
 export function registerSpaces(program: Command): void {
   const spacesCmd = program.command("spaces").description("Space management");
+  registerSpaceInvitations(spacesCmd);
 
   // ── spaces ls ──
   spacesCmd
     .command("ls")
     .alias("list")
     .description("List all spaces")
+    .option("--mine", "Only spaces you own")
+    .option("--pinned", "Only pinned spaces")
     .option("--json", "Output as JSON")
-    .action(async (opts: { json?: boolean }) => {
+    .action(async (opts: { mine?: boolean; pinned?: boolean; json?: boolean }) => {
       const client = createClient();
       try {
-        const items = await client.spaces.list();
-        if (jsonRequested(opts)) return outJson(items);
-        table(items, [
+        const [items, me] = await Promise.all([
+          client.spaces.list(),
+          opts.mine ? client.user.getMe() : Promise.resolve(null),
+        ]);
+        const myUuid = me?.uuid ?? null;
+        const filtered = items.filter((item) => {
+          if (opts.mine && myUuid && item.userUuid !== myUuid) return false;
+          if (opts.pinned && !item.isPinned) return false;
+          return true;
+        });
+        if (jsonRequested(opts)) return outJson(filtered);
+        table(filtered, [
           { key: "id", label: "ID" },
           { key: "name", label: "Name" },
+          { key: "isPinned", label: "Pinned" },
           { key: "createdAt", label: "Created" },
         ]);
       } catch (e: unknown) {
@@ -606,6 +629,7 @@ export function registerSpaces(program: Command): void {
     .option("--title <title>", "Title for a newly created session or schedule")
     .option("-m, --model <model>", "Model name")
     .option("-p, --provider <provider>", "Provider name")
+    .option("--thinking-level <level>", "Thinking level: off|minimal|low|medium|high|xhigh|max")
     .option("--read-only", "Use read-only tools")
     .option("--steer", "Interrupt the current turn and run immediately")
     .option("--delay-ms <ms>", "Delay sending by milliseconds")
@@ -638,6 +662,9 @@ export function registerSpaces(program: Command): void {
   // ── spaces sessions ──
   registerSessions(spacesCmd);
 
+  // ── spaces turns ──
+  registerSpaceTurns(spacesCmd);
+
   // ── spaces members ──
   registerMembers(spacesCmd);
 
@@ -652,6 +679,33 @@ export function registerSpaces(program: Command): void {
 
   // ── spaces labels ──
   registerLabels(spacesCmd);
+
+  // ── spaces pin / unpin (user-scope label convenience) ──
+  spacesCmd
+    .command("pin <id>")
+    .description("Pin a space (add the Pinned user label)")
+    .action(async (id: string) => {
+      const client = createClient();
+      try {
+        await client.user.labels.patchResourceLabels("space", id.trim(), { addLabelRefs: ["Pinned"] });
+        ok("Space pinned");
+      } catch (e: unknown) {
+        handleHttp(e);
+      }
+    });
+
+  spacesCmd
+    .command("unpin <id>")
+    .description("Unpin a space (remove the Pinned user label)")
+    .action(async (id: string) => {
+      const client = createClient();
+      try {
+        await client.user.labels.patchResourceLabels("space", id.trim(), { removeLabelRefs: ["Pinned"] });
+        ok("Space unpinned");
+      } catch (e: unknown) {
+        handleHttp(e);
+      }
+    });
 
   // ── spaces commerce ──
   registerSpaceCommerce(spacesCmd);
@@ -1301,7 +1355,6 @@ function registerSessions(spacesCmd: Command): void {
       try {
         const result = await client.space(spaceId).sessions.create({
           title,
-          source: "cli",
           labelRefs: opts.label?.length ? opts.label : undefined,
         });
         if (jsonRequested(opts)) return outJson(result);

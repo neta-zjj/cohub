@@ -10,8 +10,12 @@ import {
 	Rocket,
 	Trash2,
 } from "lucide-svelte";
-import { onDestroy } from "svelte";
+import { onDestroy, onMount } from "svelte";
 import CenteredLoading from "$lib/components/CenteredLoading.svelte";
+import {
+	WORKS_CHANGED_EVENT,
+	type WorksChangedDetail,
+} from "$lib/features/work/work-realtime";
 import { formatDateTime } from "../space-utils";
 import { createWorkDetailController } from "./work-detail-controller.svelte";
 import {
@@ -63,6 +67,21 @@ const workCanToggleHideCohubBar = $derived(
 
 $effect(() => {
 	workDetailController.syncRoute();
+});
+
+onMount(() => {
+	const handleWorksChanged = (event: Event) => {
+		const detail = (event as CustomEvent<WorksChangedDetail>).detail;
+		if (detail?.spaceId !== spaceId) return;
+		if (detail.work || detail.version || detail.deletedWorkId) {
+			workDetailController.applyWorksChanged(detail);
+			return;
+		}
+		workDetailController.refresh();
+	};
+	window.addEventListener(WORKS_CHANGED_EVENT, handleWorksChanged);
+	return () =>
+		window.removeEventListener(WORKS_CHANGED_EVENT, handleWorksChanged);
 });
 
 onDestroy(() => {

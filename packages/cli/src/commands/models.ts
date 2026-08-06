@@ -1,6 +1,8 @@
 import type { Command } from "commander";
 import {
+  filterDiscoverableGenerationModels,
   filterGenerationDeclarationsByPolicy,
+  getAllowedGenerationModelIds,
   parseGenerationPolicyFromEnv,
   type PublicGenerationDeclaration,
 } from "@neta-art/cohub";
@@ -96,8 +98,12 @@ Examples:
       try {
         if (opts.modelType === "multimodal") {
           const response = await client.models.listMultimodal();
-          const filtered = filterGenerationDeclarationsByPolicy(response.models, parseGenerationPolicyFromEnv(process.env));
-          const models = filtered.map(toMultimodalModelSummary);
+          const policy = parseGenerationPolicyFromEnv(process.env);
+          const allowedModelIds = getAllowedGenerationModelIds(policy);
+          const filtered = filterGenerationDeclarationsByPolicy(response.models, policy);
+          const models = filterDiscoverableGenerationModels(filtered, {
+            includeModelIds: allowedModelIds ?? undefined,
+          }).map(toMultimodalModelSummary);
           if (jsonRequested(opts)) return outJson({ models });
           table(models as unknown as Row[], [
             { key: "model", label: "Model" },

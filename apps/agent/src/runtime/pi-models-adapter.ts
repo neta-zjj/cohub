@@ -125,16 +125,12 @@ function buildModelsFromRegistry(
         auth: {
           apiKey: {
             name: `${providerId} API key`,
-            // Live registry lookup — key/header changes do not require cache rebuild.
-            resolve: async ({ model }) => {
-              const apiKey = registry.getApiKey(model.provider);
+            // Live provider-scoped lookup; Pi merges the selected model's headers later.
+            resolve: async () => {
+              const apiKey = registry.getApiKey(providerId);
               if (!apiKey) return undefined;
-              const headers = registry.getHeaders(model.provider, model.id);
               return {
-                auth: {
-                  apiKey,
-                  ...(headers ? { headers } : {}),
-                },
+                auth: { apiKey },
                 source: "cohub-model-registry",
               };
             },

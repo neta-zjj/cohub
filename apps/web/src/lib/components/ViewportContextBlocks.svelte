@@ -16,7 +16,7 @@ const { contexts, removable = false, onRemove }: Props = $props();
 
 function iconFor(kind: ViewportContext["kind"]) {
 	if (kind === "file") return FileText;
-	if (kind === "canvas") return LayoutGrid;
+	if (kind === "board") return LayoutGrid;
 	return Radio;
 }
 
@@ -29,18 +29,13 @@ function titleFor(context: ViewportContext) {
 			: null;
 		return lines ? `${context.path} · ${lines}` : context.path;
 	}
-	if (context.kind === "canvas") {
+	if (context.kind === "board") {
 		const parts = [context.path];
 		if (context.selectedNodes?.length) {
 			parts.push(
 				`${context.selectedNodes.length} selected: ${context.selectedNodes
 					.map((node) => node.title || node.id)
 					.join(", ")}`,
-			);
-		}
-		if (context.camera) {
-			parts.push(
-				`camera (${Math.round(context.camera.x)}, ${Math.round(context.camera.y)}) @ ${Math.round(context.camera.zoom * 100)}%`,
 			);
 		}
 		if (context.visibleRect) {

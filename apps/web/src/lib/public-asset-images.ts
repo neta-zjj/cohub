@@ -1,4 +1,7 @@
-import type { PublicAssetMimeType } from "@neta-art/cohub";
+import type {
+	PublicAssetMimeType,
+	PublicAssetUploadProgress,
+} from "@neta-art/cohub";
 import { normalizeAvatarImage } from "$lib/avatar-image";
 import { sdk } from "$lib/sdk";
 
@@ -106,19 +109,31 @@ export async function prepareChatImageAttachment(
 	}
 }
 
-export async function uploadUserAvatarImage(file: File) {
+type PublicAssetUploadOptions = {
+	onProgress?: (progress: PublicAssetUploadProgress) => void;
+	signal?: AbortSignal;
+};
+
+export async function uploadUserAvatarImage(
+	file: File,
+	options: PublicAssetUploadOptions = {},
+) {
 	const avatar = await normalizeAvatarImage(file);
 	return sdk.publicAssets.upload({
 		purpose: "user_avatar",
 		file: avatar.file,
 		mimeType: avatar.mimeType,
 		filename: `avatar.${avatar.extension}`,
+		onProgress: options.onProgress,
+		signal: options.signal,
 	});
 }
 
 export async function uploadSpaceAvatarImage(input: {
 	spaceId: string;
 	file: File;
+	onProgress?: (progress: PublicAssetUploadProgress) => void;
+	signal?: AbortSignal;
 }) {
 	const avatar = await normalizeAvatarImage(input.file);
 	return sdk.publicAssets.upload({
@@ -127,6 +142,8 @@ export async function uploadSpaceAvatarImage(input: {
 		file: avatar.file,
 		mimeType: avatar.mimeType,
 		filename: `avatar.${avatar.extension}`,
+		onProgress: input.onProgress,
+		signal: input.signal,
 	});
 }
 
@@ -136,6 +153,8 @@ export function uploadChatAttachmentImage(input: {
 	file: File;
 	mediaType: PublicAssetMimeType;
 	filename: string;
+	onProgress?: (progress: PublicAssetUploadProgress) => void;
+	signal?: AbortSignal;
 }) {
 	return sdk.publicAssets.uploadChatImageAttachment({
 		spaceId: input.spaceId,
@@ -143,6 +162,8 @@ export function uploadChatAttachmentImage(input: {
 		file: input.file,
 		mimeType: input.mediaType,
 		filename: input.filename,
+		onProgress: input.onProgress,
+		signal: input.signal,
 	});
 }
 
@@ -152,6 +173,8 @@ export function uploadChatAttachmentFile(input: {
 	sessionId?: string;
 	file: File;
 	filename?: string;
+	onProgress?: (progress: PublicAssetUploadProgress) => void;
+	signal?: AbortSignal;
 }) {
 	return sdk.publicAssets.uploadChatAttachment({
 		spaceId: input.spaceId,
@@ -159,5 +182,7 @@ export function uploadChatAttachmentFile(input: {
 		file: input.file,
 		mimeType: input.file.type || "application/octet-stream",
 		filename: input.filename ?? input.file.name,
+		onProgress: input.onProgress,
+		signal: input.signal,
 	});
 }

@@ -28,6 +28,7 @@ import {
 } from "../../space-fs-backend.js";
 import { archiveCompletionBestEffort, createCompletionId } from "../../completion-object-storage.js";
 import { resolveCompletionModel } from "../../llm/models.js";
+import { loadImageToTextConfig } from "../../llm/image-to-text-config.js";
 import {
   runCompletion,
   streamCompletionEvents,
@@ -66,7 +67,7 @@ const createCompletionSchema = z.object({
   messages: z.array(completionMessageSchema).min(1),
   temperature: z.number().finite().nullish(),
   maxTokens: z.number().finite().positive().nullish(),
-  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]).nullish(),
+  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).nullish(),
   stream: z.boolean().nullish(),
 });
 
@@ -408,6 +409,10 @@ router.post("/", async (c) => {
 
   const model = resolved.model;
   const registry = resolved.registry;
+  const imageToTextConfig = await loadImageToTextConfig(user.uuid).catch((error) => {
+    logger.warn("[Completion] image-to-text config unavailable; continuing without fallback", { error });
+    return null;
+  });
 
   // Pre-check balance before spending tokens. Fail-open if credit lookup errors.
   const decision = await billingUsageGate.evaluate({
@@ -434,6 +439,7 @@ router.post("/", async (c) => {
     thinkingLevel: body.thinkingLevel,
     userId: user.uuid,
     spaceId,
+    imageToTextConfig,
     signal: c.req.raw.signal,
   };
 
@@ -448,6 +454,17 @@ router.post("/", async (c) => {
       aborted: outcome.aborted,
       error: outcome.error,
     });
+    await Promise.all(outcome.imageToTextCalls.map((call, index) => call.status === "succeeded"
+      ? recordCompletionBilling({
+          completionId: `${completionId}:image-to-text:${call.messageIndex}:${call.imageIndex}:${index}`,
+          userId: user.uuid,
+          provider: call.provider,
+          model: call.model,
+          usage: call.usage,
+          aborted: false,
+          error: null,
+        })
+      : Promise.resolve()));
     archiveCompletionBestEffort({
       completionId,
       spaceId,
@@ -457,7 +474,8 @@ router.post("/", async (c) => {
       systemPromptPath,
       systemPrompt,
       request: {
-        messages,
+        messages: outcome.archivedMessages,
+        contextFallbacks: outcome.imageToTextCalls,
         temperature: body.temperature ?? null,
         maxTokens: body.maxTokens ?? null,
         thinkingLevel: body.thinkingLevel ?? null,
@@ -490,6 +508,7 @@ router.post("/", async (c) => {
       systemPromptPath,
       message: outcome.message,
       usage: outcome.usage,
+      ...(outcome.imageToTextCalls.length > 0 ? { contextFallbacks: outcome.imageToTextCalls } : {}),
     };
     return c.json(result);
   }
@@ -540,6 +559,9 @@ router.post("/", async (c) => {
             errorMessage: message,
           },
           usage: null,
+          totalUsage: null,
+          imageToTextCalls: [],
+          archivedMessages: messages,
           raw: null,
           aborted: Boolean(c.req.raw.signal.aborted),
           error: { code: "llm_error", message },

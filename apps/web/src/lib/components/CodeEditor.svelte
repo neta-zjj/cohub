@@ -41,6 +41,7 @@ const {
 	value = "",
 	language = "plaintext",
 	readonly = false,
+	allowDrawerSwipe = false,
 	initialPosition = null,
 	onInput,
 	onVisibleLinesChange,
@@ -48,6 +49,8 @@ const {
 	value: string;
 	language?: string;
 	readonly?: boolean;
+	/** Allow the mobile workspace drawer gesture to start from this editor. */
+	allowDrawerSwipe?: boolean;
 	initialPosition?: WorkspaceFilePosition | null;
 	onInput?: (v: string) => void;
 	onVisibleLinesChange?: (range: { start: number; end: number } | null) => void;
@@ -499,13 +502,16 @@ onDestroy(() => {
 </script>
 
 <!--
-  data-drawer-swipe-ignore: prevents the mobile drawer gesture system
-  from intercepting touches inside the editor (gutters, scroll areas, etc.).
-  touch-action: pan-x pan-y: overrides the inherited pan-y from
-  .mobile-drawer-gesture-surface so CodeMirror can handle horizontal
-  scrolling for long lines on mobile.
+  Interactive embeds keep native horizontal touch handling. Workspace file
+  editing opts into drawer swipes; wrapped lines keep vertical scrolling as
+  the editor's primary touch action in that mode.
 -->
-<div bind:this={container} class="cm-wrapper" data-drawer-swipe-ignore></div>
+<div
+  bind:this={container}
+  class="cm-wrapper"
+  class:cm-wrapper--drawer-swipe={allowDrawerSwipe}
+  data-drawer-swipe-ignore={allowDrawerSwipe ? undefined : ""}
+></div>
 
 <style>
   .cm-wrapper {
@@ -513,6 +519,9 @@ onDestroy(() => {
     min-height: 0;
     overflow: hidden;
     touch-action: pan-x pan-y;
+  }
+  .cm-wrapper--drawer-swipe {
+    touch-action: pan-y;
   }
   .cm-wrapper :global(.cm-editor) {
     height: 100%;

@@ -15,13 +15,13 @@ export async function publishModelsCacheFromFile(input: {
   userId?: string;
   sourceCheckpointId?: string | null;
 }): Promise<CachedModelsConfig> {
-  const redisKey = input.scope === "platform"
-    ? PLATFORM_MODELS_REDIS_KEY
-    : getUserModelsRedisKey(input.userId ?? "");
-
   if (input.scope === "user" && !input.userId) {
     throw new Error("userId is required when publishing user models cache");
   }
+
+  const redisKey = input.scope === "platform"
+    ? PLATFORM_MODELS_REDIS_KEY
+    : getUserModelsRedisKey(input.userId ?? "");
 
   let cached: CachedModelsConfig;
   try {

@@ -1,6 +1,8 @@
 import { createLogger } from "@cohub/infra/logging";
 import WebSocket from "ws";
-import type { QQApiClient } from "./api.js";
+import { ROOT_CONTEXT } from "@opentelemetry/api";
+import { getTracer, runInActiveSpan } from "@cohub/infra/tracing/propagator";
+import { QQApiError, type QQApiClient } from "./api.js";
 import {
   clearQQSessionState,
   getQQSessionState,
@@ -29,6 +31,20 @@ const INTENT_GROUP_AND_C2C = 1 << 25;
 const DEFAULT_INTENTS = INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGE | INTENT_GROUP_AND_C2C;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+const RECONNECT_CONFIG_ERROR_MS = 5 * 60_000;
+
+export function resolveQQReconnectDelay(error: unknown, reconnectAttempts: number, random = Math.random): number {
+  const exponentialDelay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempts);
+  if (error instanceof QQApiError && error.retryAfterMs != null) {
+    return Math.max(RECONNECT_BASE_MS, error.retryAfterMs);
+  }
+  if (error instanceof QQApiError && error.status >= 400 && error.status < 500) {
+    return RECONNECT_CONFIG_ERROR_MS;
+  }
+  return Math.floor(random() * exponentialDelay);
+}
+const WEBSOCKET_HANDSHAKE_TIMEOUT_MS = 15_000;
+const tracer = getTracer("cohub-gateway");
 
 type QQWebSocketTransportOptions = {
   channelId: string;
@@ -71,38 +87,46 @@ export class QQWebSocketTransport {
   private async connect(forceRefreshToken = false) {
     if (this.destroyed) return;
     try {
-      const gatewayUrl = await this.options.api.getGatewayUrl();
-      const ws = new WebSocket(gatewayUrl, { headers: { "User-Agent": "CohubGateway/1.0 QQBotProvider" } });
-      this.ws = ws;
-
-      ws.on("open", () => {
-        this.reconnectAttempts = 0;
-        logger.info(`[QQ:${this.options.channelId}] WebSocket connected`);
-      });
-
-      ws.on("message", (data) => {
-        void this.handleMessage(String(data)).catch((error) => logger.error(`[QQ:${this.options.channelId}] message handling failed`, error));
-      });
-
-      ws.on("close", (code, reason) => {
-        logger.warn(`[QQ:${this.options.channelId}] WebSocket closed`, { code, reason: reason.toString() });
-        if (!this.destroyed) {
-          void markChannelDegraded(this.options.channelId, `WebSocket closed: code=${code}`).catch(() => undefined);
-          this.scheduleReconnect();
-        }
-      });
-
-      ws.on("error", (error) => {
-        logger.error(`[QQ:${this.options.channelId}] WebSocket error`, error);
-        void markChannelDegraded(this.options.channelId, error).catch(() => undefined);
-      });
-
-      if (forceRefreshToken) await this.options.api.getAccessToken(true);
+      await runInActiveSpan(tracer, "gateway.qq.connect", {
+        attributes: { "gateway.channel_id": this.options.channelId, "gateway.provider": "qq" },
+      }, ROOT_CONTEXT, () => this.openWebSocket(forceRefreshToken));
     } catch (error) {
       logger.error(`[QQ:${this.options.channelId}] failed to connect`, error);
       void markChannelError(this.options.channelId, error).catch(() => undefined);
-      this.scheduleReconnect();
+      this.scheduleReconnect(error);
     }
+  }
+
+  private async openWebSocket(forceRefreshToken: boolean) {
+    const gatewayUrl = await this.options.api.getGatewayUrl();
+    const ws = new WebSocket(gatewayUrl, {
+      headers: { "User-Agent": "CohubGateway/1.0 QQBotProvider" },
+      handshakeTimeout: WEBSOCKET_HANDSHAKE_TIMEOUT_MS,
+    });
+    this.ws = ws;
+
+    ws.on("open", () => {
+      logger.info(`[QQ:${this.options.channelId}] WebSocket connected`);
+    });
+
+    ws.on("message", (data) => {
+      void this.handleMessage(String(data)).catch((error) => logger.error(`[QQ:${this.options.channelId}] message handling failed`, error));
+    });
+
+    ws.on("close", (code, reason) => {
+      logger.warn(`[QQ:${this.options.channelId}] WebSocket closed`, { code, reason: reason.toString() });
+      if (!this.destroyed) {
+        void markChannelDegraded(this.options.channelId, `WebSocket closed: code=${code}`).catch(() => undefined);
+        this.scheduleReconnect();
+      }
+    });
+
+    ws.on("error", (error) => {
+      logger.error(`[QQ:${this.options.channelId}] WebSocket error`, error);
+      void markChannelDegraded(this.options.channelId, error).catch(() => undefined);
+    });
+
+    if (forceRefreshToken) await this.options.api.getAccessToken(true);
   }
 
   private async handleMessage(raw: string) {
@@ -128,7 +152,7 @@ export class QQWebSocketTransport {
         logger.error(`[QQ:${this.options.channelId}] identify/resume failed`, error);
         void markChannelError(this.options.channelId, error).catch(() => undefined);
         this.ws?.close();
-        this.scheduleReconnect();
+        this.scheduleReconnect(error);
       }
       return;
     }
@@ -142,12 +166,12 @@ export class QQWebSocketTransport {
         }
         logger.info(`[QQ:${this.options.channelId}] WebSocket ready`, { sessionId: this.sessionId });
         await updateQQStatus(this.options.channelId, { lastReadyAt: Date.now() }).catch(() => undefined);
-        this.options.onReady?.();
+        this.markReady();
         return;
       }
       if (t === "RESUMED") {
         logger.info(`[QQ:${this.options.channelId}] WebSocket resumed`);
-        this.options.onReady?.();
+        this.markReady();
         return;
       }
       if (t) await this.options.onEvent({ eventType: t, data: d, seq: s });
@@ -218,9 +242,14 @@ export class QQWebSocketTransport {
     this.scheduleReconnect();
   }
 
-  private scheduleReconnect() {
+  private markReady() {
+    this.reconnectAttempts = 0;
+    this.options.onReady?.();
+  }
+
+  private scheduleReconnect(error?: unknown) {
     if (this.destroyed || this.reconnectTimer) return;
-    const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** this.reconnectAttempts);
+    const delay = resolveQQReconnectDelay(error, this.reconnectAttempts);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

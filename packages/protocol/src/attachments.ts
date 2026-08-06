@@ -21,12 +21,6 @@ export type ViewportVisibleLines = {
   end: number;
 };
 
-export type ViewportCamera = {
-  x: number;
-  y: number;
-  zoom: number;
-};
-
 export type ViewportVisibleRect = {
   x: number;
   y: number;
@@ -46,10 +40,11 @@ export type ViewportFileContext = {
   visibleLines?: ViewportVisibleLines;
 };
 
-export type ViewportCanvasContext = {
-  kind: "canvas";
+export type ViewportBoardContext = {
+  kind: "board";
   path: string;
-  camera?: ViewportCamera;
+  /** Board entity id; lets the agent inspect/render the board the user is viewing. */
+  boardId?: string;
   visibleRect?: ViewportVisibleRect;
   selectedNodes?: ViewportSelectedNode[];
 };
@@ -62,7 +57,7 @@ export type ViewportPortContext = {
 
 export type ViewportContext =
   | ViewportFileContext
-  | ViewportCanvasContext
+  | ViewportBoardContext
   | ViewportPortContext;
 
 export function viewportContextId(context: ViewportContext): string {
@@ -75,14 +70,6 @@ function formatVisibleLines(range: ViewportVisibleLines | undefined) {
   const start = Math.max(1, Math.floor(range.start));
   const end = Math.max(start, Math.floor(range.end));
   return start === end ? `L${start}` : `L${start}-${end}`;
-}
-
-function formatCamera(camera: ViewportCamera | undefined) {
-  if (!camera) return "";
-  const x = Math.round(camera.x);
-  const y = Math.round(camera.y);
-  const zoom = Math.round(camera.zoom * 100);
-  return `camera (${x}, ${y}) @ ${zoom}%`;
 }
 
 function formatVisibleRect(rect: ViewportVisibleRect | undefined) {
@@ -98,8 +85,7 @@ function formatSelectedNodes(nodes: ViewportSelectedNode[] | undefined) {
   if (!nodes || nodes.length === 0) return "";
   const labels = nodes.map((node) => {
     const title = node.title ? escapeViewportLabel(node.title) : "";
-    const id = escapeViewportLabel(node.id);
-    return title ? `${title} (${id})` : id;
+    return title || escapeViewportLabel(node.id);
   });
   return `selected: ${labels.join(", ")}`;
 }
@@ -110,7 +96,7 @@ export function formatViewportContextLabel(context: ViewportContext): string {
     const lines = formatVisibleLines(context.visibleLines);
     return lines ? `${name} ${lines}` : name;
   }
-  if (context.kind === "canvas") {
+  if (context.kind === "board") {
     const name = context.path.split("/").pop() || context.path;
     const selected = context.selectedNodes?.length
       ? ` · ${context.selectedNodes.length} selected`
@@ -126,14 +112,16 @@ export function formatViewportContextLine(context: ViewportContext): string {
     const suffix = lines ? ` (${lines})` : "";
     return `- file: \`${escapeAttachmentPath(context.path)}\`${suffix}`;
   }
-  if (context.kind === "canvas") {
+  if (context.kind === "board") {
     const details = [
-      formatCamera(context.camera),
-      formatVisibleRect(context.visibleRect),
+      ...(context.boardId
+        ? [`id: ${escapeViewportLabel(context.boardId)}`]
+        : []),
       formatSelectedNodes(context.selectedNodes),
+      formatVisibleRect(context.visibleRect),
     ].filter(Boolean);
     const suffix = details.length > 0 ? ` (${details.join("; ")})` : "";
-    return `- canvas: \`${escapeAttachmentPath(context.path)}\`${suffix}`;
+    return `- board: \`${escapeAttachmentPath(context.path)}\`${suffix}`;
   }
   const url = context.url?.trim();
   const suffix = url ? ` (${escapeAttachmentUrl(url)})` : "";
@@ -200,13 +188,7 @@ export function parseViewportContextsFromMeta(
       });
       continue;
     }
-    if (record.kind === "canvas" && typeof record.path === "string") {
-      const camera =
-        record.camera &&
-        typeof record.camera === "object" &&
-        !Array.isArray(record.camera)
-          ? (record.camera as Record<string, unknown>)
-          : null;
+    if (record.kind === "board" && typeof record.path === "string") {
       const visibleRect =
         record.visibleRect &&
         typeof record.visibleRect === "object" &&
@@ -230,19 +212,10 @@ export function parseViewportContextsFromMeta(
           })
         : undefined;
       result.push({
-        kind: "canvas",
+        kind: "board",
         path: record.path,
-        ...(camera &&
-        typeof camera.x === "number" &&
-        typeof camera.y === "number" &&
-        typeof camera.zoom === "number"
-          ? {
-              camera: {
-                x: camera.x,
-                y: camera.y,
-                zoom: camera.zoom,
-              },
-            }
+        ...(typeof record.boardId === "string" && record.boardId
+          ? { boardId: record.boardId }
           : {}),
         ...(visibleRect &&
         typeof visibleRect.x === "number" &&

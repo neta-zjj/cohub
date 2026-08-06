@@ -5,6 +5,7 @@ import {
 	type AccessState,
 	classifyAccessError,
 } from "$lib/access/access-state";
+import type { ModelThinkingLevel } from "$lib/model-catalog";
 import { sdk } from "$lib/sdk";
 import {
 	buildSpaceCronjobRoute,
@@ -23,7 +24,12 @@ import type { TaskRealtimeEvent } from "./task-run-detail-controller.svelte";
 import { mergeTaskRunList } from "./task-run-utils";
 
 export type CronjobMode = "create" | "detail";
-export type SelectedModel = { provider: string; id: string; name?: string };
+export type SelectedModel = {
+	provider: string;
+	id: string;
+	name?: string;
+	thinkingLevel?: ModelThinkingLevel | null;
+};
 
 function cronjobErrorMessage(error: unknown): AccessState {
 	return classifyAccessError(error);
@@ -92,16 +98,25 @@ export function createCronjobDetailController(options: {
 
 	function modelFromPayload(payload: unknown): SelectedModel | null {
 		if (!payload || typeof payload !== "object") return null;
-		const record = payload as { provider?: unknown; model?: unknown };
+		const record = payload as {
+			provider?: unknown;
+			model?: unknown;
+			thinkingLevel?: unknown;
+		};
 		if (typeof record.provider !== "string" || typeof record.model !== "string")
 			return null;
 		const catalogItem = modelsCatalog?.find(
 			(item) => item.provider === record.provider && item.id === record.model,
 		);
+		const thinkingLevel =
+			typeof record.thinkingLevel === "string"
+				? (record.thinkingLevel as SelectedModel["thinkingLevel"])
+				: null;
 		return {
 			provider: record.provider,
 			id: record.model,
 			name: catalogItem?.model.name as string | undefined,
+			...(thinkingLevel ? { thinkingLevel } : {}),
 		};
 	}
 
@@ -173,7 +188,11 @@ export function createCronjobDetailController(options: {
 			newModel = firstCatalogModel;
 	}
 
-	function selectModel(model: { provider: string; id: string }) {
+	function selectModel(model: {
+		provider: string;
+		id: string;
+		thinkingLevel?: SelectedModel["thinkingLevel"];
+	}) {
 		const catalogItem = modelsCatalog?.find(
 			(item) => item.provider === model.provider && item.id === model.id,
 		);
@@ -181,6 +200,7 @@ export function createCronjobDetailController(options: {
 			provider: model.provider,
 			id: model.id,
 			name: catalogItem?.model.name as string | undefined,
+			...(model.thinkingLevel ? { thinkingLevel: model.thinkingLevel } : {}),
 		} satisfies SelectedModel;
 		if (modelSelectorTarget === "new") newModel = selected;
 		else formModel = selected;
@@ -367,6 +387,9 @@ export function createCronjobDetailController(options: {
 				content: [{ type: "text", text: newPrompt.trim() }],
 				provider: newModel?.provider ?? null,
 				model: newModel?.id ?? null,
+				...(newModel?.thinkingLevel
+					? { thinkingLevel: newModel.thinkingLevel }
+					: {}),
 				schedule: {
 					mode: "repeat",
 					cronExpression: newExpression.trim(),

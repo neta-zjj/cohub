@@ -1,12 +1,36 @@
+export type * from "./board-awareness.js";
 export type * from "./stream.js";
 export type * from "./types.js";
 export {
+  BoardAwarenessClientPayloadSchema,
+  BoardAwarenessDrawPointSchema,
+  BoardAwarenessFrameSchema,
+  BoardAwarenessGestureSchema,
+  BoardAwarenessNodePreviewSchema,
+  BoardAwarenessPointSchema,
+  BoardAwarenessStateUpdateSchema,
+  BoardAwarenessUpdateSchema,
+} from "./board-awareness.js";
+export {
   AGENT_REALTIME_PATCH_CHANNEL,
   REALTIME_OUTBOUND_CHANNEL,
+  REALTIME_ROOM_EVENT_NAME_PATTERN,
+  REALTIME_ROOM_MAX_PAYLOAD_BYTES,
+  WS_BOARD_AWARENESS_CAPABILITY,
   WS_COMPACT_STREAM_CAPABILITY,
   WS_ROOM_SUBSCRIPTION_CAPABILITY,
+  WS_REALTIME_ROOM_CAPABILITY,
+  getRealtimeBoardRoom,
   getRealtimeSpaceRoom,
   getRealtimeUserRoom,
+  getRealtimeRoom,
+  getRealtimeRoomCodeKey,
+  getRealtimeRoomIndexKey,
+  getRealtimeRoomLeasesKey,
+  getRealtimeRoomMembersKey,
+  getRealtimeRoomMetaKey,
+  getRealtimeRoomRateKey,
+  getRealtimeRoomSequenceKey,
   getSessionTurnPatchStreamKey,
   normalizeRealtimeRooms,
   parseRealtimeRoom,

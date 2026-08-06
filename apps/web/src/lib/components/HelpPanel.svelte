@@ -55,6 +55,20 @@ const sections: ShortcutSection[] = [
 					["Ctrl", "Shift", "S"],
 				],
 			},
+			{
+				label: "Toggle left sidebar",
+				keys: [
+					["Ctrl", "⌥", "←"],
+					["Ctrl", "Alt", "←"],
+				],
+			},
+			{
+				label: "Toggle right sidebar",
+				keys: [
+					["Ctrl", "⌥", "→"],
+					["Ctrl", "Alt", "→"],
+				],
+			},
 			{ label: "Open help", keys: [["?"]] },
 		],
 	},

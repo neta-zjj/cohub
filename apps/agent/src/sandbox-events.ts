@@ -21,7 +21,7 @@ let subscriber: Redis | null = null;
 
 function getSubscriber() {
   if (subscriber) return subscriber;
-  subscriber = new Redis(env.REDIS_URL, { lazyConnect: true });
+  subscriber = new Redis(env.REDIS_URL, { lazyConnect: true, disableClientInfo: true });
   subscriber.on("error", (error) => {
     logger.warn("[SandboxEvents] Redis subscriber error", error);
   });

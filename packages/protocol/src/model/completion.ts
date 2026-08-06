@@ -8,7 +8,15 @@ export type CompletionMessage = {
   content: ContentBlock[];
 };
 
-export type CompletionThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+/**
+ * Unified thinking level across completions, session prompts, and model config.
+ * `off` disables reasoning; `minimal`–`high` use provider defaults;
+ * `xhigh`/`max` are opt-in and require an explicit `thinkingLevelMap` entry.
+ */
+export type ModelThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** @deprecated Use {@link ModelThinkingLevel} — kept for SDK compatibility. */
+export type CompletionThinkingLevel = ModelThinkingLevel;
 
 export type CreateSpaceCompletionInput = {
   /** Optional provider. Defaults to the first available model provider. */
@@ -38,6 +46,24 @@ export type CompletionAssistantMessage = {
   errorMessage?: string | null;
 };
 
+export type CompletionImageDescriptionFallback = {
+  type: "image_description";
+  messageIndex: number;
+  imageIndex: number;
+  provider: string;
+  model: string;
+  status: "succeeded" | "failed";
+  description?: {
+    text: string;
+    provider: string;
+    model: string;
+    generatedAt: string;
+  };
+  usage: CompletionUsage | null;
+  durationMs: number;
+  error?: string;
+};
+
 export type SpaceCompletionResult = {
   completionId: string;
   provider: string;
@@ -45,6 +71,8 @@ export type SpaceCompletionResult = {
   systemPromptPath: string | null;
   message: CompletionAssistantMessage;
   usage: CompletionUsage | null;
+  /** Newly generated fallbacks. Persist successful descriptions in the source image `_meta` for reuse. */
+  contextFallbacks?: CompletionImageDescriptionFallback[];
 };
 
 export type SpaceCompletionStreamEvent =
@@ -72,6 +100,7 @@ export type SpaceCompletionStreamEvent =
       completionId: string;
       message: CompletionAssistantMessage;
       usage: CompletionUsage | null;
+      contextFallbacks?: CompletionImageDescriptionFallback[];
     }
   | {
       type: "error";

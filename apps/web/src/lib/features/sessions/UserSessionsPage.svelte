@@ -6,6 +6,7 @@ import type {
 } from "@neta-art/cohub";
 import { onDestroy, onMount, untrack } from "svelte";
 import { goto } from "$app/navigation";
+import { resolveAppEntryRoute } from "$lib/app-entry";
 import {
 	createSessionChatHost,
 	subscribeSpaceChannel,
@@ -380,23 +381,17 @@ async function handleNewChat() {
 	try {
 		// Prefer cached list so the picker opens instantly; refresh inside palette.
 		const cached = getCachedSpaceList();
-		if (cached && cached.length === 0) {
-			await goto("/spaces/new");
+		if (cached?.length) {
+			openNewChatSpacePicker();
 			return;
 		}
-		if (!cached) {
-			try {
-				const spaces = await fetchSpaceListWithCache(
-					async () => await sdk.spaces.list(),
-				);
-				if (spaces.length === 0) {
-					await goto("/spaces/new");
-					return;
-				}
-			} catch (error) {
-				console.warn("[sessions] failed to load spaces for new chat", error);
-				// Still open the picker — local/IDB results may appear.
-			}
+
+		// No local spaces: GET /default resolves (and ensures Home for empty accounts).
+		// Avoid an extra list() RTT on cold empty accounts.
+		const dest = await resolveAppEntryRoute();
+		if (dest) {
+			await goto(dest);
+			return;
 		}
 		openNewChatSpacePicker();
 	} finally {

@@ -7,13 +7,15 @@ import { AGENT_REALTIME_PATCH_CHANNEL, REALTIME_OUTBOUND_CHANNEL, type RealtimeE
 import type { SpaceFsChangedPayload } from "@cohub/protocol/fs";
 import type { SpacePortsChangedPayload } from "@cohub/protocol/ports";
 import { injectTrace } from "@cohub/infra/tracing/propagator";
+import { isSpaceHookableEvent } from "@cohub/protocol";
 import { env } from "./env.js";
+import { enqueueSpaceHookFromEvent } from "./space-hooks.js";
 import { buildPatchOpsForContentDelta, getAppendPathForStreamEvent } from "./stream/patch-delta.js";
 import { createLogger } from "@cohub/infra/logging";
 
 
 const logger = createLogger({ serviceName: "cohub-agent" });
-export const redis = new Redis(env.REDIS_URL);
+export const redis = new Redis(env.REDIS_URL, { disableClientInfo: true });
 
 export const xaddWithMaxlen = async (client: Redis, streamKey: string, ...args: (string | number)[]) => {
   return client.xadd(streamKey, "MAXLEN", "~", 2000, ...args);
@@ -558,10 +560,11 @@ export async function publishRealtimeEnvelope(input: {
   requestId?: string | null;
   rooms?: RealtimeRoom[];
 }) {
-  const traceCarrier = injectTrace();
+  const id = randomUUID();
+  const timestamp = Date.now();
   const message = JSON.stringify({
-    id: randomUUID(),
-    timestamp: Date.now(),
+    id,
+    timestamp,
     domain: input.domain,
     type: input.type,
     requestId: input.requestId ?? null,
@@ -569,25 +572,37 @@ export async function publishRealtimeEnvelope(input: {
     sessionId: input.sessionId ?? null,
     rooms: input.rooms,
     payload: input.payload,
-    trace: traceCarrier,
+    trace: injectTrace(),
   });
-  await context.with(trace.deleteSpan(context.active()), () => redis.publish(REALTIME_OUTBOUND_CHANNEL, message));
+
+  // Always keep direct realtime publish for UI reliability and tracing.
+  // Hook enqueue runs concurrently — both are lightweight Redis ops.
+  const hookPromise = input.spaceId && isSpaceHookableEvent(input.type)
+    ? enqueueSpaceHookFromEvent({
+        id,
+        type: input.type,
+        timestamp,
+        spaceId: input.spaceId,
+        sessionId: input.sessionId ?? null,
+        payload: input.payload,
+      }, redis)
+    : Promise.resolve(null);
+
+  await Promise.all([
+    context.with(trace.deleteSpan(context.active()), () => redis.publish(REALTIME_OUTBOUND_CHANNEL, message)),
+    hookPromise,
+  ]);
 }
 
 export async function sendSpaceFsChanged(spaceId: string, payload: SpaceFsChangedPayload) {
   try {
-    const traceCarrier = injectTrace();
-    const message = JSON.stringify({
-      id: randomUUID(),
-      timestamp: Date.now(),
+    await publishRealtimeEnvelope({
       domain: "space",
       type: "space.fs.changed",
       spaceId,
       sessionId: null,
-      payload,
-      trace: traceCarrier,
+      payload: payload as unknown as Record<string, unknown>,
     });
-    await context.with(trace.deleteSpan(context.active()), () => redis.publish(REALTIME_OUTBOUND_CHANNEL, message));
   } catch (err) {
     logger.error("[Redis] Failed to send space fs changed event:", err);
   }

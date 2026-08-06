@@ -1,5 +1,6 @@
 import type { ContentBlock } from "../core/content.js";
 import type { Usage } from "../core/usage.js";
+import type { ModelThinkingLevel } from "./completion.js";
 
 export type SessionTurnStatus =
   | "queued"
@@ -28,6 +29,66 @@ export type SessionTurnIntermediateIndex = {
   toolCallsBaseObjectKey?: string | null;
 };
 
+export type ContextCompactionScope = "between_turns" | "within_turn";
+export type ContextCompactionTriggerReason = "threshold" | "overflow_recovery";
+
+export type ContextCompactionProviderCalls = {
+  total: number;
+  succeeded: number;
+  failed: number;
+};
+
+export type ContextCompactionMeta = {
+  version: 1;
+  compactionId: string;
+  scope: ContextCompactionScope;
+  ownerTurnId: string | null;
+  ordinalInTurn: number | null;
+  llmRound: number | null;
+  triggerReason: ContextCompactionTriggerReason;
+  contextWindow: number;
+  tokensBefore: number;
+  estimatedTokensAfter: number | null;
+  provider: string;
+  model: string;
+  keepRecentTokens: number;
+  summarizedMessageCount: number;
+  attemptCount: number;
+  providerCalls?: ContextCompactionProviderCalls;
+  /** Legacy metadata written before per-call outcomes were tracked. */
+  providerCallCount?: number;
+  isSplitTurn: boolean;
+  firstKeptEntryId: string;
+  archivePath: string | null;
+  compactedAt: string;
+  placement: {
+    beforeSessionEntryId: string;
+    beforeMessageId: string | null;
+  };
+};
+
+export type SessionTurnCompactionSummary = {
+  count: number;
+  summarizedMessageCountTotal: number;
+  attemptCountTotal: number;
+  usage: Usage | null;
+  durationMsTotal: number | null;
+  last: {
+    compactionId: string;
+    tokensBefore: number;
+    estimatedTokensAfter: number | null;
+    compactedAt: string;
+  } | null;
+};
+
+export type ImageToTextUsageSummary = {
+  callCount: number;
+  successCount: number;
+  errorCount: number;
+  sourceCount: number;
+  usage: Usage | null;
+};
+
 export type SessionTurnIntermediateSummary = {
   messageCount: number;
   toolCallCount: number;
@@ -35,11 +96,14 @@ export type SessionTurnIntermediateSummary = {
   durationMs?: number | null;
   lastMessageText?: string | null;
   hasError?: boolean;
+  compaction?: SessionTurnCompactionSummary | null;
+  imageToText?: ImageToTextUsageSummary | null;
 };
 
 export type StoredIntermediateMessage = {
   id: string;
   sessionId: string;
+  sequence?: number | null;
   role: "user" | "assistant" | "system";
   content: ContentBlock[];
   text: string | null;
@@ -116,6 +180,26 @@ export type SessionTurnIndexItem = {
   errorMessage: string | null;
 };
 
+export type SpaceTurnAuthorFilter = "any" | "self" | "others";
+
+export type SpaceTurnListItem = SessionTurnIndexItem & {
+  session: {
+    id: string;
+    title: string | null;
+    source: string | null;
+  };
+};
+
+export type SpaceTurnsResponse = {
+  turns: SpaceTurnListItem[];
+  snapshotAt: string;
+  snapshotCursor: string;
+  pageInfo: {
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+};
+
 export type SessionTurnRecord = {
   id: string;
   sessionId: string;
@@ -139,6 +223,8 @@ export type SessionTurnRecord = {
   intermediateIndex: SessionTurnIntermediateIndex | null;
   intermediateSummary: SessionTurnIntermediateSummary | null;
   meta: Record<string, unknown> | null;
+  /** Effective thinking level used for this turn (derived from meta.effectiveThinkingLevel). */
+  thinkingLevel?: ModelThinkingLevel | null;
   authorProfile?: SessionTurnAuthorProfile | null;
   startedAt: string | null;
   completedAt: string | null;

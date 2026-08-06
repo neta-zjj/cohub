@@ -12,7 +12,8 @@ Work commerce lets a published Work sell one-time products backed by Space-level
 - products, benefits, bindings, and orders live in billing
 - the Work hardcodes product keys and benefit keys
 - the outer host owns checkout confirmation and redirect
-- credits use a virtual `cohub_credit` token at business scope — creators never reason about token types
+- Space credits use a virtual `cohub_credit` token at business scope; creators never configure token types
+- Cohub Balance is an optional platform-managed product component with a global USD balance scope
 
 ## Benefit types
 
@@ -22,6 +23,39 @@ Work commerce lets a published Work sell one-time products backed by Space-level
 | `credits` | Grants a fixed amount of consumable credits when the bound product is purchased | Name, description, amount, optional expiry in days |
 
 Credit benefits are always business-scoped and one-time purchased. When an order is paid, billing automatically grants the credits to the customer — no fulfillment code is needed.
+
+## Space credits and Cohub Balance
+
+Space credits and Cohub Balance serve different purposes:
+
+| Value | Scope | Intended use |
+|---|---|---|
+| Space credits | The selling Space | Meter actions inside the Space's Works |
+| Cohub Balance | Global | Pay for eligible Cohub usage across Spaces |
+
+A product can include one platform-managed Cohub Balance component. The owner only chooses a whole-dollar `cohubBalanceUsd`; Cohub owns the underlying token type, scope, grant kind, and Benefit key.
+
+V1 rules:
+
+- `cohubBalanceUsd` must be a whole number of at least `$1`.
+- The product price must be at least the Balance amount at creation time.
+- Platform discounts, coupons, and redemptions may reduce the paid amount freely, including below the Balance amount. The buyer still receives the full Balance and the platform absorbs the difference.
+- Product price and Cohub Balance are immutable after creation. Create a new product to change either value.
+- A product can include at most one Cohub Balance component.
+- Billing is the only source of truth. Cohub stores no local copy of the Balance grant and performs no automatic payout in V1; reconciliation reads the authoritative Billing order.
+- V1 records the owner gross allocation in Billing for audit but does not pay it out automatically.
+
+Create a product with Cohub Balance through the CLI:
+
+```bash
+cohub spaces commerce products create \
+  --space <space-id> \
+  --name "Creator Pack" \
+  --amount-usd 8 \
+  --cohub-balance-usd 5
+```
+
+The same field is available as `cohubBalanceUsd` in `spaces.commerce.createProduct()`.
 
 ## Minimal closed loop
 
@@ -45,7 +79,7 @@ load → check balance → [has credits? consume] → [empty? purchase] → chec
 2. The Work calls `cohub.work.commerce.getEntitlements()` — returns feature entitlements **and** credit balance in one call.
 3. The user clicks Buy.
 4. The Work calls `cohub.work.commerce.purchase()`.
-5. The outer host creates the order and redirects to checkout.
+5. The outer host creates the order with a stable purchase attempt ID and redirects to checkout. Retries of the same attempt resolve to the original Billing order.
 6. The provider returns to the Work public URL with `cohub_checkout` and, when available, `cohub_order`.
 7. The Work calls `cohub.work.commerce.getCheckoutState()`.
 8. If an `orderId` is available, the Work calls `cohub.work.commerce.getOrder(orderId)`.
@@ -175,4 +209,4 @@ Keep the Work responsible for displaying products and balances, initiating purch
 
 See:
 
-- `docs/work-capability-lab/commerce-demo.md`
+- `docs/examples/work-capability-lab/commerce-demo.md`

@@ -1,33 +1,27 @@
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { AGENT_IMAGE_MAX_INPUT_BYTES } from "./image-normalizer.js";
 import { env } from "./env.js";
 
-const RELAXED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "image/tiff", "application/octet-stream"]);
+const RELAXED_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+  "image/tiff",
+  "application/octet-stream",
+]);
 
-let publicAssetS3Client: S3Client | null = null;
-
-const getPublicAssetS3Client = () => {
-  if (!env.PUBLIC_ASSET_OSS_BUCKET) return null;
-  if (!env.PUBLIC_ASSET_OSS_ENDPOINT) return null;
-  if (!env.PUBLIC_ASSET_OSS_ACCESS_KEY_ID || !env.PUBLIC_ASSET_OSS_SECRET_ACCESS_KEY) return null;
-  publicAssetS3Client ??= new S3Client({
-    endpoint: env.PUBLIC_ASSET_OSS_ENDPOINT,
-    region: env.PUBLIC_ASSET_OSS_REGION,
-    forcePathStyle: false,
-    credentials: {
-      accessKeyId: env.PUBLIC_ASSET_OSS_ACCESS_KEY_ID,
-      secretAccessKey: env.PUBLIC_ASSET_OSS_SECRET_ACCESS_KEY,
-    },
-  });
-  return publicAssetS3Client;
+const decodeObjectKeyPath = (value: string) => {
+  try {
+    return value
+      .split("/")
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part))
+      .join("/");
+  } catch {
+    return null;
+  }
 };
-
-const decodeObjectKeyPath = (value: string) =>
-  value
-    .split("/")
-    .filter(Boolean)
-    .map((part) => decodeURIComponent(part))
-    .join("/");
 
 const objectKeyFromBaseUrl = (url: URL, baseValue: string | undefined) => {
   if (!baseValue) return null;
@@ -49,6 +43,11 @@ const isChatAttachmentObjectKey = (objectKey: string) => {
   return objectKey.startsWith(prefix);
 };
 
+const trustedPublicAssetBases = () => [
+  env.PUBLIC_ASSET_CDN_BASE_URL,
+  env.CHAT_ATTACHMENT_PUBLIC_BASE_URL,
+];
+
 export const publicAssetObjectKeyFromUrl = (value: string) => {
   let url: URL;
   try {
@@ -56,10 +55,12 @@ export const publicAssetObjectKeyFromUrl = (value: string) => {
   } catch {
     return null;
   }
-  if (url.protocol !== "https:") return null;
-  const objectKey = objectKeyFromBaseUrl(url, env.PUBLIC_ASSET_CDN_BASE_URL);
-  if (!objectKey || !isChatAttachmentObjectKey(objectKey)) return null;
-  return objectKey;
+  if (url.protocol !== "https:" || url.username || url.password) return null;
+  for (const baseUrl of trustedPublicAssetBases()) {
+    const objectKey = objectKeyFromBaseUrl(url, baseUrl);
+    if (objectKey && isChatAttachmentObjectKey(objectKey)) return objectKey;
+  }
+  return null;
 };
 
 const bodyToBuffer = async (body: unknown, maxBytes: number) => {
@@ -86,25 +87,25 @@ const bodyToBuffer = async (body: unknown, maxBytes: number) => {
   return null;
 };
 
-export async function readPublicAssetImageUrl(url: string) {
-  const objectKey = publicAssetObjectKeyFromUrl(url);
-  if (!objectKey) return null;
-  const client = getPublicAssetS3Client();
-  if (!client || !env.PUBLIC_ASSET_OSS_BUCKET) return null;
+export async function readPublicAssetImageUrl(value: string) {
+  if (!publicAssetObjectKeyFromUrl(value)) return null;
 
   const abortController = new AbortController();
-  const timeout = setTimeout(() => abortController.abort(), env.PUBLIC_ASSET_OSS_TIMEOUT_MS);
+  const timeout = setTimeout(() => abortController.abort(), env.PUBLIC_ASSET_DOWNLOAD_TIMEOUT_MS);
   try {
-    const result = await client.send(new GetObjectCommand({
-      Bucket: env.PUBLIC_ASSET_OSS_BUCKET,
-      Key: objectKey,
-    }), { abortSignal: abortController.signal });
-    const mimeType = result.ContentType?.split(";")[0]?.trim().toLowerCase() ?? "application/octet-stream";
-    if (mimeType && !RELAXED_IMAGE_MIME_TYPES.has(mimeType) && !mimeType.startsWith("image/")) return null;
-    if (result.ContentLength && result.ContentLength > AGENT_IMAGE_MAX_INPUT_BYTES) return null;
-    const buffer = await bodyToBuffer(result.Body, AGENT_IMAGE_MAX_INPUT_BYTES);
-    if (!buffer) return null;
-    return { data: buffer, mimeType };
+    const response = await fetch(value, {
+      method: "GET",
+      redirect: "manual",
+      signal: abortController.signal,
+    });
+    if (!response.ok || response.status !== 200) return null;
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > AGENT_IMAGE_MAX_INPUT_BYTES) return null;
+    const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()
+      ?? "application/octet-stream";
+    if (!RELAXED_IMAGE_MIME_TYPES.has(mimeType) && !mimeType.startsWith("image/")) return null;
+    const data = await bodyToBuffer(response.body, AGENT_IMAGE_MAX_INPUT_BYTES);
+    return data ? { data, mimeType } : null;
   } finally {
     clearTimeout(timeout);
   }

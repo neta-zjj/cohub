@@ -7,15 +7,9 @@ import {
 	PanelRightOpen,
 	X,
 } from "lucide-svelte";
-
-type PreviewTab = {
-	kind: "file" | "canvas" | "port";
-	key: string;
-	label: string;
-	title: string;
-	dirty?: boolean;
-	active: boolean;
-};
+import type { Snippet } from "svelte";
+import PreviewSyncStatus from "./PreviewSyncStatus.svelte";
+import type { PreviewTab } from "./preview-tabs";
 
 type Props = {
 	tabs: PreviewTab[];
@@ -27,6 +21,11 @@ type Props = {
 	treeVisible?: boolean;
 	/** Collapse/expand file tree without closing preview. */
 	onToggleTree?: () => void;
+	/**
+	 * High-priority trailing controls (e.g. Focus/Float). Always visible to the
+	 * left of the tree toggle; tab overflow scrolls instead of covering these.
+	 */
+	trailing?: Snippet;
 };
 
 let {
@@ -36,16 +35,21 @@ let {
 	embedded = false,
 	treeVisible = true,
 	onToggleTree,
+	trailing,
 }: Props = $props();
 
 const kindIcon = {
 	file: FileIcon,
-	canvas: MousePointer2,
+	board: MousePointer2,
 	port: Globe,
 } as const;
+
+const showChrome = $derived(
+	tabs.length > 0 || Boolean(onToggleTree) || Boolean(trailing),
+);
 </script>
 
-{#if tabs.length > 0 || onToggleTree}
+{#if showChrome}
 	<div
 		class="preview-tabs"
 		class:preview-tabs--embedded={embedded}
@@ -68,7 +72,9 @@ const kindIcon = {
 							<Icon class="h-3 w-3" />
 						</span>
 						<span class="truncate">{tab.label}</span>
-						{#if tab.dirty}<span class="preview-tab-dot" aria-label="Unsaved changes"></span>{/if}
+						{#if tab.syncStatus}
+							<PreviewSyncStatus status={tab.syncStatus} />
+						{/if}
 					</button>
 					<button
 						type="button"
@@ -81,22 +87,28 @@ const kindIcon = {
 				</div>
 			{/each}
 		</div>
-		{#if onToggleTree}
-			<button
-				type="button"
-				class="preview-tree-toggle"
-				title={treeVisible ? "Collapse file tree" : "Show file tree"}
-				aria-label={treeVisible ? "Collapse file tree" : "Show file tree"}
-				aria-pressed={treeVisible}
-				onclick={onToggleTree}
-			>
-				{#if treeVisible}
-					<PanelRightClose class="h-3.5 w-3.5" />
-				{:else}
-					<PanelRightOpen class="h-3.5 w-3.5" />
-				{/if}
-			</button>
-		{/if}
+
+		<div class="preview-tabs-trailing">
+			{#if trailing}
+				{@render trailing()}
+			{/if}
+			{#if onToggleTree}
+				<button
+					type="button"
+					class="preview-tree-toggle"
+					title={treeVisible ? "Collapse file tree" : "Show file tree"}
+					aria-label={treeVisible ? "Collapse file tree" : "Show file tree"}
+					aria-pressed={treeVisible}
+					onclick={onToggleTree}
+				>
+					{#if treeVisible}
+						<PanelRightClose class="h-3.5 w-3.5" />
+					{:else}
+						<PanelRightOpen class="h-3.5 w-3.5" />
+					{/if}
+				</button>
+			{/if}
+		</div>
 	</div>
 {/if}
 
@@ -111,7 +123,7 @@ const kindIcon = {
 		overflow: hidden;
 		border-bottom: 1px solid var(--border-subtle);
 		background: var(--bg-surface);
-		padding: 0 0.25rem 0 0.25rem;
+		padding: 0 0.25rem;
 	}
 
 	.preview-tabs--embedded {
@@ -122,6 +134,7 @@ const kindIcon = {
 		padding: 0;
 	}
 
+	/* Tabs scroll first; trailing actions stay pinned. */
 	.preview-tabs-scroll {
 		display: flex;
 		min-width: 0;
@@ -130,6 +143,15 @@ const kindIcon = {
 		gap: 1px;
 		overflow-x: auto;
 		scrollbar-width: thin;
+	}
+
+	.preview-tabs-trailing {
+		display: inline-flex;
+		flex: 0 0 auto;
+		align-items: center;
+		align-self: stretch;
+		gap: 2px;
+		margin-left: 2px;
 	}
 
 	.preview-tab-shell {
@@ -187,14 +209,6 @@ const kindIcon = {
 		opacity: 1;
 	}
 
-	.preview-tab-dot {
-		height: 0.375rem;
-		width: 0.375rem;
-		flex: 0 0 auto;
-		border-radius: 9999px;
-		background: var(--warning-soft);
-	}
-
 	.preview-tab-close {
 		display: inline-flex;
 		flex: 0 0 auto;
@@ -229,10 +243,8 @@ const kindIcon = {
 		height: 1.75rem;
 		width: 1.75rem;
 		flex: 0 0 auto;
-		align-self: center;
 		align-items: center;
 		justify-content: center;
-		margin-left: 2px;
 		border: 0;
 		border-radius: 6px;
 		background: transparent;
@@ -244,5 +256,15 @@ const kindIcon = {
 	.preview-tree-toggle:hover {
 		background: var(--bg-hover);
 		color: var(--text-secondary);
+	}
+
+	@media (pointer: coarse) {
+		.preview-tree-toggle {
+			height: 2rem;
+			width: 2rem;
+		}
+		.preview-tab-close {
+			opacity: 0.55;
+		}
 	}
 </style>

@@ -25,14 +25,15 @@ const { kind }: { kind: Kind } = $props();
 		<div class="ring ring1"></div>
 		<div class="ring ring2"></div>
 		<div class="core">C</div>
-		<span class="sat sat1" title="Discord">
-			<svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 4a19 19 0 0 0-4.9-1.5l-.2.5A17 17 0 0 1 12 3c-.8 0-1.6.1-2 .1l-.2-.5A19 19 0 0 0 4 4 20 20 0 0 0 1 18a19 19 0 0 0 5.7 2l.5-1.1a12 12 0 0 1-1.9-.9l.4-.3a13 13 0 0 0 12.6 0l.4.3a12 12 0 0 1-1.9.9L18 20a19 19 0 0 0 5.7-2A20 20 0 0 0 20 4M9 14c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.8 2-1.7 2m6 0c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.8 2-1.7 2" /></svg>
-		</span>
-		<span class="sat sat2" title="WeChat">微</span>
-		<span class="sat sat3" title="Feishu">飞</span>
-		<span class="sat sat4" title="CLI">
+		<span class="sat sat1" title="Web">Web</span>
+		<span class="sat sat2" title="CLI · local sandbox">
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8" /></svg>
 		</span>
+		<span class="sat sat3" title="API">API</span>
+		<span class="sat sat4" title="Scheduled">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+		</span>
+		<div class="cli-line"><span class="cli-prompt">$</span> cohub sandbox up ./app</div>
 	{:else if kind === "work"}
 		<div class="browser">
 			<div class="bbar"><i></i><i></i><i></i><span class="url">cohub.run/you/space/w/mini-game</span></div>
@@ -40,23 +41,34 @@ const { kind }: { kind: Kind } = $props();
 				<div class="app">
 					<div class="t"></div>
 					<div class="btnrow"><span class="b b1"></span><span class="b b2"></span></div>
+					<div class="auth-row">
+						<span class="auth-pill"><span class="pdot"></span> viewer authorized</span>
+						<span class="scope-mini">session.prompt</span>
+					</div>
 				</div>
-				<span class="publish"><span class="pdot"></span> published</span>
+				<span class="publish"><span class="pdot"></span> live work</span>
 			</div>
 		</div>
 	{:else if kind === "fork"}
-		<svg class="graph" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid meet">
-			<path class="edge" d="M40 90 H120" />
-			<path class="edge" d="M120 90 H210" />
-			<path class="edge eb" d="M120 90 C160 90 160 40 210 40" />
-			<path class="edge eb" d="M120 90 C160 90 160 140 210 140" />
-			<circle class="node" cx="40" cy="90" r="10" />
-			<circle class="node" cx="120" cy="90" r="10" />
-			<circle class="node nb" cx="210" cy="40" r="10" />
-			<circle class="node" cx="210" cy="90" r="10" />
-			<circle class="node nb" cx="210" cy="140" r="10" />
-		</svg>
-		<div class="mention">reference <span class="at">@northlands</span> and build a variant</div>
+		<div class="fork-split">
+			<div class="fork-col">
+				<div class="fork-label"><span class="at">@space</span> light</div>
+				<div class="mention compact">attach <span class="at">@northlands</span> to this turn</div>
+			</div>
+			<div class="fork-vs">vs</div>
+			<div class="fork-col">
+				<div class="fork-label soft">Fork heavy</div>
+				<svg class="graph compact" viewBox="0 0 200 90" preserveAspectRatio="xMidYMid meet">
+					<path class="edge" d="M24 45 H80" />
+					<path class="edge eb" d="M80 45 C110 45 110 18 150 18" />
+					<path class="edge eb" d="M80 45 C110 45 110 72 150 72" />
+					<circle class="node" cx="24" cy="45" r="7" />
+					<circle class="node" cx="80" cy="45" r="7" />
+					<circle class="node nb" cx="150" cy="18" r="7" />
+					<circle class="node nb" cx="150" cy="72" r="7" />
+				</svg>
+			</div>
+		</div>
 	{/if}
 </div>
 
@@ -289,13 +301,14 @@ const { kind }: { kind: Kind } = $props();
 	.sat1 {
 		top: calc(50% - 95px);
 		left: calc(50% - 17px);
-		color: var(--provider-discord);
+		color: var(--brand);
 		animation: chpulse 4s infinite;
+		font-size: 10px;
 	}
 	.sat2 {
 		top: calc(50% - 17px);
 		left: calc(50% + 78px);
-		color: var(--provider-wechat);
+		color: var(--text-secondary);
 		animation: chpulse 4s infinite 1s;
 	}
 	.sat3 {
@@ -303,12 +316,33 @@ const { kind }: { kind: Kind } = $props();
 		left: calc(50% - 17px);
 		color: var(--provider-feishu);
 		animation: chpulse 4s infinite 2s;
+		font-size: 10px;
 	}
 	.sat4 {
 		top: calc(50% - 17px);
 		left: calc(50% - 112px);
 		color: var(--text-secondary);
 		animation: chpulse 4s infinite 3s;
+	}
+	.cli-line {
+		position: absolute;
+		left: 16px;
+		right: 16px;
+		bottom: 14px;
+		z-index: 3;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		border-radius: 10px;
+		border: 1px solid var(--border-subtle);
+		background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+		padding: 7px 10px;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+	.cli-prompt {
+		color: var(--brand);
 	}
 
 	/* ---- work ---- */
@@ -380,6 +414,31 @@ const { kind }: { kind: Kind } = $props();
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-elevated);
 	}
+	.auth-row {
+		margin-top: 12px;
+		display: flex;
+		justify-content: center;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.auth-pill,
+	.scope-mini {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		border-radius: 999px;
+		border: 1px solid var(--brand-border);
+		background: var(--brand-muted);
+		padding: 3px 8px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		color: var(--brand);
+	}
+	.scope-mini {
+		border-color: var(--border-subtle);
+		background: color-mix(in srgb, var(--bg-elevated) 45%, transparent);
+		color: var(--text-tertiary);
+	}
 	.publish {
 		position: absolute;
 		right: 12px;
@@ -406,11 +465,48 @@ const { kind }: { kind: Kind } = $props();
 
 	/* ---- fork ---- */
 	.art-fork {
-		padding: 22px;
+		padding: 18px;
+		display: grid;
+		place-items: center;
+	}
+	.fork-split {
+		display: grid;
+		grid-template-columns: 1fr auto 1fr;
+		gap: 10px;
+		align-items: center;
+		width: 100%;
+		height: 100%;
+	}
+	.fork-col {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		min-width: 0;
+	}
+	.fork-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+	.fork-label.soft {
+		color: var(--text-tertiary);
+	}
+	.fork-vs {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--text-placeholder);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
 	}
 	.graph {
 		width: 100%;
 		height: 100%;
+	}
+	.graph.compact {
+		height: 88px;
 	}
 	.node {
 		fill: var(--bg-elevated);
@@ -431,19 +527,19 @@ const { kind }: { kind: Kind } = $props();
 		animation: dash 1.2s linear infinite;
 	}
 	.mention {
-		position: absolute;
-		left: 22px;
-		bottom: 22px;
-		right: 22px;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		flex-wrap: wrap;
+		gap: 6px;
 		border-radius: 10px;
 		border: 1px solid var(--border-subtle);
 		background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
 		padding: 8px 10px;
 		font-size: 12px;
 		color: var(--text-tertiary);
+	}
+	.mention.compact {
+		font-size: 11.5px;
 	}
 	.at {
 		border-radius: 5px;

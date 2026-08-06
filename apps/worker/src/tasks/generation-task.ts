@@ -132,20 +132,6 @@ function providerStatusMessage(status: number | undefined): string | null {
   return "Generation provider request failed";
 }
 
-function mergeCohubMeta(
-  meta: Record<string, unknown> | undefined,
-  cohub: Record<string, unknown>,
-): Record<string, unknown> {
-  const existingCohub = meta?.cohub;
-  return {
-    ...(meta ?? {}),
-    cohub: {
-      ...(existingCohub && typeof existingCohub === "object" && !Array.isArray(existingCohub) ? existingCohub : {}),
-      ...cohub,
-    },
-  };
-}
-
 function normalizeGenerationError(error: unknown): Error {
   if (error instanceof GenerationValidationError) {
     return new Error(`Invalid generation input: ${error.message}`);
@@ -352,12 +338,6 @@ registerTask(GENERATION_TASK_TYPE, async (job: Job, context) => {
   if (!userId) throw new Error("Invalid generation task payload: userId is required");
   const data = parseGenerationTaskData(payload.data);
   const taskRunId = context?.taskRunId ?? String(job.id ?? "");
-  const meta = mergeCohubMeta(data.meta, {
-    taskRunId,
-    spaceId,
-    sessionId: sessionId ?? null,
-    turnId: turnId ?? null,
-  });
 
   try {
     const declaration = await loader.loadGenerationDeclaration(userId, data.model);
@@ -412,7 +392,7 @@ registerTask(GENERATION_TASK_TYPE, async (job: Job, context) => {
       model: data.model,
       content: data.content,
       parameters: data.parameters,
-      meta,
+      meta: data.meta,
     });
 
     const usageType = resolveGenerationUsageType({
@@ -461,7 +441,7 @@ registerTask(GENERATION_TASK_TYPE, async (job: Job, context) => {
       ...(result.requestId !== undefined ? { requestId: result.requestId } : {}),
       ...(result.cost !== undefined ? { cost: result.cost } : {}),
       billing,
-      meta,
+      ...(data.meta ? { meta: data.meta } : {}),
     } satisfies GenerationTaskResult;
   } catch (error) {
     throw normalizeGenerationError(error);

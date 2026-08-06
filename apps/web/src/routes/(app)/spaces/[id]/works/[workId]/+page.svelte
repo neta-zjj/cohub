@@ -11,7 +11,7 @@ const props = $props<{
 		cronjobId?: string | null;
 		taskId?: string | null;
 		workId?: string | null;
-		previewKind?: "file" | "canvas" | "port" | null;
+		previewKind?: "file" | "board" | "port" | null;
 		previewKey?: string | null;
 	};
 }>();

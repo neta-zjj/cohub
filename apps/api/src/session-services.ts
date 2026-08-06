@@ -15,6 +15,7 @@ import { getSpaceSessionById, getSpaceById } from "./space-sessions.js";
 import { touchSpaceActivity } from "./space-activity.js";
 import { dispatchLabelAssignmentsUpdated, dispatchSessionUpdated } from "./realtime-events.js";
 import { createLogger } from "@cohub/infra/logging";
+import { validatePromptModel } from "./llm/models.js";
 
 
 const logger = createLogger({ serviceName: "cohub-api" });
@@ -71,6 +72,7 @@ export function getSessionDomainServices(input?: {
     promptTemplateService: input?.promptTemplateService ?? defaultPromptTemplateService,
     skillService: input?.skillService ?? defaultSkillService,
     billingUsageGate,
+    validatePromptModel: ({ userId, provider, model }) => validatePromptModel({ userId, provider, model }),
     sandboxRecovery: {
       maybeRecoverForPrompt: async ({ spaceId, userId, source }) => {
         const sandbox = await sandboxLifecycle.getSandbox(spaceId);

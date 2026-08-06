@@ -1,13 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import type { SpaceFsChangedPayload } from "@cohub/protocol/fs";
 import { ensureInternalRequest, requireValidId } from "../../lib/middleware.js";
-import { dispatchRealtimeEvent } from "../../channels.js";
-import { enqueueFsCdnWarmForChanges } from "../../space-fs-cdn-prewarm.js";
-import { createLogger } from "@cohub/infra/logging";
+import { dispatchSpaceFsChanged } from "../../space-events.js";
 
-
-const logger = createLogger({ serviceName: "cohub-api" });
 const router = new Hono();
 
 router.post("/:spaceId/fs-changed", async (c) => {
@@ -20,21 +15,7 @@ router.post("/:spaceId/fs-changed", async (c) => {
   const payload = await c.req.json<SpaceFsChangedPayload>().catch(() => null);
   if (!payload || !Array.isArray(payload.changes)) return c.json({ message: "fs payload is required" }, 400);
 
-  await Promise.all([
-    dispatchRealtimeEvent({
-      id: randomUUID(),
-      timestamp: Date.now(),
-      domain: "space",
-      type: "space.fs.changed",
-      spaceId,
-      sessionId: null,
-      payload,
-    }),
-    enqueueFsCdnWarmForChanges(spaceId, payload.changes).catch((error) => {
-      logger.error("[SpaceFS] failed to enqueue internal CDN prewarm:", error);
-    }),
-  ]);
-
+  await dispatchSpaceFsChanged(spaceId, payload);
   return c.json({ ok: true });
 });
 

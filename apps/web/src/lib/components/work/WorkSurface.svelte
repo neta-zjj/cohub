@@ -1,20 +1,21 @@
 <script lang="ts">
-import type { WorkRecord, WorkTargetType } from "@neta-art/cohub";
-import { onDestroy, onMount, untrack } from "svelte";
+import type { WorkContent, WorkRecord } from "@neta-art/cohub";
+import { onMount, untrack } from "svelte";
 import { page } from "$app/state";
 import SpaceAvatar from "$lib/components/SpaceAvatar.svelte";
 import UserIdentity from "$lib/components/UserIdentity.svelte";
+import WorkBoardSurface from "$lib/components/work/WorkBoardSurface.svelte";
+import WorkFileSurface from "$lib/components/work/WorkFileSurface.svelte";
 import { readWorkCheckoutState } from "$lib/components/work/work-checkout-state";
 import { createWorkBridgeHost } from "$lib/features/work/bridge-host.svelte";
 import WorkAuthorizeDialog from "$lib/features/work/WorkAuthorizeDialog.svelte";
 import WorkPurchaseDialog from "$lib/features/work/WorkPurchaseDialog.svelte";
 import { parseNewChatBackgroundAction } from "$lib/new-chat-background-bridge";
 import { emitSpaceConfigBackgroundAction } from "$lib/space-config";
+import { workDisplayTitle } from "$lib/work-page-meta";
+import { buildWorkIframeUrl, type WorkLaunchState } from "$lib/work-url";
 
 type WorkSurfaceMode = "page" | "background";
-type WorkContent =
-	| { url: string; targetType: "port"; port: string }
-	| { url: string; targetType: WorkTargetType; path: string };
 
 type WorkSpace = {
 	id: string;
@@ -48,6 +49,7 @@ type Props = {
 	owner?: WorkOwner;
 	content?: WorkContent | null;
 	mode?: WorkSurfaceMode;
+	launchState?: WorkLaunchState | null;
 };
 
 const {
@@ -56,6 +58,7 @@ const {
 	owner = null,
 	content = null,
 	mode = "page",
+	launchState = null,
 }: Props = $props();
 
 let frame: HTMLIFrameElement | null = $state(null);
@@ -63,12 +66,25 @@ let bridgeReady = $state(false);
 
 const isBackground = $derived(mode === "background");
 const spaceName = $derived(space?.name || space?.slug || "Space");
+const workTitle = $derived(workDisplayTitle(work.meta, work.slug));
 const publisherName = $derived(owner?.displayName ?? "Cohub");
 const publisherAvatarUrl = $derived(owner?.avatarUrl?.trim() || null);
 const hideCohubBar = $derived(work.meta?.presentation?.hideCohubBar === true);
-const iframeSrc = $derived.by(
-	() => content?.url ?? (work.targetType === "port" ? work.targetRef : ""),
+// Board and file Works render natively; only web and port Works are embedded.
+const boardContent = $derived(content?.kind === "board" ? content : null);
+const fileContent = $derived(content?.kind === "file" ? content : null);
+const embeddedContent = $derived(
+	content && (content.kind === "web" || content.kind === "port")
+		? content
+		: null,
 );
+const nativeContent = $derived(boardContent ?? fileContent);
+const iframeSrc = $derived.by(() => {
+	const contentUrl =
+		embeddedContent?.url ??
+		(!content && work.targetType === "port" ? work.targetRef : "");
+	return buildWorkIframeUrl(contentUrl, launchState);
+});
 function isAllowedFrameOrigin(origin: string, targetType: string) {
 	try {
 		const { protocol, hostname } = new URL(origin);
@@ -92,7 +108,9 @@ const frameOrigin = $derived.by(() => {
 	}
 });
 const hasFrameSource = $derived(Boolean(iframeSrc && frameOrigin));
-const shouldRenderFrame = $derived(Boolean(bridgeReady && hasFrameSource));
+const shouldRenderFrame = $derived(
+	Boolean(bridgeReady && hasFrameSource && !nativeContent),
+);
 const frameReplyTarget = $derived(frameOrigin ?? page.url.origin);
 const framePreconnectOrigin = $derived.by(() => {
 	if (!frameOrigin || frameOrigin === page.url.origin) return null;
@@ -136,25 +154,30 @@ async function onFrameMessage(event: MessageEvent) {
 onMount(() => {
 	window.addEventListener("message", onFrameMessage);
 	bridgeReady = true;
+	return () => window.removeEventListener("message", onFrameMessage);
 });
-onDestroy(() => window.removeEventListener("message", onFrameMessage));
 </script>
 
 <svelte:head>
-	{#if mode === "page"}
-		<title>{work.slug} · Cohub</title>
-	{/if}
 	{#if framePreconnectOrigin}
 		<link rel="preconnect" href={framePreconnectOrigin} crossorigin="anonymous" />
 	{/if}
 </svelte:head>
 
 <div class={isBackground ? "work-surface background" : "work-surface page"}>
-	{#if shouldRenderFrame}
+	{#if boardContent}
+		<div class="work-native">
+			<WorkBoardSurface content={boardContent} />
+		</div>
+	{:else if fileContent}
+		<div class="work-native">
+			<WorkFileSurface content={fileContent} />
+		</div>
+	{:else if shouldRenderFrame}
 		<iframe
 			bind:this={frame}
 			class="work-frame"
-			title={work.slug}
+			title={workTitle}
 			sandbox={frameSandbox}
 			src={iframeSrc}
 		></iframe>
@@ -172,7 +195,7 @@ onDestroy(() => window.removeEventListener("message", onFrameMessage));
 						<SpaceAvatar name={spaceName} profile={space?.publicProfile} size="xs" class="translate-y-0" />
 						<span class="min-w-0 truncate font-medium leading-none text-text-secondary">{spaceName}</span>
 						<span class="hidden shrink-0 leading-none text-text-tertiary sm:inline">/</span>
-						<span class="hidden min-w-0 truncate font-medium leading-none text-text-primary sm:inline">{work.slug}</span>
+						<span class="hidden min-w-0 truncate font-medium leading-none text-text-primary sm:inline">{workTitle}</span>
 					</div>
 				</div>
 				<div class="flex shrink-0 items-center gap-2">
@@ -211,7 +234,7 @@ onDestroy(() => window.removeEventListener("message", onFrameMessage));
 	pending={host.pendingAuth}
 	error={host.authError}
 	saving={host.authSaving}
-	workName={work.slug}
+	workName={workTitle}
 	authorName={owner?.displayName}
 	onConfirm={() => void host.confirmAuth()}
 	onCancel={host.cancelAuth}
@@ -241,6 +264,16 @@ onDestroy(() => window.removeEventListener("message", onFrameMessage));
 		border: 0;
 		background: var(--bg-primary);
 		user-select: none;
+	}
+
+	/* Native surfaces own their own scrolling and chrome. */
+	.work-native {
+		height: 100%;
+		min-height: 0;
+	}
+
+	.work-surface.page .work-native {
+		height: 100vh;
 	}
 
 	.work-surface.page .work-frame {

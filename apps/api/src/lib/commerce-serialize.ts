@@ -9,6 +9,8 @@ import type {
   Product,
   PurchasedCreditsBenefitConfig,
 } from "./commerce-types.js";
+import type { CohubBalanceDescriptor } from "./space-commerce-balance.js";
+import { serializeCohubBalance } from "./space-commerce-balance.js";
 
 export type SerializedCommerceBenefitConfig =
   | {
@@ -65,6 +67,11 @@ export type SerializedCommerceProduct = {
     validity: string | null;
     creditBenefits: SerializedCommerceProductCreditBenefit[];
   };
+  cohubBalance: {
+    amountUsd: number;
+    amountMinor: number;
+    policyVersion: string;
+  } | null;
   isDefaultPlan: boolean;
 };
 
@@ -175,15 +182,18 @@ export function serializeBenefit(benefit: Benefit): SerializedCommerceBenefit {
 export function serializeProduct(
   product: Product,
   boundCreditBenefits: CreditsBenefit[] = [],
+  cohubBalance?: CohubBalanceDescriptor | null,
 ): SerializedCommerceProduct {
   const amountMinor = Number(product.amount ?? product.unit_amount ?? 0);
   const amountUsd = amountMinor / 100;
-  const creditBenefits = boundCreditBenefits.map((benefit) => ({
-    key: benefit.key,
-    name: benefit.name,
-    amount: benefit.config.amount,
-    expiresInDays: resolveExpiresInDays(benefit.config),
-  }));
+  const creditBenefits = boundCreditBenefits
+    .filter((benefit) => benefit.config.token_type === COHUB_CREDIT_TOKEN)
+    .map((benefit) => ({
+      key: benefit.key,
+      name: benefit.name,
+      amount: benefit.config.amount,
+      expiresInDays: resolveExpiresInDays(benefit.config),
+    }));
   const creditsAmount =
     creditBenefits.length > 0
       ? creditBenefits.reduce((sum, b) => sum + b.amount, 0)
@@ -216,6 +226,7 @@ export function serializeProduct(
       validity: null,
       creditBenefits,
     },
+    cohubBalance: serializeCohubBalance(cohubBalance),
     isDefaultPlan: false,
   };
 }

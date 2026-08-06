@@ -21,6 +21,9 @@ spec:
             type: RegularExpression
             value: /api/spaces/[^/]+/checkpoints/[^/]+/fs/.*
         - path:
+            type: RegularExpression
+            value: /api/spaces/[^/]+/startup
+        - path:
             type: PathPrefix
             value: /__session
         - path:

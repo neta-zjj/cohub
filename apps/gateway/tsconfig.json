@@ -30,6 +30,12 @@
       "@cohub/protocol/sandbox": [
         "../../packages/protocol/src/sandbox/index.ts"
       ],
+      "@cohub/infra/bullmq": [
+        "../../packages/infra/src/bullmq/index.ts"
+      ],
+      "@cohub/infra/space-hooks": [
+        "../../packages/infra/src/space-hooks/index.ts"
+      ],
       "@cohub/infra/logging": [
         "../../packages/infra/src/logging/index.ts"
       ],

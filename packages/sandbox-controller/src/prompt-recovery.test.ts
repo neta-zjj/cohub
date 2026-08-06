@@ -77,5 +77,3 @@ assert.deepEqual(
   sandboxEndpointInvalidationPatch("idle", "2026-07-13T00:00:00.000Z").podIp,
   null,
 );
-
-console.log("sandbox prompt recovery gate checks passed");

@@ -29,6 +29,11 @@ export function canonicalUrl(
 	return `${origin}${normalized === "/" ? "/" : normalized.replace(/\/$/, "")}`;
 }
 
+/** Default social preview image until docs have dedicated art. */
+export function defaultOgImage(originFromPage?: string | null): string {
+	return `${siteOrigin(originFromPage)}/pwa/icon-512x512.png`;
+}
+
 /** Strip simple inline markdown used in changelog copy. */
 export function plainText(input: string): string {
 	return input
@@ -43,4 +48,57 @@ export function truncate(text: string, max = 160): string {
 	const slice = text.slice(0, max - 1);
 	const cut = slice.lastIndexOf(" ");
 	return `${(cut > 80 ? slice.slice(0, cut) : slice).trimEnd()}…`;
+}
+
+export type SeoBreadcrumb = {
+	name: string;
+	path: string;
+};
+
+export function docsJsonLd(input: {
+	origin: string | null | undefined;
+	title: string;
+	description: string;
+	path: string;
+	locale: "en" | "zh";
+	sectionTitle: string;
+	breadcrumbs: SeoBreadcrumb[];
+}): string {
+	const origin = siteOrigin(input.origin);
+	const pageUrl = canonicalUrl(origin, input.path);
+	const docsHome =
+		input.locale === "zh"
+			? canonicalUrl(origin, "/docs/zh")
+			: canonicalUrl(origin, "/docs");
+	const inLanguage = input.locale === "zh" ? "zh-CN" : "en";
+
+	const graph = [
+		{
+			"@type": "TechArticle",
+			headline: input.title,
+			description: input.description,
+			url: pageUrl,
+			inLanguage,
+			isPartOf: {
+				"@type": "WebSite",
+				name: input.locale === "zh" ? "Cohub 文档" : "Cohub Docs",
+				url: docsHome,
+			},
+			articleSection: input.sectionTitle,
+		},
+		{
+			"@type": "BreadcrumbList",
+			itemListElement: input.breadcrumbs.map((crumb, index) => ({
+				"@type": "ListItem",
+				position: index + 1,
+				name: crumb.name,
+				item: canonicalUrl(origin, crumb.path),
+			})),
+		},
+	];
+
+	return JSON.stringify({
+		"@context": "https://schema.org",
+		"@graph": graph,
+	});
 }

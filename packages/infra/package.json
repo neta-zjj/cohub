@@ -24,6 +24,10 @@
       "types": "./dist/config-runtime/models.d.ts",
       "default": "./dist/config-runtime/models.js"
     },
+    "./config-runtime/image-to-text": {
+      "types": "./dist/config-runtime/image-to-text.d.ts",
+      "default": "./dist/config-runtime/image-to-text.js"
+    },
     "./config-runtime/explore": {
       "types": "./dist/config-runtime/explore.d.ts",
       "default": "./dist/config-runtime/explore.js"
@@ -43,6 +47,10 @@
     "./config-runtime/skills": {
       "types": "./dist/config-runtime/skills.d.ts",
       "default": "./dist/config-runtime/skills.js"
+    },
+    "./space-hooks": {
+      "types": "./dist/space-hooks/index.d.ts",
+      "default": "./dist/space-hooks/index.js"
     },
     "./tracing": {
       "types": "./dist/tracing/index.d.ts",
@@ -75,12 +83,13 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "test": "node ../../scripts/test/run.mjs --test-isolation=none 'src/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@cohub/protocol": "workspace:*",
     "@kubiks/otel-drizzle": "^2.1.0",
-    "@neta-art/generation": "^0.1.13",
+    "@neta-art/generation": "^0.1.18",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
     "@opentelemetry/instrumentation": "^0.220.0",

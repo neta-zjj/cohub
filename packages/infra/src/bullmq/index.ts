@@ -21,7 +21,7 @@ export const queueDefinitions = [
     criticality: "critical",
     concurrencyEnv: "TASK_WORKER_CONCURRENCY",
     defaultConcurrencyPerWorker: DEFAULT_TASK_WORKER_CONCURRENCY,
-    registeredJobs: ["send_message", "save_checkpoint", "create_space", "run_command"],
+    registeredJobs: ["send_message", "save_checkpoint", "create_space", "run_command", "space_hook"],
   },
   {
     name: COHUB_AGENT_TURNS_QUEUE,
@@ -29,7 +29,7 @@ export const queueDefinitions = [
     criticality: "critical",
     concurrencyEnv: "AGENT_WORKER_CONCURRENCY",
     defaultConcurrencyPerWorker: DEFAULT_AGENT_WORKER_CONCURRENCY,
-    registeredJobs: ["agent_turns", "agent_session_fork", "sandbox_bash", "run_command"],
+    registeredJobs: ["agent_turns", "agent_session_fork", "sandbox_bash", "run_command", "sandbox_fs_mutation"],
   },
   {
     name: COHUB_SYSTEM_QUEUE,
@@ -37,7 +37,7 @@ export const queueDefinitions = [
     criticality: "normal",
     concurrencyEnv: "SYSTEM_WORKER_CONCURRENCY",
     defaultConcurrencyPerWorker: DEFAULT_SYSTEM_WORKER_CONCURRENCY,
-    registeredJobs: ["cdn_cache.warm_file", "sandbox.idle_check", "sandbox.idle_reaper", "work.publish_asset", "references.index", "session.message.postprocess"],
+    registeredJobs: ["cdn_cache.warm_file", "sandbox.idle_check", "sandbox.idle_reaper", "work.publish_asset", "references.index", "session.message.postprocess", "space_hook.dispatch"],
   },
 ] as const;
 
@@ -103,13 +103,14 @@ export const defaultCriticalJobOptions = {
 export const createQueueTelemetry = (serviceName: string) =>
   new BullMQOtel({ tracerName: serviceName });
 
-export const createBullmqConnectionOptions = (url: string) => ({ url });
+export const createBullmqConnectionOptions = (url: string) => ({ url, disableClientInfo: true });
 
 export const createBullmqRedisConnection = (url: string, options: RedisOptions = {}) =>
   new Redis(url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     ...options,
+    disableClientInfo: true,
   });
 
 export function createBullmqQueue<DataType = unknown, ResultType = unknown, NameType extends string = string>(

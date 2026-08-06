@@ -43,6 +43,12 @@
       "@cohub/protocol/ports": [
         "../../packages/protocol/src/ports/index.ts"
       ],
+      "@cohub/protocol/provenance": [
+        "../../packages/protocol/src/provenance.ts"
+      ],
+      "@cohub/protocol/public-identifiers": [
+        "../../packages/protocol/src/public-identifiers.ts"
+      ],
       "@cohub/identity": [
         "../../packages/identity/src/index.ts"
       ],
@@ -58,6 +64,9 @@
       "@cohub/infra/bullmq": [
         "../../packages/infra/src/bullmq/index.ts"
       ],
+      "@cohub/infra/space-hooks": [
+        "../../packages/infra/src/space-hooks/index.ts"
+      ],
       "@cohub/infra/tracing/db": [
         "../../packages/infra/src/tracing/db.ts"
       ],
@@ -66,6 +75,9 @@
       ],
       "@cohub/infra/config-runtime/models": [
         "../../packages/infra/src/config-runtime/models.ts"
+      ],
+      "@cohub/infra/config-runtime/image-to-text": [
+        "../../packages/infra/src/config-runtime/image-to-text.ts"
       ],
       "@cohub/infra/config-runtime/prompts": [
         "../../packages/infra/src/config-runtime/prompts.ts"

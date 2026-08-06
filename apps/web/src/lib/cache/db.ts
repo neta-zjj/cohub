@@ -4,7 +4,7 @@ import type {
 	SessionTurnRecord,
 } from "@cohub/protocol/model";
 import type {
-	CanvasSemanticOp,
+	BoardOperation,
 	LabelAssignmentListItem,
 	LabelAssignmentPageInfo,
 	LabelAssignmentRecord,
@@ -18,7 +18,7 @@ import type {
 import type { SessionListPageInfo } from "$lib/cache/types";
 
 export const DB_NAME = "cohub-web-cache";
-export const DB_VERSION = 10;
+export const DB_VERSION = 14;
 
 export type SessionListForkRecord = Partial<SessionForkRecord> & {
 	childSessionId: string;
@@ -127,6 +127,7 @@ export type SessionGenerationSnapshotCacheRecord = {
 	runtimeModel: string | null;
 	startedAt: number | null;
 	lastEventAt: number | null;
+	lastPatchAt: number | null;
 	createdAt: number;
 	updatedAt: number;
 	expiresAt: number;
@@ -141,6 +142,14 @@ export type SpaceFsDirCacheRecord = {
 	updatedAt: number;
 	lastAccessedAt: number;
 	watermark: string | null;
+};
+
+export type SpaceFsEpochCacheRecord = {
+	key: string;
+	userKey: string;
+	spaceId: string;
+	epoch: number;
+	updatedAt: number;
 };
 
 export type SpaceRecordCacheRecord = {
@@ -214,14 +223,28 @@ export type TaskRunSummaryCacheRecord = {
 	lastAccessedAt: number;
 };
 
-export type CanvasPendingTransactionCacheRecord = {
+export type FilePendingDraftCacheRecord = {
 	key: string;
 	userKey: string;
 	spaceId: string;
-	documentId: string;
+	path: string;
+	draft: string;
+	baseContent: string;
+	baseMtimeMs: number;
+	baseSize: number;
+	mutationId: string;
+	createdAt: number;
+	updatedAt: number;
+};
+
+export type BoardPendingTransactionCacheRecord = {
+	key: string;
+	userKey: string;
+	spaceId: string;
+	boardId: string;
 	txId: string;
-	baseVersion: number | null;
-	ops: CanvasSemanticOp[];
+	baseVersion: number;
+	ops: BoardOperation[];
 	attemptCount: number;
 	createdAt: number;
 	updatedAt: number;
@@ -242,23 +265,35 @@ export type TaskRunDetailCacheRecord = {
 	lastAccessedAt: number;
 };
 
-type StoreName =
+export type StoreName =
 	| "session_lists"
 	| "session_list_indexes"
 	| "session_details"
 	| "session_turns"
 	| "session_generation_snapshots"
 	| "space_fs_dirs"
+	| "space_fs_epochs"
 	| "space_records"
 	| "label_trees"
 	| "label_items"
 	| "resource_labels"
 	| "user_profiles"
-	| "canvas_pending_txs"
+	| "file_pending_drafts"
+	| "board_pending_txs"
 	| "task_run_summaries"
 	| "task_run_details";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+/** Resolved connection for O(1) reuse after open; cleared on versionchange/reset. */
+let dbConnection: IDBDatabase | null = null;
+/** In-flight open currently watched for late settle after a timeout. */
+let watchedOpenPromise: Promise<IDBDatabase> | null = null;
+/**
+ * After open times out, fail-fast until this timestamp so concurrent cache ops
+ * do not each wait the full open budget and spam the console.
+ */
+let openDegradedUntil = 0;
+let lastOpenTimeoutLogAt = 0;
 
 /** Guards against reload loops when an old client hits a newer IDB schema. */
 const IDB_VERSION_RELOAD_KEY = "cohub:cache:idb-version-reload";
@@ -273,6 +308,14 @@ export class CacheVersionMismatchError extends Error {
 /** Soft ceiling so a stuck IndexedDB never blocks UI data paths forever. */
 export const IDB_OP_TIMEOUT_MS = 2_500;
 export const IDB_OPEN_TIMEOUT_MS = 5_000;
+/** Fail-fast window after an open timeout (keeps hanging open for late success). */
+export const IDB_OPEN_DEGRADED_MS = 30_000;
+/** Live budgets (mutable only via test reset so unit tests need not wait seconds). */
+let idbOpTimeoutMs = IDB_OP_TIMEOUT_MS;
+let idbOpenTimeoutMs = IDB_OPEN_TIMEOUT_MS;
+let idbOpenDegradedMs = IDB_OPEN_DEGRADED_MS;
+/** At most one open-timeout warn per throttle window while degraded. */
+let idbOpenLogThrottleMs = 60_000;
 /** Extreme-path self-heal: repeated hard failures wipe only `cohub-web-cache`. */
 const IDB_FAILURE_WINDOW_MS = 30_000;
 /** Count only real store ops after open; concurrent first-open races must not wipe cache. */
@@ -289,7 +332,7 @@ export class CacheTimeoutError extends Error {
 function withTimeout<T>(
 	promise: Promise<T>,
 	label: string,
-	ms: number = IDB_OP_TIMEOUT_MS,
+	ms = idbOpTimeoutMs,
 ): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_, reject) => {
@@ -300,6 +343,47 @@ function withTimeout<T>(
 	return Promise.race([promise, timeout]).finally(() => {
 		if (timer) clearTimeout(timer);
 	}) as Promise<T>;
+}
+
+function noteOpenTimedOut(error: CacheTimeoutError) {
+	const now = Date.now();
+	openDegradedUntil = Math.max(openDegradedUntil, now + idbOpenDegradedMs);
+	if (now - lastOpenTimeoutLogAt < idbOpenLogThrottleMs) return;
+	lastOpenTimeoutLogAt = now;
+	console.warn(
+		"[cache] IndexedDB open timed out; continuing without persistence",
+		error,
+	);
+}
+
+function clearOpenDegraded() {
+	openDegradedUntil = 0;
+}
+
+/**
+ * Keep a hanging open alive after timeout so a late success can restore
+ * persistence without every concurrent caller re-waiting and re-logging.
+ */
+function watchInFlightOpen(promise: Promise<IDBDatabase>) {
+	if (watchedOpenPromise === promise) return;
+	watchedOpenPromise = promise;
+	void promise.then(
+		(db) => {
+			// Accept late success even after a later open attempt started — any live
+			// connection restores persistence for subsequent idb ops.
+			if (!dbConnection) {
+				dbConnection = db;
+				if (dbPromise === null || dbPromise === promise) {
+					dbPromise = promise;
+				}
+			}
+			clearOpenDegraded();
+			noteIdbSuccess();
+		},
+		() => {
+			if (watchedOpenPromise === promise) watchedOpenPromise = null;
+		},
+	);
 }
 
 let recentIdbFailureAt: number[] = [];
@@ -443,12 +527,16 @@ function recoverFromVersionMismatch(error: unknown): Promise<never> {
 }
 
 function resetDbConnection(db?: IDBDatabase | null) {
+	const target = db ?? dbConnection;
 	try {
-		db?.close();
+		target?.close();
 	} catch {
 		// ignore
 	}
+	dbConnection = null;
 	dbPromise = null;
+	watchedOpenPromise = null;
+	clearOpenDegraded();
 }
 
 function createStore(
@@ -463,23 +551,38 @@ function createStore(
 
 export async function openCacheDb(): Promise<IDBDatabase | null> {
 	if (!isBrowser()) return null;
+	// Hot path: already open. Avoid re-entering timeout races on every idb op.
+	if (dbConnection) return dbConnection;
+
+	// After a timeout, fail fast so hundreds of concurrent cache ops do not each
+	// wait 5s and flood the console. A late open success clears this via watch.
+	if (dbPromise && Date.now() < openDegradedUntil) {
+		watchInFlightOpen(dbPromise);
+		return null;
+	}
+
+	// Degraded window elapsed but open still unresolved: abandon the shared slot
+	// and start a fresh open. Keep watching the old promise so a late success
+	// can still restore dbConnection without another full wait storm.
+	if (dbPromise && openDegradedUntil > 0 && Date.now() >= openDegradedUntil) {
+		watchInFlightOpen(dbPromise);
+		dbPromise = null;
+		clearOpenDegraded();
+	}
+
 	if (dbPromise) {
 		try {
-			const db = await withTimeout(
-				dbPromise,
-				"openCacheDb",
-				IDB_OPEN_TIMEOUT_MS,
-			);
+			const db = await withTimeout(dbPromise, "openCacheDb", idbOpenTimeoutMs);
+			dbConnection = db;
+			clearOpenDegraded();
 			noteIdbSuccess();
 			return db;
 		} catch (error) {
-			// Keep in-flight openPromise so a late success is still shared.
+			// Keep in-flight open so a late success is still shared via watch.
 			if (error instanceof CacheTimeoutError) {
-				console.warn(
-					"[cache] IndexedDB open timed out; continuing without persistence",
-					error,
-				);
-				noteIdbFailure(error, "openCacheDb");
+				watchInFlightOpen(dbPromise);
+				noteOpenTimedOut(error);
+				// open timeouts are not store ops; do not count toward wipe recovery.
 				return null;
 			}
 			noteIdbFailure(error, "openCacheDb");
@@ -490,10 +593,17 @@ export async function openCacheDb(): Promise<IDBDatabase | null> {
 		const request = indexedDB.open(DB_NAME, DB_VERSION);
 		request.onblocked = () => {
 			dbPromise = null;
+			watchedOpenPromise = null;
 			reject(new Error("IndexedDB open blocked"));
 		};
-		request.onupgradeneeded = () => {
+		request.onupgradeneeded = (event) => {
 			const db = request.result;
+			if (
+				(event as IDBVersionChangeEvent).oldVersion < 13 &&
+				db.objectStoreNames.contains("board_pending_txs")
+			) {
+				db.deleteObjectStore("board_pending_txs");
+			}
 			createStore(db, "space_records", [
 				{ name: "by_user_space", keyPath: ["userKey", "spaceId"] },
 				{ name: "by_last_accessed", keyPath: "lastAccessedAt" },
@@ -543,6 +653,10 @@ export async function openCacheDb(): Promise<IDBDatabase | null> {
 				},
 				{ name: "by_last_accessed", keyPath: "lastAccessedAt" },
 			]);
+			createStore(db, "space_fs_epochs", [
+				{ name: "by_user_space", keyPath: ["userKey", "spaceId"] },
+				{ name: "by_updated_at", keyPath: "updatedAt" },
+			]);
 			createStore(db, "label_trees", [
 				{ name: "by_user_space", keyPath: ["userKey", "spaceId"] },
 				{ name: "by_last_accessed", keyPath: "lastAccessedAt" },
@@ -570,11 +684,19 @@ export async function openCacheDb(): Promise<IDBDatabase | null> {
 				{ name: "by_last_accessed", keyPath: "lastAccessedAt" },
 				{ name: "by_updated_at", keyPath: "updatedAt" },
 			]);
-			createStore(db, "canvas_pending_txs", [
+			createStore(db, "file_pending_drafts", [
 				{ name: "by_user_space", keyPath: ["userKey", "spaceId"] },
 				{
-					name: "by_user_space_document",
-					keyPath: ["userKey", "spaceId", "documentId"],
+					name: "by_user_space_path",
+					keyPath: ["userKey", "spaceId", "path"],
+				},
+				{ name: "by_updated_at", keyPath: "updatedAt" },
+			]);
+			createStore(db, "board_pending_txs", [
+				{ name: "by_user_space", keyPath: ["userKey", "spaceId"] },
+				{
+					name: "by_user_space_board",
+					keyPath: ["userKey", "spaceId", "boardId"],
 				},
 				{ name: "by_created_at", keyPath: "createdAt" },
 			]);
@@ -610,11 +732,14 @@ export async function openCacheDb(): Promise<IDBDatabase | null> {
 			// Another tab upgraded the schema; drop this connection so the next
 			// open either upgrades or surfaces VersionError for recovery.
 			db.onversionchange = () => resetDbConnection(db);
+			dbConnection = db;
+			clearOpenDegraded();
 			clearVersionReloadAttempt();
 			resolve(db);
 		};
 		request.onerror = () => {
 			dbPromise = null;
+			watchedOpenPromise = null;
 			const error = request.error;
 			if (isIdbVersionError(error)) {
 				void recoverFromVersionMismatch(error).then(resolve, reject);
@@ -623,26 +748,26 @@ export async function openCacheDb(): Promise<IDBDatabase | null> {
 			reject(error);
 		};
 	});
-	dbPromise = openPromise.catch((error) => {
-		dbPromise = null;
+	// Share the catch-wrapped promise so all waiters (and late-open watch)
+	// observe the same settle path and clear shared state on hard failure.
+	const sharedOpen = openPromise.catch((error) => {
+		if (dbPromise === sharedOpen) dbPromise = null;
+		if (watchedOpenPromise === sharedOpen) watchedOpenPromise = null;
+		if (!dbConnection) clearOpenDegraded();
 		throw error;
 	});
+	dbPromise = sharedOpen;
 	try {
-		const db = await withTimeout(
-			openPromise,
-			"openCacheDb",
-			IDB_OPEN_TIMEOUT_MS,
-		);
+		const db = await withTimeout(sharedOpen, "openCacheDb", idbOpenTimeoutMs);
+		dbConnection = db;
+		clearOpenDegraded();
 		noteIdbSuccess();
 		return db;
 	} catch (error) {
 		if (error instanceof CacheTimeoutError) {
-			console.warn(
-				"[cache] IndexedDB open timed out; continuing without persistence",
-				error,
-			);
 			// Do not clear dbPromise on timeout — a late open can still be reused.
-			noteIdbFailure(error, "openCacheDb");
+			watchInFlightOpen(sharedOpen);
+			noteOpenTimedOut(error);
 			return null;
 		}
 		noteIdbFailure(error, "openCacheDb");
@@ -650,9 +775,37 @@ export async function openCacheDb(): Promise<IDBDatabase | null> {
 	}
 }
 
+/** Test-only: reset module connection state between unit tests. */
+export function __resetCacheDbStateForTests(options?: {
+	opTimeoutMs?: number;
+	openTimeoutMs?: number;
+	openDegradedMs?: number;
+	openLogThrottleMs?: number;
+}) {
+	dbConnection = null;
+	dbPromise = null;
+	watchedOpenPromise = null;
+	openDegradedUntil = 0;
+	lastOpenTimeoutLogAt = 0;
+	recentIdbFailureAt = [];
+	lastIdbRecoveryAt = 0;
+	idbRecoveryInFlight = null;
+	idbOpTimeoutMs = options?.opTimeoutMs ?? IDB_OP_TIMEOUT_MS;
+	idbOpenTimeoutMs = options?.openTimeoutMs ?? IDB_OPEN_TIMEOUT_MS;
+	idbOpenDegradedMs = options?.openDegradedMs ?? IDB_OPEN_DEGRADED_MS;
+	idbOpenLogThrottleMs = options?.openLogThrottleMs ?? 60_000;
+}
+
 export async function deleteCacheDatabase() {
 	if (!isBrowser()) return;
-	const db = await dbPromise?.catch(() => null);
+	// Never wait forever on a hung open before delete — recovery must progress.
+	const pending = dbPromise?.catch(() => null) ?? Promise.resolve(null);
+	const db = await Promise.race([
+		pending,
+		new Promise<null>((resolve) => {
+			setTimeout(() => resolve(null), Math.min(1_000, idbOpenTimeoutMs));
+		}),
+	]);
 	resetDbConnection(db);
 	await new Promise<void>((resolve, reject) => {
 		const request = indexedDB.deleteDatabase(DB_NAME);
@@ -688,7 +841,62 @@ async function withObjectStore<T>(
 				}
 			})(),
 			label,
-			IDB_OP_TIMEOUT_MS,
+			idbOpTimeoutMs,
+		);
+		if (result !== null) noteIdbSuccess();
+		return result;
+	} catch (error) {
+		noteIdbFailure(error, label);
+		if (error instanceof CacheTimeoutError) {
+			console.warn(`[cache] ${label}`, error);
+			return null;
+		}
+		throw error;
+	}
+}
+
+export async function idbRunTransaction<T>(
+	storeNames: StoreName[],
+	mode: IDBTransactionMode,
+	run: (
+		getStore: (name: StoreName) => IDBObjectStore,
+		tx: IDBTransaction,
+	) => Promise<T> | T,
+	retry = true,
+): Promise<T | null> {
+	const label = `idb:${mode}:${storeNames.join(",")}`;
+	const db = await openCacheDb();
+	if (!db) return null;
+	try {
+		const result = await withTimeout(
+			(async () => {
+				let tx: IDBTransaction;
+				try {
+					tx = db.transaction(storeNames, mode);
+				} catch (error) {
+					if (retry && isClosingConnectionError(error)) {
+						resetDbConnection(db);
+						return idbRunTransaction(storeNames, mode, run, false);
+					}
+					throw error;
+				}
+				const completed = awaitTransaction(tx);
+				try {
+					const value = await run((name) => tx.objectStore(name), tx);
+					await completed;
+					return value;
+				} catch (error) {
+					try {
+						tx.abort();
+					} catch {
+						// Transaction may already be complete or aborted.
+					}
+					await completed.catch(() => undefined);
+					throw error;
+				}
+			})(),
+			label,
+			idbOpTimeoutMs,
 		);
 		if (result !== null) noteIdbSuccess();
 		return result;

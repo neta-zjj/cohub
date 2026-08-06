@@ -4,8 +4,172 @@ export type ModelCatalogItem = {
 	model: Record<string, unknown> & { hidden?: boolean };
 };
 
+export type ModelThinkingLevel =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max";
+
+const THINKING_LEVELS = new Set<ModelThinkingLevel>([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+
+/** Read only an explicitly requested level; effective defaults are intentionally ignored. */
+export function getRequestedThinkingLevel(
+	meta: unknown,
+): ModelThinkingLevel | null {
+	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+	const value = (meta as Record<string, unknown>).requestedThinkingLevel;
+	return typeof value === "string" &&
+		THINKING_LEVELS.has(value as ModelThinkingLevel)
+		? (value as ModelThinkingLevel)
+		: null;
+}
+
+/** Compact labels for dense controls (composer, chips). */
+export function formatThinkingLevelShort(level: ModelThinkingLevel): string {
+	switch (level) {
+		case "minimal":
+			return "Min";
+		case "medium":
+			return "Med";
+		case "xhigh":
+			return "xHigh";
+		default:
+			return level.charAt(0).toUpperCase() + level.slice(1);
+	}
+}
+
+/** Full labels for menus, titles, and aria. */
+export function formatThinkingLevelFull(level: ModelThinkingLevel): string {
+	switch (level) {
+		case "off":
+			return "Off";
+		case "minimal":
+			return "Minimal";
+		case "low":
+			return "Low";
+		case "medium":
+			return "Medium";
+		case "high":
+			return "High";
+		case "xhigh":
+			return "Extra high";
+		case "max":
+			return "Max";
+	}
+}
+
+const ALL_THINKING_LEVELS: ModelThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
 export function isModelHidden(item: ModelCatalogItem): boolean {
 	return item.model.hidden === true;
+}
+
+/**
+ * Returns the thinking levels supported by a model, mirroring pi-ai's
+ * getSupportedThinkingLevels. Non-reasoning models only support "off".
+ * xhigh/max are opt-in and require an explicit non-null thinkingLevelMap entry.
+ */
+export function getSupportedThinkingLevels(
+	item: ModelCatalogItem,
+): ModelThinkingLevel[] {
+	const reasoning = item.model.reasoning === true;
+	if (!reasoning) return ["off"];
+	const map = item.model.thinkingLevelMap as
+		| Partial<Record<ModelThinkingLevel, string | null>>
+		| undefined;
+	return ALL_THINKING_LEVELS.filter((level) => {
+		if (!map) return level !== "xhigh" && level !== "max";
+		const mapped = map[level];
+		if (mapped === null) return false;
+		if (level === "xhigh" || level === "max") return mapped !== undefined;
+		return true;
+	});
+}
+
+/**
+ * Returns the model's default thinking level, falling back to "high" for
+ * reasoning models (matching agent runtime behavior) and "off" otherwise.
+ */
+export function getModelDefaultThinkingLevel(
+	item: ModelCatalogItem,
+): ModelThinkingLevel {
+	const configured = item.model.defaultThinkingLevel;
+	if (
+		typeof configured === "string" &&
+		ALL_THINKING_LEVELS.includes(configured as ModelThinkingLevel)
+	) {
+		return configured as ModelThinkingLevel;
+	}
+	return item.model.reasoning === true ? "high" : "off";
+}
+
+const CLAMP_ORDER: ModelThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+/**
+ * Clamps a requested thinking level to one supported by the model, mirroring
+ * pi-ai's clampThinkingLevel. Falls back to the nearest supported level.
+ */
+export function clampThinkingLevel(
+	item: ModelCatalogItem,
+	requested: ModelThinkingLevel,
+): ModelThinkingLevel {
+	const supported = getSupportedThinkingLevels(item);
+	if (supported.includes(requested)) return requested;
+	const requestedIndex = CLAMP_ORDER.indexOf(requested);
+	if (requestedIndex === -1) return supported[0] ?? "off";
+	// Try same or higher level first
+	for (let i = requestedIndex; i < CLAMP_ORDER.length; i++) {
+		const candidate = CLAMP_ORDER[i];
+		if (candidate && supported.includes(candidate)) return candidate;
+	}
+	// Fall back to nearest lower level
+	for (let i = requestedIndex - 1; i >= 0; i--) {
+		const candidate = CLAMP_ORDER[i];
+		if (candidate && supported.includes(candidate)) return candidate;
+	}
+	return supported[0] ?? "off";
+}
+
+/**
+ * Computes the thinking level that would be used if switching to a model,
+ * given the current session level and any explicit override.
+ */
+export function resolveCandidateThinkingLevel(
+	item: ModelCatalogItem,
+	sessionThinkingLevel: ModelThinkingLevel | null | undefined,
+	override?: ModelThinkingLevel | null,
+): ModelThinkingLevel {
+	if (override) return clampThinkingLevel(item, override);
+	if (sessionThinkingLevel)
+		return clampThinkingLevel(item, sessionThinkingLevel);
+	return getModelDefaultThinkingLevel(item);
 }
 
 export type ModelCatalogIndex = {

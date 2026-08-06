@@ -5,7 +5,6 @@ import type {
 	CronJobRecord,
 	LabelAssignmentListItem,
 	LabelListItem,
-	LabelResourceType,
 	SessionForkRecord,
 	SessionRecord,
 	SpaceRecord,
@@ -71,7 +70,13 @@ import {
 	type LabelAssignableCohubResource,
 	setCohubResourceDragData,
 } from "$lib/drag/cohub-resource-drag";
-import { withCurrentPreview } from "$lib/features/space/modules/workspace-preview-route";
+import { withSidebarMainPreview } from "$lib/features/space/modules/workspace-preview-route";
+import {
+	createWorkMutationBuffer,
+	upsertWorkSnapshot,
+	WORKS_CHANGED_EVENT,
+	type WorksChangedDetail,
+} from "$lib/features/work/work-realtime";
 import { extractGenerationPromptPreview } from "$lib/generation-task-media";
 import { isComposingKeyboardEvent } from "$lib/keyboard";
 import { hydrateLabelItemsById } from "$lib/labels/label-resource-hydrator";
@@ -141,6 +146,7 @@ import {
 	getSourceLabels,
 	getSystemChannelLabels,
 	getSystemUserLabels,
+	isSystemLabel,
 	isWebSessionSource,
 	SESSION_SOURCE_LABEL_SYSTEM_KEY_PREFIX,
 } from "$lib/stores/sidebar-source-labels";
@@ -187,6 +193,7 @@ import {
 import { uiState } from "$lib/stores/ui.svelte";
 import { clearGrantedWorkScopes } from "$lib/stores/work-grant-cache";
 import { formatCompactAbsoluteTime } from "$lib/time-format";
+import { resolveWorkspaceRouteContext } from "$lib/workspace-route";
 
 const {
 	isMobile = false,
@@ -339,6 +346,11 @@ let deletingLabelId = $state<string | null>(null);
 let cronjobs = $state<CronJobRecord[]>([]);
 let tasks = $state<TaskRunRecord[]>([]);
 let works = $state<WorkRecord[]>([]);
+/**
+ * Realtime mutations seen while a full list request is in flight, replayed onto
+ * the response so a publish mid-load cannot hide the Space's other Works.
+ */
+const worksBuffer = createWorkMutationBuffer();
 let loadingCronjobs = $state(false);
 let refreshingCheckpoints = $state(false);
 let loadingCronjobsSpaceId = $state<string | null>(null);
@@ -359,9 +371,23 @@ const currentPath = $derived(page.url.pathname);
 const isSessionsRoute = $derived(
 	currentPath === "/sessions" || currentPath.startsWith("/sessions/"),
 );
+const workspaceRoute = $derived(
+	resolveWorkspaceRouteContext({
+		pathname: currentPath,
+		searchParams: page.url.searchParams,
+		pageData: page.data as { spaceId?: unknown; sessionId?: unknown },
+		params: { id: page.params.id },
+	}),
+);
+const currentSpaceId = $derived(workspaceRoute.spaceId);
+const activeSessionId = $derived(workspaceRoute.sessionId);
+const activeWorkId = $derived(workspaceRoute.workId);
+const activeCheckpointId = $derived(workspaceRoute.checkpointId);
+const activeCronjobId = $derived(workspaceRoute.cronjobId);
+const activeTaskId = $derived(workspaceRoute.taskId);
+const activeLabelResource = $derived(workspaceRoute.labelResource);
+
 const activeSession = $derived.by(() => {
-	const match = currentPath.match(/^\/spaces\/[^/]+\/sessions\/([^/]+)/);
-	const activeSessionId = match?.[1] ?? null;
 	if (!activeSessionId) return null;
 	return (
 		sessions.find((s) => s.id === activeSessionId) ??
@@ -370,20 +396,9 @@ const activeSession = $derived.by(() => {
 			: null)
 	);
 });
-const activeWorkId = $derived.by(() => {
-	const match = currentPath.match(/^\/spaces\/[^/]+\/works\/([^/]+)/);
-	return match?.[1] ?? null;
-});
 const activeWork = $derived(
 	works.find((work) => work.id === activeWorkId) ?? null,
 );
-
-const activeCheckpointId = $derived.by(() => {
-	const match = currentPath.match(/^\/spaces\/[^/]+\/checkpoints\/([^/]+)/);
-	const id = match?.[1] ?? null;
-	if (!id || id === "new") return null;
-	return id;
-});
 const activeCheckpoint = $derived(
 	checkpoints.find((checkpoint) => checkpoint.id === activeCheckpointId) ??
 		null,
@@ -391,52 +406,9 @@ const activeCheckpoint = $derived(
 const sidebarSessionItems = $derived.by(() =>
 	buildSidebarSessionItems(sessions),
 );
-
-const activeCronjobId = $derived.by(() => {
-	const match = currentPath.match(/^\/spaces\/[^/]+\/cronjobs\/([^/]+)/);
-	const id = match?.[1] ?? null;
-	if (!id || id === "new") return null;
-	return id;
-});
 const activeCronjob = $derived(
 	cronjobs.find((job) => job.id === activeCronjobId) ?? null,
 );
-
-const activeTaskId = $derived.by(() => {
-	const match = currentPath.match(/^\/spaces\/[^/]+\/tasks\/([^/]+)/);
-	return match?.[1] ?? null;
-});
-
-const activeLabelResource = $derived.by<{
-	type: LabelResourceType;
-	ref: string;
-} | null>(() => {
-	const sessionMatch = currentPath.match(/^\/spaces\/[^/]+\/sessions\/([^/]+)/);
-	if (sessionMatch?.[1]) {
-		return { type: "session", ref: sessionMatch[1] };
-	}
-
-	const checkpointMatch = currentPath.match(
-		/^\/spaces\/[^/]+\/checkpoints\/([^/]+)/,
-	);
-	if (checkpointMatch?.[1] && checkpointMatch[1] !== "new") {
-		return { type: "checkpoint", ref: checkpointMatch[1] };
-	}
-
-	const fileMatch = currentPath.match(/^\/spaces\/[^/]+\/files\/(.+)$/);
-	if (fileMatch?.[1]) {
-		return { type: "file", ref: decodeRoutePath(fileMatch[1]) };
-	}
-
-	return null;
-});
-
-const currentSpaceId = $derived.by(() => {
-	const match = currentPath.match(/^\/spaces\/([^/]+)/);
-	const id = match?.[1] ?? null;
-	if (id === "new") return null;
-	return id;
-});
 
 const currentSpace = $derived(
 	currentSpaceId ? (spaces.find((s) => s.id === currentSpaceId) ?? null) : null,
@@ -1163,12 +1135,7 @@ async function loadLabelsForSpace(spaceId: string, force = false) {
 			if (!isCurrentLoad()) return;
 			if (cached) {
 				applyLabels(cached.labels);
-				if (!cached.stale) {
-					// Restored expanded rows may have raced before the tree existed.
-					refreshExpandedLabelItems(spaceId);
-					return;
-				}
-				// Stale cache is already applied; refresh in the background.
+				// Cache drives first paint; always revalidate for cross-client changes.
 				refreshingLabels = true;
 				loadingLabels = false;
 			}
@@ -1943,7 +1910,7 @@ function getDropResource(event: DragEvent): {
 }
 
 function canAssignResourceToLabel(label: LabelListItem) {
-	return canAssignLabels && label.source === "user";
+	return canAssignLabels && !isSystemLabel(label, labels);
 }
 
 function handleLabelDragOver(event: DragEvent, label: LabelListItem) {
@@ -2310,6 +2277,7 @@ async function loadMoreTasksForSpace(spaceId: string) {
 	}
 }
 
+/** Fold buffered realtime mutations onto a freshly fetched list. */
 async function loadWorksForSpace(spaceId: string, force = false) {
 	await authStore.ensureLoaded();
 	if (spaceId !== currentSpaceId) return;
@@ -2321,9 +2289,12 @@ async function loadWorksForSpace(spaceId: string, force = false) {
 	} else {
 		refreshingWorks = true;
 	}
+	worksBuffer.reset();
 	try {
 		const result = await sdk.works.listBySpace(spaceId);
-		if (spaceId === currentSpaceId) works = result.works ?? [];
+		if (spaceId === currentSpaceId) {
+			works = worksBuffer.apply(result.works ?? []);
+		}
 	} catch (error) {
 		console.warn("[sidebar] Failed to load works", { spaceId, error });
 	} finally {
@@ -2427,9 +2398,12 @@ function openSpacePalette() {
 	);
 }
 
+function withSidebarPreview(pathname: string) {
+	return withSidebarMainPreview(pathname, { isMobile });
+}
+
 function buildPreferredSessionRoute(spaceId: string, sessionId: string) {
-	// Keep open file/canvas/port preview when switching chats.
-	return withCurrentPreview(buildSpaceSessionRoute(spaceId, sessionId));
+	return withSidebarPreview(buildSpaceSessionRoute(spaceId, sessionId));
 }
 
 async function handleNavigateToSession(sessionId: string) {
@@ -2448,34 +2422,34 @@ async function handleNavigateToCheckpoint(checkpointId: string) {
 	onClose?.();
 	if (!currentSpaceId) return;
 	await goto(
-		withCurrentPreview(buildSpaceCheckpointRoute(currentSpaceId, checkpointId)),
+		withSidebarPreview(buildSpaceCheckpointRoute(currentSpaceId, checkpointId)),
 	);
 }
 
 async function handleNavigateToNewCheckpoint() {
 	onClose?.();
 	if (!currentSpaceId) return;
-	await goto(withCurrentPreview(buildSpaceCheckpointNewRoute(currentSpaceId)));
+	await goto(withSidebarPreview(buildSpaceCheckpointNewRoute(currentSpaceId)));
 }
 
 async function handleNavigateToCronjob(cronjobId: string) {
 	onClose?.();
 	if (!currentSpaceId) return;
 	await goto(
-		withCurrentPreview(buildSpaceCronjobRoute(currentSpaceId, cronjobId)),
+		withSidebarPreview(buildSpaceCronjobRoute(currentSpaceId, cronjobId)),
 	);
 }
 
 async function handleNavigateToNewCronjob() {
 	onClose?.();
 	if (!currentSpaceId) return;
-	await goto(withCurrentPreview(buildSpaceCronjobNewRoute(currentSpaceId)));
+	await goto(withSidebarPreview(buildSpaceCronjobNewRoute(currentSpaceId)));
 }
 
 async function handleNavigateToTask(taskId: string) {
 	onClose?.();
 	if (!currentSpaceId) return;
-	await goto(withCurrentPreview(buildSpaceTaskRoute(currentSpaceId, taskId)));
+	await goto(withSidebarPreview(buildSpaceTaskRoute(currentSpaceId, taskId)));
 }
 
 function getCurrentSpaceOwnerUsername() {
@@ -2490,12 +2464,22 @@ function getCurrentSpaceOwnerUsername() {
 async function handleNavigateToWork(workId: string) {
 	onClose?.();
 	if (!currentSpaceId) return;
-	await goto(withCurrentPreview(buildSpaceWorkRoute(currentSpaceId, workId)));
+	await goto(withSidebarPreview(buildSpaceWorkRoute(currentSpaceId, workId)));
 }
 
 function handleWorksChanged(event: Event) {
-	const detail = (event as CustomEvent<{ spaceId?: string }>).detail;
+	const detail = (event as CustomEvent<WorksChangedDetail>).detail;
 	if (!currentSpaceId || detail?.spaceId !== currentSpaceId) return;
+	if (detail.work) {
+		worksBuffer.upsert(detail.work);
+		works = upsertWorkSnapshot(works, detail.work);
+		return;
+	}
+	if (detail.deletedWorkId) {
+		worksBuffer.remove(detail.deletedWorkId);
+		works = works.filter((work) => work.id !== detail.deletedWorkId);
+		return;
+	}
 	void loadWorksForSpace(currentSpaceId, true);
 }
 
@@ -2503,7 +2487,7 @@ async function handleCreateNewSession() {
 	if (!currentSpaceId || creatingSession) return;
 	createSessionError = "";
 	try {
-		await goto(withCurrentPreview(buildSpaceNewSessionRoute(currentSpaceId)), {
+		await goto(withSidebarPreview(buildSpaceNewSessionRoute(currentSpaceId)), {
 			keepFocus: true,
 			noScroll: true,
 		});
@@ -3063,7 +3047,7 @@ onMount(() => {
 			window.addEventListener("keydown", handleGlobalSidebarKeydown);
 		}
 		window.addEventListener(
-			"cohub:works-changed",
+			WORKS_CHANGED_EVENT,
 			handleWorksChanged as EventListener,
 		);
 		void (async () => {
@@ -3151,7 +3135,7 @@ onMount(() => {
 				window.removeEventListener("keydown", handleGlobalSidebarKeydown);
 			}
 			window.removeEventListener(
-				"cohub:works-changed",
+				WORKS_CHANGED_EVENT,
 				handleWorksChanged as EventListener,
 			);
 			window.removeEventListener(
@@ -3339,6 +3323,7 @@ $effect(() => {
 				{#each orderedItems as item (item.id)}
 					{@const isActive = isLabelAssignmentActive(item)}
 					{@const itemDraggable = isDraggableLabelItem(item)}
+					{@const canRemoveItem = canEditLabelItems && item.source !== "system"}
 					{@const labelRemoveTitle = `Remove from “${getReactiveLabelDisplayName(label)}”`}
 					{#if item.resourceType === "session" && labelSessionsById.get(item.resourceRef)}
 						{@const session = labelSessionsById.get(item.resourceRef)!}
@@ -3363,7 +3348,7 @@ $effect(() => {
 									}
 								: undefined}
 							draggable={itemDraggable}
-							removeLabelTitle={canEditLabelItems ? labelRemoveTitle : undefined}
+							removeLabelTitle={canRemoveItem ? labelRemoveTitle : undefined}
 							removeLabelDisabled={labelDropBusyId === label.id}
 							onNavigate={(target) => void handleNavigateToSession(target.id)}
 							onDoubleClick={handleSessionRowDoubleClick}
@@ -3372,7 +3357,7 @@ $effect(() => {
 							onRenameValueChange={(value) => { renameTitleValue = value; }}
 							onSubmitRename={(target) => void submitRenameSession(target)}
 							onCancelRename={cancelRenameSession}
-							onRemoveLabel={canEditLabelItems ? () => void removeLabelAssignment(label, item) : undefined}
+							onRemoveLabel={canRemoveItem ? () => void removeLabelAssignment(label, item) : undefined}
 							onDragStart={(event) => handleLabelItemDragStart(event, label, item)}
 							onDragEnd={handleResourceDragEnd}
 						/>
@@ -3382,10 +3367,10 @@ $effect(() => {
 							{checkpoint}
 							href={buildSpaceCheckpointRoute(currentSpaceId!, checkpoint.id)}
 							active={isActive}
-							removeLabelTitle={canEditLabelItems ? labelRemoveTitle : undefined}
+							removeLabelTitle={canRemoveItem ? labelRemoveTitle : undefined}
 							removeLabelDisabled={labelDropBusyId === label.id}
 							onNavigate={(target) => void handleNavigateToCheckpoint(target.id)}
-							onRemoveLabel={canEditLabelItems ? () => void removeLabelAssignment(label, item) : undefined}
+							onRemoveLabel={canRemoveItem ? () => void removeLabelAssignment(label, item) : undefined}
 						/>
 					{:else if item.resourceType === "file"}
 						<SidebarFileRow
@@ -3395,20 +3380,20 @@ $effect(() => {
 							href={labelAssignmentHref(item)}
 							active={isActive}
 							{isMobile}
-							removeLabelTitle={canEditLabelItems ? labelRemoveTitle : undefined}
+							removeLabelTitle={canRemoveItem ? labelRemoveTitle : undefined}
 							removeLabelDisabled={labelDropBusyId === label.id}
 							onNavigate={() => void handleNavigate(labelAssignmentHref(item))}
 							onInsert={insertPathReference}
-							onRemoveLabel={canEditLabelItems ? () => void removeLabelAssignment(label, item) : undefined}
+							onRemoveLabel={canRemoveItem ? () => void removeLabelAssignment(label, item) : undefined}
 						/>
 					{:else}
 						<SidebarFallbackResourceRow
 							{item}
 							active={isActive}
-							removeLabelTitle={canEditLabelItems ? labelRemoveTitle : undefined}
+							removeLabelTitle={canRemoveItem ? labelRemoveTitle : undefined}
 							removeLabelDisabled={labelDropBusyId === label.id}
 							onNavigate={(href) => void handleNavigate(href)}
-							onRemoveLabel={canEditLabelItems ? () => void removeLabelAssignment(label, item) : undefined}
+							onRemoveLabel={canRemoveItem ? () => void removeLabelAssignment(label, item) : undefined}
 						/>
 					{/if}
 				{/each}
@@ -3814,7 +3799,7 @@ $effect(() => {
         class="mt-1 flex h-8 w-8 items-center justify-center rounded-[6px] text-text-tertiary transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
         onclick={() => uiState.setLeftSidebarCollapsed(false)}
         aria-label="Expand sidebar"
-        title="Expand sidebar"
+        title="Expand sidebar (Ctrl+Alt+← / ⌃⌥←)"
       >
         <PanelLeftOpen class="h-4 w-4" />
       </button>
@@ -3860,7 +3845,7 @@ $effect(() => {
           {#if currentSpace}
             <button
               type="button"
-              class="relative flex h-8 w-8 items-center justify-center rounded-[6px] text-brand transition-colors duration-100 hover:bg-brand-muted hover:text-brand"
+              class="new-chat-collapsed relative flex h-8 w-8 items-center justify-center rounded-[6px] text-brand transition-colors duration-100 hover:bg-brand-muted hover:text-brand"
               onclick={() => { void handleCreateNewSession(); }}
               disabled={creatingSession}
               aria-label="New chat"
@@ -4073,7 +4058,7 @@ $effect(() => {
           type="button"
           class="flex h-7 w-7 shrink-0 items-center justify-center rounded-[5px] text-text-tertiary transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
           onclick={() => uiState.setLeftSidebarCollapsed(true)}
-          title="Collapse sidebar"
+          title="Collapse sidebar (Ctrl+Alt+← / ⌃⌥←)"
           aria-label="Collapse sidebar"
         >
           <PanelLeftClose class="h-4 w-4" />
@@ -4118,7 +4103,7 @@ $effect(() => {
           {:else}
             <Plus class="w-3.5 h-3.5 shrink-0" />
             <span class="text-[12px] font-medium">New Chat</span>
-            <span class="ml-auto hidden rounded-[4px] border border-brand/20 bg-bg-primary/70 px-1.5 py-px font-mono text-[10px] text-brand/80 xl:inline">⌘O</span>
+            <span class="new-chat-shortcut ml-auto hidden rounded-[4px] border border-brand/20 bg-bg-primary/70 px-1.5 py-px font-mono text-[10px] text-brand/80 xl:inline">⌘O</span>
           {/if}
         </button>
         <button
@@ -4584,6 +4569,33 @@ $effect(() => {
 {/if}
 
 <style>
+	:global([data-theme="neta-studio"]) .new-chat-collapsed {
+		border: 1px solid var(--sidebar-primary-action-border);
+		border-radius: var(--sidebar-primary-action-radius);
+		background: var(--sidebar-primary-action-bg);
+		color: var(--sidebar-primary-action-fg);
+		box-shadow: 0 6px 16px rgb(0 0 0 / 18%);
+	}
+
+	:global([data-theme="neta-studio"]) .new-chat-collapsed:hover {
+		background: var(--sidebar-primary-action-bg-hover);
+		color: var(--sidebar-primary-action-fg);
+	}
+
+	:global([data-theme="neta-studio"]) .new-chat-shortcut {
+		border-color: color-mix(
+			in srgb,
+			var(--sidebar-primary-action-fg) 20%,
+			transparent
+		);
+		background: transparent;
+		color: color-mix(
+			in srgb,
+			var(--sidebar-primary-action-fg) 70%,
+			transparent
+		);
+	}
+
 	.label-tree-row {
 		position: relative;
 		display: flex;

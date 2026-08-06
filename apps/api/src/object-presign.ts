@@ -7,6 +7,7 @@ export type PresignStorageConfig = {
   bucket?: string;
   accessKeyId?: string;
   secretAccessKey?: string;
+  includeUnsignedPayloadQuery?: boolean;
 };
 
 const PRESIGN_TTL_SECONDS = 60 * 60;
@@ -42,6 +43,7 @@ const createPresignedObjectUrl = (
   objectKey: string,
   contentType?: string | null,
   cacheControl?: string | null,
+  contentDisposition?: string | null,
 ) => {
   if (!storage.bucket) throw new Error("bucket is required");
   if (!storage.endpoint) throw new Error("endpoint is required");
@@ -59,9 +61,13 @@ const createPresignedObjectUrl = (
     host: url.host,
     ...(method === "PUT" && contentType ? { "content-type": contentType } : {}),
     ...(method === "PUT" && cacheControl ? { "cache-control": cacheControl } : {}),
+    ...(method === "PUT" && contentDisposition ? { "content-disposition": contentDisposition } : {}),
   };
   const signedHeaders = Object.keys(headers).sort().join(";");
   url.searchParams.set("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
+  if (storage.includeUnsignedPayloadQuery) {
+    url.searchParams.set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD");
+  }
   url.searchParams.set("X-Amz-Credential", `${storage.accessKeyId}/${credentialScope}`);
   url.searchParams.set("X-Amz-Date", amzDate);
   url.searchParams.set("X-Amz-Expires", String(PRESIGN_TTL_SECONDS));
@@ -105,8 +111,9 @@ export const createPresignedPutObjectUrl = (
   objectKey: string,
   contentType?: string | null,
   cacheControl?: string | null,
+  contentDisposition?: string | null,
 ) => {
-  const signed = createPresignedObjectUrl("PUT", storage, objectKey, contentType, cacheControl);
+  const signed = createPresignedObjectUrl("PUT", storage, objectKey, contentType, cacheControl, contentDisposition);
   return { uploadUrl: signed.url, expiresAt: signed.expiresAt, headers: signed.headers };
 };
 

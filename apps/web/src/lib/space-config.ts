@@ -1,34 +1,24 @@
 import { SPACE_CONFIG_PATH } from "@cohub/protocol";
 import { HttpError } from "@neta-art/cohub";
 import { sdk } from "$lib/sdk";
+import {
+	type NewChatBackgroundConfig,
+	type NewChatComposerApplyPayload,
+	parseSpaceConfig,
+	type SpaceConfig,
+	type WorkspaceDefaultLayout,
+	type WorkspaceLayoutPresentation,
+} from "$lib/space-config-parse";
+import { spacePreviewSessionCache } from "$lib/space-preview-session-cache";
 
-export type NewChatBackgroundConfig = {
-	type: "html" | "image" | "video";
-	url: string;
-	opacity: number;
-	fit: "cover" | "contain" | "fill";
-	position: string;
+export type {
+	NewChatBackgroundConfig,
+	NewChatComposerApplyPayload,
+	SpaceConfig,
+	WorkspaceDefaultLayout,
+	WorkspaceLayoutPresentation,
 };
-
-export type NewChatComposerApplyPayload = {
-	prompt?: string;
-	model?: {
-		provider: string;
-		id: string;
-	};
-	images?: Array<{
-		url: string;
-		name?: string;
-	}>;
-};
-
-export type SpaceConfig = {
-	ui?: {
-		newChat?: {
-			background?: NewChatBackgroundConfig;
-		};
-	};
-};
+export { parseSpaceConfig };
 
 type SpaceConfigListener = (config: SpaceConfig | null) => void;
 export type NewChatBackgroundActionListener = (
@@ -88,73 +78,6 @@ function publish(config: SpaceConfig | null) {
 	for (const listener of listeners) listener(config);
 }
 
-function parseBackgroundUrl(value: unknown) {
-	if (typeof value !== "string") return null;
-	const trimmed = value.trim();
-	if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return trimmed;
-	try {
-		const url = new URL(trimmed);
-		return url.protocol === "https:" ? url.href : null;
-	} catch {
-		return null;
-	}
-}
-
-function parseOptionalNumber(
-	value: unknown,
-	fallback: number,
-	min: number,
-	max: number,
-) {
-	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-	return Math.min(max, Math.max(min, value));
-}
-
-function parseBackground(value: unknown): NewChatBackgroundConfig | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	const record = value as Record<string, unknown>;
-	if (record.enabled === false) return undefined;
-	const url = parseBackgroundUrl(record.url);
-	if (!url) return undefined;
-	const type =
-		record.type === "image" || record.type === "video" || record.type === "html"
-			? record.type
-			: "html";
-	const fit =
-		record.fit === "contain" || record.fit === "fill" || record.fit === "cover"
-			? record.fit
-			: "cover";
-	return {
-		type,
-		url,
-		opacity: parseOptionalNumber(record.opacity, 1, 0, 1),
-		fit,
-		position: typeof record.position === "string" ? record.position : "center",
-	};
-}
-
-function parseSpaceConfig(raw: string): SpaceConfig | null {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		return null;
-	}
-	if (!parsed || typeof parsed !== "object") return null;
-	const record = parsed as Record<string, unknown>;
-	if (record.version !== undefined && record.version !== 1) return null;
-	const ui =
-		record.ui && typeof record.ui === "object"
-			? (record.ui as Record<string, unknown>)
-			: undefined;
-	const newChat =
-		ui?.newChat && typeof ui.newChat === "object"
-			? (ui.newChat as Record<string, unknown>)
-			: undefined;
-	const background = parseBackground(newChat?.background);
-	return background ? { ui: { newChat: { background } } } : {};
-}
-
 function scheduleRetry(
 	spaceId: string,
 	version: number,
@@ -179,23 +102,28 @@ async function loadSpaceConfig(
 ) {
 	const attempt = options.attempt ?? 0;
 	try {
-		const file = await sdk.space(spaceId).files.read(SPACE_CONFIG_PATH);
+		const request = sdk.space(spaceId).getStartup();
+		spacePreviewSessionCache.prime(
+			spaceId,
+			request.then((startup) => startup.previewSession),
+		);
+		const startup = await request;
 		if (activeVersion !== options.version || activeSpaceId !== spaceId) return;
-		if (!("content" in file)) {
-			scheduleRetry(spaceId, options.version, attempt, file.retryAfterMs);
+		if (startup.status === "preparing") {
+			scheduleRetry(
+				spaceId,
+				options.version,
+				attempt,
+				startup.retryAfterMs ?? RETRYABLE_ERROR_DELAY_MS,
+			);
 			return;
 		}
-		const content =
-			file.encoding === "base64" ? atob(file.content) : file.content;
-		writeCachedConfig(spaceId, content);
-		publish(parseSpaceConfig(content));
+		if (startup.status === "missing") clearCachedConfig(spaceId);
+		else if (startup.configRaw !== null)
+			writeCachedConfig(spaceId, startup.configRaw);
+		publish(startup.config);
 	} catch (error) {
 		if (activeVersion !== options.version || activeSpaceId !== spaceId) return;
-		if (error instanceof HttpError && error.status === 404) {
-			clearCachedConfig(spaceId);
-			publish(null);
-			return;
-		}
 		const isRetryableHttpError =
 			error instanceof HttpError &&
 			(error.status === 408 || error.status === 429 || error.status >= 500);
@@ -214,8 +142,8 @@ export function activateSpaceConfig(spaceId: string) {
 	clearRetryTimer();
 	activeSpaceId = spaceId;
 	activeVersion += 1;
-	publish(readCachedConfig(spaceId));
 	void loadSpaceConfig(spaceId, { version: activeVersion });
+	publish(readCachedConfig(spaceId));
 }
 
 export function refreshSpaceConfig(spaceId: string) {

@@ -1,5 +1,7 @@
 import type { GenerationContentBlock, GenerationModelDeclaration } from "@neta-art/generation";
 import type { BillingPayload } from "../billing.js";
+import type { RequestSource } from "../provenance.js";
+export * from "./catalog.js";
 export * from "./policy.js";
 
 export type {
@@ -37,7 +39,10 @@ export type GenerationTaskData = {
   model: string;
   content: GenerationContentBlock[];
   parameters?: Record<string, unknown>;
+  /** Model-owned request metadata validated against the generation declaration. */
   meta?: Record<string, unknown>;
+  /** Server-derived request provenance. Never forwarded to the generation provider. */
+  requestSource?: RequestSource | null;
   /** Server-resolved pricing snapshot. This field is never accepted from the public request. */
   modelDiscount?: GenerationModelDiscountSnapshot;
 };
@@ -79,7 +84,7 @@ export type GenerationBillingRetryTaskData =
  * - `requestId` maps to the provider response body's top-level `request_id`
  * - `cost` maps to the official request price in `usage.cost`
  * - `billing` records post-success credit consumption (when attempted)
- * - `meta` is the request meta (including Cohub context such as taskRunId/spaceId)
+ * - `meta` is the model-owned request meta
  */
 export type GenerationUsageBilling = {
   /** Official provider cost before plan discount. */

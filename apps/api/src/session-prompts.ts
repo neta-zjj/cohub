@@ -9,6 +9,7 @@ import type {
   SubmitSessionPromptError,
   SubmitSessionPromptHooks,
   SubmitSessionPromptInput,
+  SubmitSessionPromptOptions,
   SubmitSessionPromptResult,
   WebAppPromptContext,
   WebsocketPromptContext,
@@ -27,6 +28,7 @@ export type {
   SubmitSessionPromptError,
   SubmitSessionPromptHooks,
   SubmitSessionPromptInput,
+  SubmitSessionPromptOptions,
   SubmitSessionPromptResult,
   WebAppPromptContext,
   WebsocketPromptContext,
@@ -41,7 +43,8 @@ export const expandPromptContent = async (input: {
 export const submitSessionPrompt = async (
   input: SubmitSessionPromptInput,
   hooks: SubmitSessionPromptHooks = {},
+  options: SubmitSessionPromptOptions = {},
 ): Promise<SubmitSessionPromptResult> => getSessionDomainServices().submitPrompt(input, {
   ...hooks,
   beforeEnqueue: hooks.beforeEnqueue,
-});
+}, options);

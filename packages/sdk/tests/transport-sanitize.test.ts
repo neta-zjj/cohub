@@ -6,6 +6,9 @@ import {
 	joinApiUrl,
 	sanitizeAccessToken,
 	createCohubClient,
+	readRequestSourceFromEnv,
+	requestSourceToHeaders,
+	COHUB_SOURCE_HEADER,
 } from "../dist/index.js";
 
 test("sanitizeAccessToken strips CR/LF/TAB and empty results", () => {
@@ -85,4 +88,76 @@ test("HttpTransport can skip onUnauthorized for bootstrap 401s", async () => {
 		(error: unknown) => error instanceof HttpError && error.status === 401,
 	);
 	assert.equal(unauthorizedCalls, 1);
+});
+
+test("HttpTransport attaches X-Cohub-Source-* from requestSource", async () => {
+	const calls = [];
+	const client = createCohubClient({
+		baseUrl: "https://api.example.com",
+		getAccessToken: async () => "token",
+		requestSource: {
+			spaceId: "11111111-1111-1111-1111-111111111111",
+			sessionId: "22222222-2222-2222-2222-222222222222",
+			turnId: "33333333-3333-3333-3333-333333333333",
+			toolCallId: "44444444-4444-4444-4444-444444444444",
+			via: "cli",
+		},
+		fetch: async (_input, init) => {
+			const headers = new Headers(init?.headers);
+			calls.push({
+				space: headers.get(COHUB_SOURCE_HEADER.space),
+				session: headers.get(COHUB_SOURCE_HEADER.session),
+				turn: headers.get(COHUB_SOURCE_HEADER.turn),
+				toolCall: headers.get(COHUB_SOURCE_HEADER.toolCall),
+				via: headers.get(COHUB_SOURCE_HEADER.via),
+			});
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		},
+	});
+	await client.spaces.list();
+	assert.equal(calls.length, 1);
+	assert.deepEqual(calls[0], {
+		space: "11111111-1111-1111-1111-111111111111",
+		session: "22222222-2222-2222-2222-222222222222",
+		turn: "33333333-3333-3333-3333-333333333333",
+		toolCall: "44444444-4444-4444-4444-444444444444",
+		via: "cli",
+	});
+});
+
+test("readRequestSourceFromEnv defaults via for sandbox env", () => {
+	const source = readRequestSourceFromEnv(
+		{
+			COHUB_SPACE_ID: "11111111-1111-1111-1111-111111111111",
+			COHUB_SESSION_ID: "22222222-2222-2222-2222-222222222222",
+		},
+		{ via: "cli" },
+	);
+	assert.deepEqual(source, {
+		spaceId: "11111111-1111-1111-1111-111111111111",
+		sessionId: "22222222-2222-2222-2222-222222222222",
+		via: "cli",
+	});
+	assert.deepEqual(
+		requestSourceToHeaders(source),
+		{
+			[COHUB_SOURCE_HEADER.space]: "11111111-1111-1111-1111-111111111111",
+			[COHUB_SOURCE_HEADER.session]: "22222222-2222-2222-2222-222222222222",
+			[COHUB_SOURCE_HEADER.via]: "cli",
+		},
+	);
+});
+
+test("readRequestSourceFromEnv drops invalid UUIDs; via-only is valid", () => {
+	// Invalid space id is dropped; via alone remains a valid channel source.
+	assert.deepEqual(
+		readRequestSourceFromEnv({ COHUB_SPACE_ID: "not-a-uuid", COHUB_SOURCE_VIA: "cli" }),
+		{ via: "cli" },
+	);
+	assert.deepEqual(readRequestSourceFromEnv({ COHUB_SOURCE_VIA: "cli" }), { via: "cli" });
+	assert.deepEqual(readRequestSourceFromEnv({}, { via: "cli" }), { via: "cli" });
+	assert.equal(readRequestSourceFromEnv({ COHUB_SPACE_ID: "not-a-uuid" }), null);
 });

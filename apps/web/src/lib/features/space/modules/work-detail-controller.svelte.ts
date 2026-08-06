@@ -1,5 +1,11 @@
 import type { WorkMeta, WorkRecord, WorkVersionRecord } from "@neta-art/cohub";
 import { goto } from "$app/navigation";
+import {
+	dispatchWorksChanged,
+	isNewerWorkSnapshot,
+	upsertWorkVersion,
+	type WorksChangedDetail,
+} from "$lib/features/work/work-realtime";
 import { sdk } from "$lib/sdk";
 import { buildSpaceLandingRoute } from "$lib/space-routes";
 import { createKeyedRouteRequestGuard } from "./route-request-guard";
@@ -123,13 +129,10 @@ export function createWorkDetailController(options: {
 		}
 	}
 
-	function notifyWorksUpdated() {
-		if (typeof window === "undefined") return;
-		window.dispatchEvent(
-			new CustomEvent("cohub:works-changed", {
-				detail: { spaceId: options.getSpaceId() },
-			}),
-		);
+	function notifyWorksUpdated(
+		change: Omit<WorksChangedDetail, "spaceId"> = {},
+	) {
+		dispatchWorksChanged({ spaceId: options.getSpaceId(), ...change });
 	}
 
 	function publicRoute(work: WorkRecord | null = detail) {
@@ -150,9 +153,11 @@ export function createWorkDetailController(options: {
 		try {
 			const { work } = await sdk.works.get(workId);
 			if (!isCurrentRequest()) return;
-			detail = work;
-			notify(work);
-			syncFormFromDetail();
+			if (isNewerWorkSnapshot(detail, work)) {
+				detail = work;
+				notify(work);
+				syncFormFromDetail();
+			}
 			void loadHideCohubBarEntitlement();
 			void loadVersions(work.id);
 		} catch (cause) {
@@ -174,7 +179,9 @@ export function createWorkDetailController(options: {
 		versionsError = "";
 		try {
 			const { versions: nextVersions } = await sdk.works.listVersions(workId);
-			if (guard.isCurrent()) versions = nextVersions;
+			if (guard.isCurrent()) {
+				versions = versions.reduce(upsertWorkVersion, nextVersions);
+			}
 		} catch (cause) {
 			if (guard.isCurrent()) {
 				versionsError =
@@ -190,12 +197,12 @@ export function createWorkDetailController(options: {
 		publishError = "";
 		publishSubmitting = true;
 		try {
-			const { work } = await sdk.works.publishVersion(detail.id);
+			const { work, version } = await sdk.works.publishVersion(detail.id);
 			detail = work;
 			notify(work);
 			syncFormFromDetail();
 			await loadVersions(work.id);
-			notifyWorksUpdated();
+			notifyWorksUpdated({ work, version });
 		} catch (cause) {
 			publishError =
 				cause instanceof Error ? cause.message : "Failed to publish version";
@@ -240,15 +247,20 @@ export function createWorkDetailController(options: {
 		actionInProgress = true;
 		error = "";
 		try {
-			const { work } =
-				status === "published"
-					? await sdk.works.publishVersion(detail.id)
-					: await sdk.works.update(detail.id, { status });
+			let work: WorkRecord;
+			let version: WorkVersionRecord | undefined;
+			if (status === "published") {
+				const result = await sdk.works.publishVersion(detail.id);
+				work = result.work;
+				version = result.version;
+			} else {
+				work = (await sdk.works.update(detail.id, { status })).work;
+			}
 			detail = work;
 			notify(work);
 			syncFormFromDetail();
 			void loadVersions(work.id);
-			notifyWorksUpdated();
+			notifyWorksUpdated({ work, version });
 		} catch (cause) {
 			error = cause instanceof Error ? cause.message : "Failed to update work";
 			void loadDetail(detail.id);
@@ -277,7 +289,7 @@ export function createWorkDetailController(options: {
 			deleted = true;
 			detail = null;
 			notify(null);
-			notifyWorksUpdated();
+			notifyWorksUpdated({ deletedWorkId });
 			await goto(buildSpaceLandingRoute(options.getSpaceId()), {
 				replaceState: true,
 			});
@@ -320,21 +332,50 @@ export function createWorkDetailController(options: {
 				),
 				meta: buildWorkMeta(detail.meta, formHideCohubBar),
 			});
-			const { work } = shouldRelease
-				? await sdk.works.publishVersion(savedWork.id)
-				: { work: savedWork };
+			let work = savedWork;
+			let version: WorkVersionRecord | undefined;
+			if (shouldRelease) {
+				const result = await sdk.works.publishVersion(savedWork.id);
+				work = result.work;
+				version = result.version;
+			}
 			detail = work;
 			notify(work);
 			editMode = false;
 			syncFormFromDetail();
 			void loadVersions(work.id);
-			notifyWorksUpdated();
+			notifyWorksUpdated({ work, version });
 		} catch (cause) {
 			formError =
 				cause instanceof Error ? cause.message : "Failed to save work";
 		} finally {
 			formSubmitting = false;
 		}
+	}
+
+	function applyWorksChanged(change: WorksChangedDetail) {
+		if (change.spaceId !== options.getSpaceId()) return;
+		const workId = options.getRouteWorkId();
+		if (!workId) return;
+		if (change.deletedWorkId === workId) {
+			detail = null;
+			notify(null);
+			return;
+		}
+		if (!change.work || change.work.id !== workId) return;
+		if (isNewerWorkSnapshot(detail, change.work)) {
+			detail = change.work;
+			notify(change.work);
+			if (!editMode && !formSubmitting) syncFormFromDetail();
+		}
+		if (change.version?.workId === workId) {
+			versions = upsertWorkVersion(versions, change.version);
+		}
+	}
+
+	function refresh() {
+		const workId = options.getRouteWorkId();
+		if (workId) void loadDetail(workId);
 	}
 
 	function resetTransientState() {
@@ -484,6 +525,8 @@ export function createWorkDetailController(options: {
 		toggleStatus,
 		deleteWork,
 		submitUpdate,
+		applyWorksChanged,
+		refresh,
 		syncRoute,
 		dispose,
 	};

@@ -13,7 +13,6 @@ import {
 	Minimize2,
 	Plus,
 	Square,
-	Upload,
 	X,
 } from "lucide-svelte";
 import { onMount } from "svelte";
@@ -22,6 +21,7 @@ import SlashCommandMenu, {
 	type SlashCommandMenuItem,
 } from "$lib/components/SlashCommandMenu.svelte";
 import SpaceMentionMenu from "$lib/components/SpaceMentionMenu.svelte";
+import UploadProgress from "$lib/components/UploadProgress.svelte";
 import ViewportContextBlocks from "$lib/components/ViewportContextBlocks.svelte";
 import {
 	COMPOSER_ATTACHMENT_ACCEPT,
@@ -55,11 +55,7 @@ import {
 } from "$lib/mentions/space-trigger";
 import { sdk } from "$lib/sdk";
 import { billingConversion } from "$lib/stores/billing-conversion.svelte";
-import {
-	entriesFromDataTransfer,
-	entriesFromFiles,
-	type LocalUploadEntry,
-} from "$lib/upload-entries";
+import { entriesFromFiles, type LocalUploadEntry } from "$lib/upload-entries";
 
 type SelectedModel = {
 	provider: string;
@@ -79,6 +75,8 @@ type Props = {
 	attachments?: ComposerAttachment[];
 	viewportContexts?: ViewportContext[];
 	currentModel?: SelectedModel | null;
+	/** Compact thinking level suffix; null/empty hides. */
+	thinkingLevelLabel?: string | null;
 	/** Compact generation-policy suffix; null/empty hides (Auto). */
 	generationPolicyLabel?: string | null;
 	promptTemplates?: PromptTemplateCatalogEntry[];
@@ -109,6 +107,7 @@ let {
 	attachments = [],
 	viewportContexts = [],
 	currentModel = null,
+	thinkingLevelLabel = null,
 	generationPolicyLabel = null,
 	promptTemplates = [],
 	promptTemplatesLoaded = true,
@@ -127,9 +126,6 @@ let {
 let textareaEl = $state<HTMLTextAreaElement | null>(null);
 let mentionMirrorEl = $state<HTMLDivElement | null>(null);
 let fileInputEl = $state<HTMLInputElement | null>(null);
-let isDragOver = $state(false);
-let dragCounter = 0;
-let isPathDragOver = $state(false);
 let showPromptSuggestions = $state(false);
 let selectedPromptIndex = $state(0);
 let showSpaceMentions = $state(false);
@@ -185,15 +181,14 @@ const submitDisabled = $derived(
 const modelControlLabel = $derived(
 	currentModel?.name ?? currentModel?.id ?? "Model",
 );
-const modelControlTitle = $derived(
-	generationPolicyLabel
-		? `Select model · Generation: ${generationPolicyLabel}`
-		: "Select model",
-);
 const modelControlAriaLabel = $derived(
-	generationPolicyLabel
-		? `Model ${modelControlLabel}, generation ${generationPolicyLabel}`
-		: `Model ${modelControlLabel}`,
+	[
+		`Model ${modelControlLabel}`,
+		thinkingLevelLabel ? `thinking ${thinkingLevelLabel}` : null,
+		generationPolicyLabel ? `generation ${generationPolicyLabel}` : null,
+	]
+		.filter(Boolean)
+		.join(", "),
 );
 
 function isComposerImageAttachment(
@@ -270,12 +265,14 @@ const filteredPromptTemplates = $derived.by<SlashCommandMenuItem[]>(() => {
 		const name = item.name.toLowerCase();
 		const labelLower = label.toLowerCase();
 		const description = item.description.toLowerCase();
+		const mountSlug = item.source?.mountSlug.toLowerCase() ?? "";
 		let matchScore = 0;
 		if (!query) matchScore = 9;
 		else if (labelLower.startsWith(query) || name.startsWith(query))
 			matchScore = 100;
 		else if (labelLower.includes(query) || name.includes(query))
 			matchScore = 80;
+		else if (mountSlug.includes(query)) matchScore = 64;
 		else if (description.includes(query)) matchScore = 48;
 		else continue;
 		scored.push({
@@ -283,6 +280,7 @@ const filteredPromptTemplates = $derived.by<SlashCommandMenuItem[]>(() => {
 			name: item.name,
 			description: item.description,
 			scope: item.scope,
+			source: item.source,
 			matchScore,
 		});
 	}
@@ -873,55 +871,6 @@ function applySpaceMention(item: SpaceMentionSuggestion) {
 	});
 }
 
-function hasAttachmentFiles(dataTransfer: DataTransfer | null) {
-	if (!dataTransfer) return false;
-	return Array.from(dataTransfer.items ?? []).some(
-		(item) => item.kind === "file",
-	);
-}
-
-function handleDragEnter(event: DragEvent) {
-	if (!onpickattachment || !hasAttachmentFiles(event.dataTransfer)) return;
-	event.preventDefault();
-	dragCounter += 1;
-	isDragOver = true;
-}
-
-function handleDragOver(event: DragEvent) {
-	if (!onpickattachment || !hasAttachmentFiles(event.dataTransfer)) return;
-	event.preventDefault();
-	isDragOver = true;
-}
-
-function handleDragLeave(event: DragEvent) {
-	if (!onpickattachment || !hasAttachmentFiles(event.dataTransfer)) return;
-	event.preventDefault();
-	dragCounter = Math.max(0, dragCounter - 1);
-	if (dragCounter === 0) {
-		isDragOver = false;
-	}
-}
-
-async function handleDrop(event: DragEvent) {
-	if (!onpickattachment || !hasAttachmentFiles(event.dataTransfer)) return;
-	event.preventDefault();
-	isDragOver = false;
-	dragCounter = 0;
-	if (!event.dataTransfer) return;
-	onpickattachment(await entriesFromDataTransfer(event.dataTransfer));
-}
-
-function handlePathDragOver(event: DragEvent) {
-	if (!event.dataTransfer?.types.includes("text/cohub-path")) return;
-	event.preventDefault();
-	event.dataTransfer.dropEffect = "copy";
-	isPathDragOver = true;
-}
-
-function handlePathDragLeave() {
-	isPathDragOver = false;
-}
-
 function insertSnippet(
 	snippet: string,
 	options: { focus?: boolean; replacementKey?: string } = {},
@@ -958,14 +907,6 @@ function focusComposer() {
 	requestAnimationFrame(() => {
 		textareaEl?.focus();
 	});
-}
-
-function handlePathDrop(event: DragEvent) {
-	isPathDragOver = false;
-	const path = event.dataTransfer?.getData("text/cohub-path");
-	if (!path || !textareaEl) return;
-	event.preventDefault();
-	insertSnippet(` \`${path}\` `);
 }
 
 function handlePaste(event: ClipboardEvent) {
@@ -1154,25 +1095,12 @@ $effect(() => {
 		{/if}
 
 		<form
-			class={`relative rounded-[var(--chat-composer-radius)] border p-2 shadow-[0_12px_36px_rgba(15,23,42,0.08)] backdrop-blur-md transition-colors ${(isDragOver || isPathDragOver) ? 'border-brand/50 bg-brand/5' : 'border-[color:var(--chat-composer-border)] bg-[var(--chat-composer-bg)] focus-within:border-[color:var(--chat-composer-border-focus)] focus-within:bg-[var(--chat-composer-bg-focus)]'}`}
+			class="relative rounded-[var(--chat-composer-radius)] border border-[color:var(--chat-composer-border)] bg-[var(--chat-composer-bg)] p-2 shadow-[0_12px_36px_rgba(15,23,42,0.08)] backdrop-blur-md transition-colors focus-within:border-[color:var(--chat-composer-border-focus)] focus-within:bg-[var(--chat-composer-bg-focus)]"
 			onsubmit={(event) => {
 				event.preventDefault();
 				submitDraft();
 			}}
-			ondragenter={handleDragEnter}
-			ondragover={handleDragOver}
-			ondragleave={handleDragLeave}
-			ondrop={handleDrop}
 		>
-			{#if isDragOver}
-				<div class="pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-[24px] border border-dashed border-brand/40 bg-bg-primary/82 backdrop-blur-sm">
-					<div class="flex items-center gap-2 rounded-full border border-border-subtle bg-bg-elevated px-4 py-2 text-[12px] text-text-secondary">
-						<Upload class="h-4 w-4 text-brand" />
-						<span>Drop files to attach</span>
-					</div>
-				</div>
-			{/if}
-
 			{#if viewportContexts.length > 0}
 				<div class="mb-1.5 px-3 pt-1" data-drawer-swipe-ignore>
 					<ViewportContextBlocks
@@ -1209,10 +1137,13 @@ $effect(() => {
 										<span>{Math.ceil(attachment.size / 1024)} KB</span>
 										{#if attachment.kind === 'file'}
 											<span aria-hidden="true">·</span>
-											<span>{attachment.status === 'uploading' ? 'Uploading' : attachment.status === 'failed' ? 'Failed' : 'Ready'}</span>
+											<span class="min-w-0 truncate">{attachment.status === 'uploading' ? `Uploading ${Math.round(attachment.progress ?? 0)}%` : attachment.status === 'finalizing' ? 'Finalizing' : attachment.status === 'failed' ? 'Failed' : 'Ready'}</span>
 										{/if}
 									</div>
 								</div>
+							{/if}
+							{#if (attachment.kind === 'file' || attachment.kind === 'image') && (attachment.status === 'uploading' || attachment.status === 'finalizing')}
+								<UploadProgress class="absolute inset-x-0 bottom-0 z-10" value={attachment.status === 'uploading' ? attachment.progress ?? 0 : null} label={`Upload ${attachment.name}`} />
 							{/if}
 							<button
 								type="button"
@@ -1273,12 +1204,9 @@ $effect(() => {
 							onclick={handleComposerClick}
 							onkeyup={handleComposerKeyup}
 							oncompositionend={handleComposerCompositionEnd}
-							ondragover={handlePathDragOver}
-						ondragleave={handlePathDragLeave}
-						ondrop={handlePathDrop}
-						onpaste={handlePaste}
+							onpaste={handlePaste}
 							onblur={handleComposerBlur}
-						onfocus={handleComposerFocus}
+							onfocus={handleComposerFocus}
 						onkeydown={(event) => {
 							if (event.key === 'Escape' && showSpaceMentions) {
 								event.preventDefault();
@@ -1452,23 +1380,35 @@ $effect(() => {
 									class="group flex h-7 max-w-[min(100%,17rem)] items-center gap-1 overflow-hidden rounded-full border border-border-subtle px-2 text-[11px] leading-none text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/40 disabled:cursor-not-allowed disabled:opacity-50"
 									onclick={() => onModelSelect?.()}
 									disabled={disabled || sending}
-									title={modelControlTitle}
 									aria-label={modelControlAriaLabel}
 								>
-									<span class="min-w-0 shrink truncate">
-										{modelControlLabel}
-									</span>
-									{#if generationPolicyLabel}
-										<span
-											class="flex min-w-0 max-w-[6.5rem] shrink-[3] items-center gap-1 text-text-placeholder transition-colors group-hover:text-text-tertiary"
-											aria-hidden="true"
-										>
-											<span class="shrink-0 opacity-50">·</span>
-											<span class="min-w-0 truncate tracking-tight tabular-nums">
-												{generationPolicyLabel}
-											</span>
+									<span class="flex min-w-0 flex-1 items-baseline gap-1 overflow-hidden">
+										<span class="min-w-0 shrink truncate text-text-tertiary group-hover:text-text-secondary">
+											{modelControlLabel}
 										</span>
-									{/if}
+										{#if thinkingLevelLabel}
+											<span
+												class="flex min-w-0 max-w-[4.25rem] shrink-[3] items-baseline gap-0.5 text-[10px] leading-none text-text-placeholder/80 transition-colors group-hover:text-text-placeholder"
+												aria-hidden="true"
+											>
+												<span class="shrink-0 opacity-40">·</span>
+												<span class="min-w-0 truncate tracking-tight tabular-nums">
+													{thinkingLevelLabel}
+												</span>
+											</span>
+										{/if}
+										{#if generationPolicyLabel}
+											<span
+												class="flex min-w-0 max-w-[6.5rem] shrink-[4] items-baseline gap-0.5 text-[10px] leading-none text-text-placeholder/80 transition-colors group-hover:text-text-placeholder"
+												aria-hidden="true"
+											>
+												<span class="shrink-0 opacity-40">·</span>
+												<span class="min-w-0 truncate tracking-tight tabular-nums">
+													{generationPolicyLabel}
+												</span>
+											</span>
+										{/if}
+									</span>
 									<ChevronDown class="h-3 w-3 shrink-0 opacity-40 transition-opacity group-hover:opacity-65" />
 								</button>
 							{/if}

@@ -1,20 +1,30 @@
 import { tick } from "svelte";
 import { DESKTOP_SHELL_MIN_WIDTH_PX } from "$lib/layout/breakpoints";
-import { uiState } from "$lib/stores/ui.svelte";
+import {
+	uiState,
+	WORKSPACE_PREVIEW_DEFAULT_WIDTH,
+	type WorkspaceLayoutSnapshot,
+	type WorkspacePresentation,
+} from "$lib/stores/ui.svelte";
+import {
+	filesChromeEffectivelyHidden,
+	nextTreeSnapshot,
+	resolveFilesChromeToggle,
+} from "./float-layout";
 
 const MAIN_PANEL_MIN_WIDTH = 320;
 const PREVIEW_PANEL_MIN_WIDTH = 280;
+const PREVIEW_PANEL_DEFAULT_WIDTH = WORKSPACE_PREVIEW_DEFAULT_WIDTH;
 
-export type WorkspacePresentation = "default" | "focus" | "immersive";
+export type { WorkspacePresentation };
 export type MobileSurface = "main" | "files" | "preview";
 
-type LayoutSnapshot = {
-	leftSidebarCollapsed: boolean;
-	rightSidebarCollapsed: boolean;
-	filesColumnHidden: boolean;
-	previewWidth: number;
-	treeVisible: boolean;
-};
+function snapshotPreviewWidth(snapshot: WorkspaceLayoutSnapshot | null) {
+	if (!snapshot) return PREVIEW_PANEL_DEFAULT_WIDTH;
+	return Number.isFinite(snapshot.previewWidth) && snapshot.previewWidth > 0
+		? snapshot.previewWidth
+		: PREVIEW_PANEL_DEFAULT_WIDTH;
+}
 
 export function createWorkspaceLayoutController(options: {
 	getIsCompact: () => boolean;
@@ -22,12 +32,14 @@ export function createWorkspaceLayoutController(options: {
 	getFilesAvailable: () => boolean;
 	getHasPreview: () => boolean;
 }) {
-	let previewWidth = $state(480);
-	let presentation = $state<WorkspacePresentation>("default");
+	let previewWidth = $state(PREVIEW_PANEL_DEFAULT_WIDTH);
 	let mobileSurface = $state<MobileSurface>("main");
 	let immersiveMainVisible = $state(true);
-	let snapshot: LayoutSnapshot | null = $state(null);
 	let resizeCleanup: (() => void) | null = null;
+	/** Last space id applied via syncFromPrefs (detect space switches). */
+	let syncedSpaceId: string | null = null;
+
+	const presentation = $derived(uiState.workspacePresentation);
 
 	const treeVisible = $derived(
 		options.getFilesAvailable() && !uiState.rightSidebarCollapsed,
@@ -81,8 +93,11 @@ export function createWorkspaceLayoutController(options: {
 		if (previewWidth === clamped) {
 			// Drag may have painted a temporary width; snap CSS back to state.
 			paintPreviewWidth(clamped);
-			if (setOptions.persistSnapshot && snapshot) {
-				snapshot = { ...snapshot, previewWidth: clamped };
+			if (setOptions.persistSnapshot && uiState.workspaceLayoutSnapshot) {
+				uiState.setWorkspaceLayoutSnapshot({
+					...uiState.workspaceLayoutSnapshot,
+					previewWidth: clamped,
+				});
 			}
 			return;
 		}
@@ -91,8 +106,11 @@ export function createWorkspaceLayoutController(options: {
 		paintPreviewWidth(clamped);
 		previewWidth = clamped;
 		// Only user-driven resizes should rewrite the restore snapshot.
-		if (setOptions.persistSnapshot && snapshot) {
-			snapshot = { ...snapshot, previewWidth };
+		if (setOptions.persistSnapshot && uiState.workspaceLayoutSnapshot) {
+			uiState.setWorkspaceLayoutSnapshot({
+				...uiState.workspaceLayoutSnapshot,
+				previewWidth,
+			});
 		}
 	}
 
@@ -101,19 +119,19 @@ export function createWorkspaceLayoutController(options: {
 	}
 
 	function captureSnapshot() {
-		if (snapshot) return;
-		snapshot = {
+		if (uiState.workspaceLayoutSnapshot) return;
+		uiState.setWorkspaceLayoutSnapshot({
 			leftSidebarCollapsed: uiState.leftSidebarCollapsed,
 			rightSidebarCollapsed: uiState.rightSidebarCollapsed,
 			filesColumnHidden: uiState.filesColumnHidden,
 			previewWidth,
 			treeVisible: !uiState.rightSidebarCollapsed,
-		};
+		});
 	}
 
 	function restoreSnapshot() {
-		const current = snapshot;
-		snapshot = null;
+		const current = uiState.workspaceLayoutSnapshot;
+		uiState.setWorkspaceLayoutSnapshot(null);
 		if (!current) return;
 		uiState.setLeftSidebarCollapsed(current.leftSidebarCollapsed);
 		uiState.setRightSidebarCollapsed(current.rightSidebarCollapsed);
@@ -122,12 +140,16 @@ export function createWorkspaceLayoutController(options: {
 		ensurePreviewFits();
 	}
 
+	function setPresentation(next: WorkspacePresentation) {
+		uiState.setWorkspacePresentation(next);
+	}
+
 	function exitPresentation() {
-		if (presentation === "default" && !snapshot) {
+		if (presentation === "default" && !uiState.workspaceLayoutSnapshot) {
 			immersiveMainVisible = true;
 			return;
 		}
-		presentation = "default";
+		setPresentation("default");
 		immersiveMainVisible = true;
 		restoreSnapshot();
 	}
@@ -138,8 +160,9 @@ export function createWorkspaceLayoutController(options: {
 			exitPresentation();
 			return;
 		}
+		// Switching from immersive: keep the original restore snapshot.
 		captureSnapshot();
-		presentation = "focus";
+		setPresentation("focus");
 		immersiveMainVisible = true;
 		uiState.setFilesColumnHidden(false);
 		uiState.setLeftSidebarCollapsed(true);
@@ -154,8 +177,9 @@ export function createWorkspaceLayoutController(options: {
 			exitPresentation();
 			return;
 		}
+		// Switching from focus: keep the original restore snapshot.
 		captureSnapshot();
-		presentation = "immersive";
+		setPresentation("immersive");
 		immersiveMainVisible = true;
 		uiState.setFilesColumnHidden(false);
 		uiState.setLeftSidebarCollapsed(true);
@@ -169,6 +193,45 @@ export function createWorkspaceLayoutController(options: {
 
 	async function toggleImmersive() {
 		await enterImmersive();
+	}
+
+	/**
+	 * Align live geometry with space-scoped presentation prefs.
+	 * Call after space changes / loadLayoutPrefs (not on every user toggle).
+	 */
+	async function syncFromPrefs(spaceId: string) {
+		const spaceChanged = syncedSpaceId !== spaceId;
+		syncedSpaceId = spaceId;
+		// Do NOT unconditionally show chat here — the centralized
+		// float-mutual-exclusion effect handles visibility constraints.
+
+		if (options.getIsCompact()) {
+			if (uiState.workspacePresentation !== "default") exitPresentation();
+			return;
+		}
+
+		const nextPresentation = uiState.workspacePresentation;
+		const nextSnapshot = uiState.workspaceLayoutSnapshot;
+
+		if (nextPresentation === "focus") {
+			// Restore path keeps snapshot; live focus chrome uses max width.
+			await tick();
+			setPreviewWidth(getMaxPreviewWidth());
+			return;
+		}
+
+		if (nextPresentation === "immersive") {
+			if (spaceChanged && nextSnapshot) {
+				previewWidth = snapshotPreviewWidth(nextSnapshot);
+			}
+			return;
+		}
+
+		// Default: only reset width on space switch (exit already restored snapshot).
+		if (spaceChanged) {
+			previewWidth = PREVIEW_PANEL_DEFAULT_WIDTH;
+			ensurePreviewFits();
+		}
 	}
 
 	function setMobileSurface(next: MobileSurface) {
@@ -262,11 +325,18 @@ export function createWorkspaceLayoutController(options: {
 	 * A collapsed tree with no preview paints as empty (0 width) even when
 	 * `filesColumnHidden` is still false — treat that as hidden for header UI.
 	 */
+	function getFilesChromeVisibility() {
+		return {
+			isCompact: isCompactViewport(),
+			mobileDrawerOpen: uiState.mobileRightDrawerOpen,
+			filesColumnHidden: uiState.filesColumnHidden,
+			treeCollapsed: uiState.rightSidebarCollapsed,
+			hasPreview: options.getHasPreview(),
+		};
+	}
+
 	function isFilesChromeEffectivelyHidden() {
-		if (isCompactViewport()) return !uiState.mobileRightDrawerOpen;
-		if (uiState.filesColumnHidden) return true;
-		// Empty rail: column mounted, tree collapsed, nothing in preview stage.
-		return uiState.rightSidebarCollapsed && !options.getHasPreview();
+		return filesChromeEffectivelyHidden(getFilesChromeVisibility());
 	}
 
 	/**
@@ -307,25 +377,28 @@ export function createWorkspaceLayoutController(options: {
 	 * the first click always reveals something visible (column + tree).
 	 */
 	async function toggleFilesChrome() {
-		if (isCompactViewport()) {
+		const action = resolveFilesChromeToggle(getFilesChromeVisibility());
+		if (action === "toggle-mobile" || action === "hide") {
 			toggleFilesColumn();
 			return;
 		}
-		if (isFilesChromeEffectivelyHidden()) {
-			if (uiState.filesColumnHidden) uiState.setFilesColumnHidden(false);
-			// Empty rail or fully hidden: always open the tree so the click paints.
-			if (uiState.rightSidebarCollapsed) {
-				await toggleTree();
-			} else if (options.getHasPreview() && presentation === "default") {
-				void tick().then(() => ensurePreviewFits());
-			}
-			return;
+		if (uiState.filesColumnHidden) uiState.setFilesColumnHidden(false);
+		// Empty rail or fully hidden: always open the tree so the click paints.
+		if (uiState.rightSidebarCollapsed) {
+			await toggleTree();
+		} else if (options.getHasPreview() && presentation === "default") {
+			void tick().then(() => ensurePreviewFits());
 		}
-		toggleFilesColumn();
 	}
 
-	/** Files-column internal: collapse/expand file tree only. */
-	async function toggleTree() {
+	/** Files-column internal: collapse/expand file tree only.
+	 *
+	 * `persist` controls whether the layout snapshot is updated.  Auto layout
+	 * adjustments (resize, mutual-exclusion cascade) pass `persist: false` so
+	 * exit-Float restores the original tree state.  User-initiated toggles keep
+	 * the default `true` so their preference is remembered.
+	 */
+	async function toggleTree(persist = true) {
 		if (isCompactViewport()) {
 			const nextOpen = !uiState.mobileRightDrawerOpen;
 			uiState.mobileRightDrawerOpen = nextOpen;
@@ -339,12 +412,15 @@ export function createWorkspaceLayoutController(options: {
 		const nextCollapsed = !uiState.rightSidebarCollapsed;
 		const treeWidth = uiState.rightSidebarWidth;
 		uiState.setRightSidebarCollapsed(nextCollapsed);
-		if (snapshot) {
-			snapshot = {
-				...snapshot,
-				rightSidebarCollapsed: nextCollapsed,
-				treeVisible: !nextCollapsed,
-			};
+		if (uiState.workspaceLayoutSnapshot) {
+			const next = nextTreeSnapshot(
+				uiState.workspaceLayoutSnapshot,
+				nextCollapsed,
+				persist,
+			);
+			if (next !== uiState.workspaceLayoutSnapshot) {
+				uiState.setWorkspaceLayoutSnapshot(next);
+			}
 		}
 		// Collapsing the tree with no preview leaves a 0-width empty rail —
 		// fold the whole Files column so header state stays consistent.
@@ -406,6 +482,7 @@ export function createWorkspaceLayoutController(options: {
 		},
 		setPreviewWidth,
 		ensurePreviewFits,
+		syncFromPrefs,
 		toggleFocus,
 		toggleImmersive,
 		exitPresentation,

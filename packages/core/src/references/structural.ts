@@ -1,10 +1,10 @@
 import type { ReferenceInput } from "./types.js";
 
 /**
- * Structural reference builders. Unlike turn references, these correspond to
- * discrete lifecycle events (a fork, a mod mount, a checkpoint save) that do not
- * belong to a turn, so `sourceTurnId` is left null. Each builder is pure so the
- * same logic serves both the live double-write and the backfill scan.
+ * Structural reference builders. Unlike content references, these correspond to
+ * discrete lifecycle events (a fork, a mod mount, a checkpoint save) sourced at
+ * the resource that owns the event rather than a turn. Each builder is pure so
+ * the same logic serves both the live double-write and the backfill scan.
  */
 
 /** A session forked from another session. */
@@ -20,8 +20,8 @@ export const sessionForkReference = (input: {
   sourceId: input.childSessionId,
   targetType: "session",
   targetId: input.parentSessionId,
-  spaceId: input.spaceId,
-  sessionId: input.childSessionId,
+  sourceSpaceId: input.spaceId,
+  sourceSessionId: input.childSessionId,
   meta: {
     ...(input.anchorTurnId ? { anchorTurnId: input.anchorTurnId } : {}),
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
@@ -39,7 +39,7 @@ export const spaceForkReference = (input: {
   sourceId: input.spaceId,
   targetType: "checkpoint",
   targetId: input.baseCheckpointId,
-  spaceId: input.spaceId,
+  sourceSpaceId: input.spaceId,
   meta: input.sourceSpaceId ? { sourceSpaceId: input.sourceSpaceId } : null,
 });
 
@@ -55,7 +55,7 @@ export const checkpointForkReference = (input: {
   sourceId: input.checkpointId,
   targetType: "checkpoint",
   targetId: input.parentCheckpointId,
-  spaceId: input.spaceId,
+  sourceSpaceId: input.spaceId,
   meta: input.rootCheckpointId ? { rootCheckpointId: input.rootCheckpointId } : null,
 });
 
@@ -70,21 +70,6 @@ export const modReference = (input: {
   sourceId: input.spaceId,
   targetType: "space",
   targetId: input.modSpaceId,
-  spaceId: input.spaceId,
+  sourceSpaceId: input.spaceId,
   meta: input.mountSlug ? { mountSlug: input.mountSlug } : null,
-});
-
-/** A user participating in a session (turn-less structural form, e.g. on join). */
-export const participantReference = (input: {
-  spaceId: string;
-  sessionId: string;
-  userUuid: string;
-}): ReferenceInput => ({
-  kind: "participant",
-  sourceType: "user",
-  sourceId: input.userUuid,
-  targetType: "session",
-  targetId: input.sessionId,
-  spaceId: input.spaceId,
-  sessionId: input.sessionId,
 });

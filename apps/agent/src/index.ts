@@ -9,10 +9,11 @@ import {
   createQueueTelemetry,
 } from "@cohub/infra/bullmq";
 import { env } from "./env.js";
-import { AGENT_SANDBOX_BASH_JOB_NAME, AGENT_RUN_COMMAND_JOB_NAME, AGENT_SESSION_FORK_JOB_NAME, AGENT_TURN_JOB_NAME, AGENT_TURN_QUEUE_NAME, type AgentJobData, type AgentTurnJobData, type AgentSessionForkJobData, type AgentSandboxBashUploadJobData, type AgentRunCommandJobData } from "./queue.js";
+import { AGENT_SANDBOX_BASH_JOB_NAME, AGENT_RUN_COMMAND_JOB_NAME, AGENT_SESSION_FORK_JOB_NAME, AGENT_TURN_JOB_NAME, AGENT_TURN_QUEUE_NAME, AGENT_SANDBOX_FS_MUTATION_JOB_NAME, type AgentJobData, type AgentTurnJobData, type AgentSessionForkJobData, type AgentSandboxBashUploadJobData, type AgentRunCommandJobData, type AgentSandboxFsMutationJobData } from "./queue.js";
 import { processAgentTurnJob, disposeAllSessionHandles } from "./processor.js";
 import { processSessionForkJob } from "./fork.js";
 import { processSandboxBashJob } from "./sandbox-bash.js";
+import { processSandboxFsMutationJob, redactSandboxFsMutationJobPayload } from "./sandbox-fs-mutation.js";
 import { processRunCommandJob } from "./run-command.js";
 import { subscribeAbortEvents, closeAbortSubscriber } from "./abort.js";
 import { abortActiveTurnExecutions } from "./active-turns.js";
@@ -39,6 +40,9 @@ const processor: Processor<AgentJobData> = async (job) => {
   }
   if (job.name === AGENT_SANDBOX_BASH_JOB_NAME) {
     return processSandboxBashJob(job as Job<AgentSandboxBashUploadJobData>);
+  }
+  if (job.name === AGENT_SANDBOX_FS_MUTATION_JOB_NAME) {
+    return processSandboxFsMutationJob(job as Job<AgentSandboxFsMutationJobData>);
   }
   if (job.name === AGENT_RUN_COMMAND_JOB_NAME) {
     return processRunCommandJob(job as Job<AgentRunCommandJobData>);
@@ -67,6 +71,17 @@ attachWorkerEventLogger(worker, {
     return skipped !== "session_busy";
   },
 });
+
+// Redact file content only after BullMQ has finalized the job. Redacting inside
+// the processor would let a stalled retry execute with an empty payload.
+const redactFinishedMutation = (job: Job<AgentJobData> | undefined) => {
+  if (!job || job.name !== AGENT_SANDBOX_FS_MUTATION_JOB_NAME) return;
+  void redactSandboxFsMutationJobPayload(job as Job<AgentSandboxFsMutationJobData>).catch((error) => {
+    logger.warn(`[AgentWorker] failed to redact sandbox mutation payload jobId=${job.id ?? "unknown"}`, error);
+  });
+};
+worker.on("completed", (job) => redactFinishedMutation(job));
+worker.on("failed", (job) => redactFinishedMutation(job));
 
 function serializeError(error: unknown) {
   if (error instanceof Error) {

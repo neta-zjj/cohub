@@ -4,8 +4,10 @@ import FileUploadPane from "$lib/components/FileUploadPane.svelte";
 import MobileRightDrawer from "$lib/components/MobileRightDrawer.svelte";
 import SpaceFileSidebar from "$lib/components/SpaceFileSidebar.svelte";
 import { createDeferredMount } from "$lib/deferred-mount.svelte";
+import { pointerDrag } from "$lib/drag/pointer-drag.svelte";
 import { DURATION_PANEL } from "$lib/motion.svelte";
 import type { SpaceFsNode } from "$lib/space-fs";
+import { uiState } from "$lib/stores/ui.svelte";
 import type { LocalUploadEntry } from "$lib/upload-entries";
 
 type Props = {
@@ -34,7 +36,7 @@ type Props = {
 	onSelect: (node: SpaceFsNode, options: { mobile: boolean }) => void;
 	onRefresh: () => void | Promise<void>;
 	onCreateFile: (parentPath: string) => void | Promise<void>;
-	onCreateCanvas: (parentPath: string) => void | Promise<void>;
+	onCreateBoard: (parentPath: string) => void | Promise<void>;
 	onCreateDir: (parentPath: string) => void | Promise<void>;
 	onRename: (node: SpaceFsNode) => void | Promise<void>;
 	onMove?: (node: SpaceFsNode, targetDir: string) => void | Promise<void>;
@@ -75,7 +77,7 @@ let {
 	onSelect,
 	onRefresh,
 	onCreateFile,
-	onCreateCanvas,
+	onCreateBoard,
 	onCreateDir,
 	onRename,
 	onMove = undefined,
@@ -101,6 +103,26 @@ const treeMount = createDeferredMount(
 const desktopMounted = $derived(treeMount.mounted);
 
 const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
+
+// Mirror the drag controller's retract signal onto the drawer. Kept here rather
+// than inside the controller so the drawer stays the only owner of its own
+// visibility, and desktop (no drawer) is unaffected.
+$effect(() => {
+	uiState.mobileRightDrawerRetracted = pointerDrag.retracted;
+});
+
+// A drop committed outside the retracted drawer (i.e. onto the board) means the
+// user is done with the tree: close it so the new card is visible instead of
+// snapping the drawer back over the result.
+let handledCommit = $state(0);
+$effect(() => {
+	const version = pointerDrag.commitVersion;
+	if (version === handledCommit) return;
+	handledCommit = version;
+	if (pointerDrag.committedOutsideSurface) {
+		uiState.mobileRightDrawerOpen = false;
+	}
+});
 </script>
 
 <div
@@ -124,7 +146,7 @@ const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
 					onSelect={(node) => onSelect(node, { mobile: false })}
 					onRefresh={onRefresh}
 					onCreateFile={onCreateFile}
-					onCreateCanvas={onCreateCanvas}
+					onCreateBoard={onCreateBoard}
 					onCreateDir={onCreateDir}
 					onRename={onRename}
 					onMove={onMove}
@@ -137,6 +159,7 @@ const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
 					onOpenPort={(port, url) => onOpenPort(port, url, { mobile: false })}
 					{activePort}
 					{draggable}
+					touchDraggable={draggable}
 					{showItemActions}
 					{canWrite}
 					{previewEndpoints}
@@ -169,6 +192,9 @@ const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
 	isDragging={rightIsDragging}
 	{isDrawerVisible}
 >
+	<!-- Retract surface: dragging a tree item out of here slides the drawer away
+	     so the board behind it can receive the drop. -->
+	<div class="h-full" data-pointer-drag-surface>
 	<SpaceFileSidebar
 		{nodes}
 		{selectedPath}
@@ -179,7 +205,7 @@ const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
 		onSelect={(node) => onSelect(node, { mobile: true })}
 		onRefresh={onRefresh}
 		onCreateFile={onCreateFile}
-		onCreateCanvas={onCreateCanvas}
+		onCreateBoard={onCreateBoard}
 		onCreateDir={onCreateDir}
 		onRename={onRename}
 		onMove={onMove}
@@ -191,6 +217,7 @@ const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
 		onOpenPort={(port, url) => onOpenPort(port, url, { mobile: true })}
 		{activePort}
 		draggable={false}
+		touchDraggable={draggable}
 		showItemActions={false}
 		{canWrite}
 		{previewEndpoints}
@@ -204,6 +231,7 @@ const desktopShellWidth = $derived(desktopCollapsed ? 0 : desktopWidth);
 		onClose={onUploadPaneClose}
 		onComplete={onUploadComplete}
 	/>
+	</div>
 </MobileRightDrawer>
 
 <style>

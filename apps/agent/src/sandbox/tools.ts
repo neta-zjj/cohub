@@ -285,7 +285,7 @@ async function recoverAndRetryAfterInfraError<T>(spaceId: string, error: Sandbox
   return retry();
 }
 
-async function tracedRpc<M extends RpcMethod>(
+export async function tracedRpc<M extends RpcMethod>(
   connection: SandboxConnection,
   method: M,
   params: RpcRequestMap[M]["params"],
@@ -486,6 +486,10 @@ function createRemoteBashOperations(): BashOperations {
                 ...(env ?? {}),
                 ...(ctx?.env ?? {}),
                 ...(ctx?.generationPolicy ? { [GENERATION_POLICY_ENV_KEY]: encodeGenerationPolicy(ctx.generationPolicy) } : {}),
+                ...(ctx?.model ? {
+                  COHUB_MODEL_PROVIDER: ctx.model.provider,
+                  COHUB_MODEL_ID: ctx.model.id,
+                } : {}),
                 ...(ctx?.spaceId ? { COHUB_SPACE_ID: ctx.spaceId } : {}),
                 ...(ctx?.sessionId ? { COHUB_SESSION_ID: ctx.sessionId } : {}),
                 ...(ctx?.turnId ? { COHUB_TURN_ID: ctx.turnId } : {}),

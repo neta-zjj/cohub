@@ -6,15 +6,14 @@ import { floatNear } from "$lib/actions/portal";
 const {
 	focused = false,
 	immersive = false,
-	buttonClass = "icon-btn",
-	iconClass = "w-4 h-4",
+	size = "md",
 	onToggleFocus,
 	onToggleImmersive,
 }: {
 	focused?: boolean;
 	immersive?: boolean;
-	buttonClass?: string;
-	iconClass?: string;
+	/** md = standard 32px chrome button, sm = compact 28px (board toolbar). */
+	size?: "md" | "sm";
 	onToggleFocus: () => void | Promise<void>;
 	onToggleImmersive: () => void | Promise<void>;
 } = $props();
@@ -22,6 +21,7 @@ const {
 let open = $state(false);
 let rootEl = $state<HTMLDivElement | null>(null);
 const expanded = $derived(focused || immersive);
+const iconClass = $derived(size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4");
 const title = $derived(
 	immersive
 		? "Exit immersive preview"
@@ -93,7 +93,8 @@ onDestroy(() => {
 <div bind:this={rootEl} class="preview-expand-menu relative shrink-0">
 	<button
 		type="button"
-		class={buttonClass}
+		class="preview-expand-trigger"
+		class:preview-expand-trigger--sm={size === "sm"}
 		onclick={toggleMenu}
 		title={title}
 		aria-label={title}
@@ -133,6 +134,37 @@ onDestroy(() => {
 </div>
 
 <style>
+	/* Self-contained chrome button: parent scoped classes cannot reach
+	   across the component boundary, so alignment must not depend on them. */
+	.preview-expand-trigger {
+		display: inline-flex;
+		width: 32px;
+		height: 32px;
+		flex-shrink: 0;
+		align-items: center;
+		justify-content: center;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+	}
+
+	.preview-expand-trigger:hover {
+		background: var(--bg-hover);
+		color: var(--text-secondary);
+	}
+
+	.preview-expand-trigger:active {
+		transform: scale(0.96);
+	}
+
+	.preview-expand-trigger--sm {
+		width: 28px;
+		height: 28px;
+	}
+
 	.preview-expand-popover {
 		width: 132px;
 		overflow: hidden;

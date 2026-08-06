@@ -10,20 +10,22 @@ import {
 	Copy,
 	Download,
 	ListTree,
+	Minus,
 	MoreHorizontal,
+	MoveHorizontal,
 	Pencil,
+	Plus,
 	Rocket,
-	Save,
 	TextCursorInput,
 	Trash2,
 	X,
 } from "lucide-svelte";
 import { floatNear } from "$lib/actions/portal";
+import AudioPlayer from "$lib/components/AudioPlayer.svelte";
 import CenteredLoading from "$lib/components/CenteredLoading.svelte";
 import type { FileViewMode } from "$lib/components/file-diff-view";
 import MarkdownView from "$lib/components/MarkdownView.svelte";
-import PreviewExpandMenu from "$lib/components/PreviewExpandMenu.svelte";
-import WorkspacePreviewPane from "$lib/components/WorkspacePreviewPane.svelte";
+import type { PdfPreviewControls } from "$lib/components/PdfPreview.svelte";
 import type { PreviewCaptureTarget } from "$lib/features/preview-mark";
 import PreviewMarkHost from "$lib/features/preview-mark/ui/PreviewMarkHost.svelte";
 import { createLazyModuleLoader } from "$lib/lazy-module";
@@ -32,7 +34,10 @@ import type {
 	WorkspaceFilePosition,
 } from "$lib/workspace-file-links";
 import { formatFileSize } from "../space-utils";
-import PreviewTabs from "./PreviewTabs.svelte";
+import MobilePreviewTabsChrome from "./MobilePreviewTabsChrome.svelte";
+import PreviewFloatChrome from "./PreviewFloatChrome.svelte";
+import type { PreviewSyncStatus } from "./preview-sync-status";
+import type { PreviewTab } from "./preview-tabs";
 
 type InlineFilePanelState = {
 	response: SpaceFsFileResponse | null;
@@ -41,21 +46,14 @@ type InlineFilePanelState = {
 	position: WorkspaceFilePosition | null;
 	loading: boolean;
 	saving: boolean;
+	syncStatus: PreviewSyncStatus;
+	saveError: string | null;
 	error: string | null;
 	tooLarge: boolean;
 };
 
 type PanHandlers = {
 	start: (event: MouseEvent) => void;
-};
-
-type PreviewTab = {
-	kind: "file" | "canvas" | "port";
-	key: string;
-	label: string;
-	title: string;
-	dirty?: boolean;
-	active: boolean;
 };
 
 type Props = {
@@ -72,23 +70,21 @@ type Props = {
 	inlineFileDiffError: string | null;
 	inlineFileIsMarkdown: boolean;
 	inlineFileIsHtml: boolean;
-	inlineFileDirty: boolean;
 	activeFsReadonly: boolean;
 	canEditFiles: boolean;
 	inlineFileCopied: boolean;
 	inlineFileExt: string;
 	inlineFileIsImage: boolean;
 	inlineFileIsVideo: boolean;
+	inlineFileIsAudio: boolean;
+	inlineFileIsPdf: boolean;
 	inlineFileDataUrl: string | null;
 	inlineFileSpaceId: string;
 	inlineFileWork: WorkRecord | null;
-	previewPanelWidth: number;
-	previewFocusMode: boolean;
 	previewImmersiveMode: boolean;
 	treeVisible?: boolean;
-	onToggleTree?: () => void;
+	onToggleTree?: () => void | Promise<void>;
 	isMobile: boolean;
-	animateShell?: boolean;
 	fileActionMenuOpenPath: string | null;
 	inlineFileZoom: number;
 	inlineFilePanX: number;
@@ -105,10 +101,11 @@ type Props = {
 	onDownloadInlineFile: () => void | Promise<void>;
 	onRetryInlineFile?: () => void | Promise<void>;
 	onCopyInlineFileContent: () => void | Promise<void>;
-	onSaveInlineFile: () => void | Promise<void>;
+	onUpdateInlineFileDraft: (path: string, draft: string) => void;
+	onRetryInlineFileSave: () => void | Promise<void>;
+	onOverwriteInlineFile: () => void | Promise<void>;
+	onReloadInlineFile: () => void | Promise<void>;
 	onPublishInlineFile: () => void;
-	onPreviewResizeStart: (event: PointerEvent) => void;
-	onTogglePreviewFocusMode: () => void | Promise<void>;
 	onTogglePreviewImmersiveMode: () => void | Promise<void>;
 	onLabelFile: (
 		path: string,
@@ -138,23 +135,21 @@ let {
 	inlineFileDiffError,
 	inlineFileIsMarkdown,
 	inlineFileIsHtml,
-	inlineFileDirty,
 	activeFsReadonly,
 	canEditFiles,
 	inlineFileCopied,
 	inlineFileExt,
 	inlineFileIsImage,
 	inlineFileIsVideo,
+	inlineFileIsAudio,
+	inlineFileIsPdf,
 	inlineFileDataUrl,
 	inlineFileSpaceId,
 	inlineFileWork,
-	previewPanelWidth,
-	previewFocusMode,
 	previewImmersiveMode,
 	treeVisible = true,
 	onToggleTree,
 	isMobile,
-	animateShell = true,
 	fileActionMenuOpenPath = $bindable(),
 	inlineFileZoom = $bindable(),
 	inlineFilePanX = $bindable(),
@@ -169,10 +164,11 @@ let {
 	onDownloadInlineFile,
 	onRetryInlineFile,
 	onCopyInlineFileContent,
-	onSaveInlineFile,
+	onUpdateInlineFileDraft,
+	onRetryInlineFileSave,
+	onOverwriteInlineFile,
+	onReloadInlineFile,
 	onPublishInlineFile,
-	onPreviewResizeStart,
-	onTogglePreviewFocusMode,
 	onTogglePreviewImmersiveMode,
 	onLabelFile,
 	onInsertFilePathReference,
@@ -191,12 +187,28 @@ const loadRenderedFilePreviewModule = createLazyModuleLoader(
 const loadFileDiffViewModule = createLazyModuleLoader(
 	() => import("$lib/components/FileDiffView.svelte"),
 );
+const loadPdfPreviewModule = createLazyModuleLoader(
+	() => import("$lib/components/PdfPreview.svelte"),
+);
 
 const showDiffMode = $derived(!activeFsReadonly && inlineFileIsText);
 // Bump to force #await to re-subscribe after a cleared lazy-import failure.
 let codeEditorLoadAttempt = $state(0);
 let htmlPreviewLoadAttempt = $state(0);
 let fileDiffLoadAttempt = $state(0);
+let pdfPreviewLoadAttempt = $state(0);
+let pdfControls = $state<PdfPreviewControls | null>(null);
+let pdfPageDraft = $state("");
+let pdfPageInputFocused = $state(false);
+const pdfPageValue = $derived(
+	pdfPageInputFocused ? pdfPageDraft : String(pdfControls?.page ?? ""),
+);
+
+function commitPdfPage() {
+	const parsed = Number.parseInt(pdfPageDraft, 10);
+	if (Number.isFinite(parsed)) pdfControls?.goToPage(parsed);
+	pdfPageDraft = String(pdfControls?.page ?? 1);
+}
 const codeEditorModulePromise = $derived.by(() => {
 	codeEditorLoadAttempt;
 	return loadCodeEditorModule();
@@ -209,22 +221,26 @@ const fileDiffModulePromise = $derived.by(() => {
 	fileDiffLoadAttempt;
 	return loadFileDiffViewModule();
 });
-// Always the button that opened the menu (avoids dual mobile/desktop bind:this races).
+const pdfPreviewModulePromise = $derived.by(() => {
+	pdfPreviewLoadAttempt;
+	return loadPdfPreviewModule();
+});
 let fileActionMenuAnchorEl: HTMLElement | null = $state(null);
-let imageMarkOpenMobile = $state(false);
-let imageMarkOpenDesktop = $state(false);
-let htmlMarkOpenMobile = $state(false);
-let htmlMarkOpenDesktop = $state(false);
-// Mobile + desktop panels both mount; keep mark context separate like images.
-let htmlMarkTargetMobile: PreviewCaptureTarget | null = $state(null);
-let htmlMarkTargetDesktop: PreviewCaptureTarget | null = $state(null);
+let imageMarkOpen = $state(false);
+let htmlMarkOpen = $state(false);
+let htmlMarkTarget: PreviewCaptureTarget | null = $state(null);
+
+const activeFilePath = $derived(inlineFile?.path ?? "");
+const activeResponsePath = $derived(
+	inlineFile?.response?.path ?? activeFilePath,
+);
 
 const imageMarkTarget = $derived.by((): PreviewCaptureTarget | null => {
-	if (!inlineFileIsImage || !inlineFileDataUrl || !inlineFile.path) return null;
+	if (!inlineFileIsImage || !inlineFileDataUrl || !activeFilePath) return null;
 	return {
 		kind: "image",
 		src: inlineFileDataUrl,
-		path: inlineFile.path,
+		path: activeFilePath,
 	};
 });
 const showHtmlMark = $derived(
@@ -236,18 +252,27 @@ const showHtmlMark = $derived(
 // Soft-fail: keep content surface when we still have something usable.
 // Empty text files (content === "") are still editable when open succeeded.
 const hasUsableText = $derived(
-	inlineFileIsText &&
-		Boolean(inlineFile.response) &&
-		(!inlineFile.error ||
-			Boolean(inlineFile.response?.content) ||
-			Boolean(inlineFile.draft)),
+	Boolean(
+		inlineFile &&
+			inlineFileIsText &&
+			inlineFile.response &&
+			(!inlineFile.error ||
+				Boolean(inlineFile.response?.content) ||
+				Boolean(inlineFile.draft)),
+	),
 );
 const hasUsableMedia = $derived(
-	Boolean((inlineFileIsImage || inlineFileIsVideo) && inlineFileDataUrl),
+	Boolean(
+		((inlineFileIsImage || inlineFileIsVideo || inlineFileIsAudio) &&
+			inlineFileDataUrl) ||
+			(inlineFileIsPdf &&
+				inlineFile.response &&
+				(inlineFile.response.content || inlineFile.response.url)),
+	),
 );
 const showExclusiveFallback = $derived(
 	Boolean(
-		inlineFile.error &&
+		inlineFile?.error &&
 			!inlineFile.loading &&
 			!hasUsableText &&
 			!hasUsableMedia &&
@@ -256,9 +281,7 @@ const showExclusiveFallback = $derived(
 );
 
 $effect(() => {
-	if (showHtmlMark) return;
-	htmlMarkOpenMobile = false;
-	htmlMarkOpenDesktop = false;
+	if (!showHtmlMark) htmlMarkOpen = false;
 });
 </script>
 
@@ -304,14 +327,166 @@ $effect(() => {
 	</div>
 {/snippet}
 
-{#snippet PreviewFocusButton()}
-	{#if !isMobile}
-		<PreviewExpandMenu
-			focused={previewFocusMode}
-			immersive={previewImmersiveMode}
-			onToggleFocus={onTogglePreviewFocusMode}
-			onToggleImmersive={onTogglePreviewImmersiveMode}
-		/>
+{#snippet FloatFileActions()}
+	{#if inlineFileCanGoBack}
+		<button
+			type="button"
+			class="icon-btn"
+			onclick={() => void onBackInlineFile()}
+			title="Back"
+			aria-label="Back"
+		>
+			<ArrowLeft class="h-4 w-4" />
+		</button>
+	{/if}
+	{@render FileHeaderCoreActions(activeResponsePath || activeFilePath)}
+	{#if inlineFileIsPdf && hasUsableMedia}
+		{@render PdfHeaderControls()}
+	{/if}
+	{#if hasUsableText && (inlineFileHasRenderedPreview || showDiffMode)}
+		<div class="float-view-mode">
+			<button
+				type="button"
+				class="segmented-btn"
+				class:active={inlineFileViewMode === "source"}
+				onclick={() => (inlineFileViewMode = "source")}
+				title="Edit source"
+			>Source</button>
+			{#if inlineFileHasRenderedPreview}
+				<button
+					type="button"
+					class="segmented-btn"
+					class:active={inlineFileViewMode === "preview"}
+					onclick={() => (inlineFileViewMode = "preview")}
+					title={inlineFileIsMarkdown ? "Preview markdown" : "Preview HTML"}
+				>Preview</button>
+			{/if}
+			{#if showDiffMode}
+				<button
+					type="button"
+					class="segmented-btn"
+					class:active={inlineFileViewMode === "diff"}
+					onclick={() => (inlineFileViewMode = "diff")}
+					title="Diff since last save"
+				>Diff</button>
+			{/if}
+		</div>
+	{/if}
+	{#if inlineFileIsHtml && inlineFileViewMode === "preview"}
+		<button
+			type="button"
+			class="icon-btn preview-context-secondary"
+			onclick={onPublishInlineFile}
+			title="Publish work"
+			aria-label="Publish work"
+		>
+			<Rocket class="h-4 w-4" />
+		</button>
+	{/if}
+	{#if showHtmlMark}
+		<div class="preview-context-secondary">
+			<PreviewMarkHost bind:open={htmlMarkOpen} target={htmlMarkTarget} />
+		</div>
+	{/if}
+	{#if hasUsableText}
+		<button
+			type="button"
+			class="icon-btn preview-context-secondary"
+			onclick={() => void onCopyInlineFileContent()}
+			title="Copy content"
+			aria-label="Copy content"
+		>
+			{#if inlineFileCopied}
+				<Check class="h-4 w-4 text-success-soft" />
+			{:else}
+				<Copy class="h-4 w-4" />
+			{/if}
+		</button>
+	{/if}
+	{#if inlineFileIsImage && inlineFileDataUrl}
+		{#if imageMarkTarget}
+			<PreviewMarkHost bind:open={imageMarkOpen} target={imageMarkTarget} />
+		{/if}
+		<div class="float-image-zoom">
+			<button
+				type="button"
+				class="zoom-btn"
+				onclick={() => {
+					inlineFileZoom = Math.max(0.25, inlineFileZoom - 0.25);
+					inlineFilePanX = 0;
+					inlineFilePanY = 0;
+				}}
+				title="Zoom out"
+				aria-label="Zoom out"
+			>
+				<Minus class="h-4 w-4" />
+			</button>
+			<span class="w-10 text-center text-[11px] tabular-nums text-text-tertiary">
+				{Math.round(inlineFileZoom * 100)}%
+			</span>
+			<button
+				type="button"
+				class="zoom-btn"
+				onclick={() => {
+					inlineFileZoom = Math.min(4, inlineFileZoom + 0.25);
+					inlineFilePanX = 0;
+					inlineFilePanY = 0;
+				}}
+				title="Zoom in"
+				aria-label="Zoom in"
+			>
+				<Plus class="h-4 w-4" />
+			</button>
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet PdfHeaderControls()}
+	{#if pdfControls}
+		<div class="pdf-header-controls">
+			<input
+				class="pdf-page-input"
+				type="text"
+				inputmode="numeric"
+				aria-label="Page number"
+				value={pdfPageValue}
+				oninput={(event) => {
+					pdfPageDraft = event.currentTarget.value;
+				}}
+				onfocus={(event) => {
+					pdfPageInputFocused = true;
+					pdfPageDraft = String(pdfControls?.page ?? 1);
+					event.currentTarget.select();
+				}}
+				onblur={() => {
+					pdfPageInputFocused = false;
+					commitPdfPage();
+				}}
+				onkeydown={(event) => {
+					if (event.key === "Enter") event.currentTarget.blur();
+				}}
+			/>
+			<span class="pdf-page-total">/ {pdfControls.pageCount}</span>
+			<span class="pdf-header-divider"></span>
+			<button type="button" class="icon-btn" title="Zoom out" aria-label="Zoom out" onclick={() => pdfControls?.zoomOut()}>
+				<Minus class="h-4 w-4" />
+			</button>
+			<span class="pdf-scale">{Math.round(pdfControls.scale * 100)}%</span>
+			<button type="button" class="icon-btn" title="Zoom in" aria-label="Zoom in" onclick={() => pdfControls?.zoomIn()}>
+				<Plus class="h-4 w-4" />
+			</button>
+			<button
+				type="button"
+				class="icon-btn"
+				class:active={pdfControls.fitWidth}
+				title="Fit width"
+				aria-label="Fit width"
+				aria-pressed={pdfControls.fitWidth}
+				onclick={() => pdfControls?.fitPageWidth()}
+			>
+				<MoveHorizontal class="h-4 w-4" />
+			</button>
+		</div>
 	{/if}
 {/snippet}
 
@@ -375,8 +550,8 @@ $effect(() => {
 {/snippet}
 
 {#snippet SoftFailBanner()}
-	{#if inlineFile.error && (hasUsableText || hasUsableMedia)}
-		<div class="flex shrink-0 items-center gap-2 border-b border-error-soft/20 bg-error-bg px-3 py-1.5 text-[11px] text-error-soft">
+	{#if inlineFile?.error && (hasUsableText || hasUsableMedia)}
+		<div class="file-status-banner flex shrink-0 items-center gap-2 border-b border-error-soft/20 bg-error-bg px-3 py-1.5 text-[11px] text-error-soft">
 			<span class="min-w-0 flex-1 truncate">{inlineFile.error}</span>
 			{#if onRetryInlineFile}
 				<button type="button" class="action-btn" onclick={() => void onRetryInlineFile()}>Retry</button>
@@ -389,8 +564,22 @@ $effect(() => {
 	{/if}
 {/snippet}
 
+{#snippet SyncIssueBanner()}
+	{#if inlineFile?.saveError}
+		<div class="file-status-banner flex shrink-0 items-center gap-2 border-b border-error-soft/20 bg-error-bg px-3 py-1.5 text-[11px] text-error-soft">
+			<span class="min-w-0 flex-1 truncate">{inlineFile.saveError}</span>
+			{#if inlineFile.syncStatus === "conflict"}
+				<button type="button" class="action-btn" onclick={() => void onReloadInlineFile()}>Reload</button>
+				<button type="button" class="action-btn" onclick={() => void onOverwriteInlineFile()}>Keep mine</button>
+			{:else}
+				<button type="button" class="action-btn" onclick={() => void onRetryInlineFileSave()}>Retry</button>
+			{/if}
+		</div>
+	{/if}
+{/snippet}
+
 {#snippet MarkdownFilePreview()}
-	{#if inlineFile.response}
+	{#if inlineFile?.response}
 		<MarkdownView
 			source={inlineFile.draft}
 			variant="document"
@@ -400,37 +589,21 @@ $effect(() => {
 	{/if}
 {/snippet}
 
-{#snippet HtmlFilePreview(layout: "mobile" | "desktop")}
-	{#if inlineFile.response}
+{#snippet HtmlFilePreview()}
+	{#if inlineFile?.response}
 		{#await htmlPreviewModulePromise then previewModule}
 			{@const LazyRenderedFilePreview = previewModule.default}
-			{@const hostWork =
-				(layout === "mobile") === isMobile ? inlineFileWork : null}
-			{#if layout === "mobile"}
-				<LazyRenderedFilePreview
-					name={inlineFile.response.name}
-					source={inlineFile.draft}
-					type="html"
-					path={inlineFile.response.path}
-					spaceId={inlineFileSpaceId}
-					readonly={activeFsReadonly}
-					work={hostWork}
-					bind:markTarget={htmlMarkTargetMobile}
-					onOpenFile={onOpenLinkedInlineFile}
-				/>
-			{:else}
-				<LazyRenderedFilePreview
-					name={inlineFile.response.name}
-					source={inlineFile.draft}
-					type="html"
-					path={inlineFile.response.path}
-					spaceId={inlineFileSpaceId}
-					readonly={activeFsReadonly}
-					work={hostWork}
-					bind:markTarget={htmlMarkTargetDesktop}
-					onOpenFile={onOpenLinkedInlineFile}
-				/>
-			{/if}
+			<LazyRenderedFilePreview
+				name={inlineFile.response.name}
+				source={inlineFile.draft}
+				type="html"
+				path={inlineFile.response.path}
+				spaceId={inlineFileSpaceId}
+				readonly={activeFsReadonly}
+				work={inlineFileWork}
+				bind:markTarget={htmlMarkTarget}
+				onOpenFile={onOpenLinkedInlineFile}
+			/>
 		{:catch}
 			{@render LazyLoadError("Preview failed to load.", () => {
 				htmlPreviewLoadAttempt += 1;
@@ -439,7 +612,33 @@ $effect(() => {
 	{/if}
 {/snippet}
 
-{#snippet TextFileBody(layout: "mobile" | "desktop")}
+{#snippet PdfFilePreview()}
+	{#if inlineFile?.response}
+		{#await pdfPreviewModulePromise then previewModule}
+			{@const LazyPdfPreview = previewModule.default}
+			<LazyPdfPreview
+				name={inlineFile.response.name}
+				url={inlineFile.response.delivery === "url"
+					? (inlineFile.response.url ?? null)
+					: null}
+				base64={inlineFile.response.delivery === "url"
+					? null
+					: inlineFile.response.content}
+				version={`${inlineFile.response.path}:${inlineFile.response.size}:${inlineFile.response.mtimeMs}`}
+				{isMobile}
+				onControlsChange={(controls) => {
+					pdfControls = controls;
+				}}
+			/>
+		{:catch}
+			{@render LazyLoadError("PDF preview failed to load.", () => {
+				pdfPreviewLoadAttempt += 1;
+			})}
+		{/await}
+	{/if}
+{/snippet}
+
+{#snippet TextFileBody()}
 	{#if inlineFileViewMode === "diff" && showDiffMode}
 		{#await fileDiffModulePromise then diffModule}
 			{@const LazyFileDiffView = diffModule.default}
@@ -457,19 +656,18 @@ $effect(() => {
 		{#if inlineFileIsMarkdown}
 			{@render MarkdownFilePreview()}
 		{:else}
-			{@render HtmlFilePreview(layout)}
+			{@render HtmlFilePreview()}
 		{/if}
-	{:else}
+	{:else if inlineFile}
 		{#await codeEditorModulePromise then editorModule}
 			{@const LazyCodeEditor = editorModule.default}
 			{@const editorPath = inlineFile.path}
 			<LazyCodeEditor
 				value={inlineFile.draft}
 				language={inlineFileExt}
+				allowDrawerSwipe={isMobile}
 				initialPosition={inlineFile.position}
-				onInput={(v) => {
-					if (inlineFile) inlineFile.draft = v;
-				}}
+				onInput={(v) => onUpdateInlineFileDraft(editorPath, v)}
 				onVisibleLinesChange={(range) =>
 					onVisibleLinesChange?.(editorPath, range)}
 				readonly={!canEditFiles || activeFsReadonly}
@@ -482,34 +680,34 @@ $effect(() => {
 	{/if}
 {/snippet}
 
-  <!-- Inline file panel — desktop: side panel, mobile: full-screen overlay -->
-  {#if inlineFile}
-    <!-- Mobile full-screen overlay -->
-    <div class="lg:hidden fixed inset-0 z-50 flex flex-col bg-bg-content">
-      <!-- Single mobile chrome row: close + tabs/title + more -->
-      <div class="flex h-11 shrink-0 items-center gap-1 border-b border-border-subtle bg-bg-surface px-2">
-        <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file" aria-label="Close file">
-          <X class="w-5 h-5" />
-        </button>
-        {#if inlineFileCanGoBack}
-          <button type="button" class="icon-btn" onclick={() => void onBackInlineFile()} title="Back" aria-label="Back">
-            <ArrowLeft class="w-5 h-5" />
-          </button>
-        {/if}
-        {#if previewTabs.length > 1}
-          <div class="min-w-0 flex-1 overflow-hidden">
-            <PreviewTabs tabs={previewTabs} onActivate={onActivatePreviewTab} onClose={onClosePreviewTab} embedded treeVisible={treeVisible} onToggleTree={onToggleTree} />
-          </div>
-        {:else}
-          <div class="min-w-0 flex-1 truncate px-1 text-[13px] text-text-secondary" title={inlineFile.response?.path ?? inlineFile.path}>
-            {inlineFile.response?.name ?? inlineFile.path.split("/").pop() ?? inlineFile.path}
-          </div>
-        {/if}
-        {@render FileHeaderCoreActions(inlineFile.path)}
-      </div>
-      {#if inlineFile.loading}
+{#if isMobile}
+	<div class="flex h-full min-w-0 flex-col bg-bg-content">
+			<MobilePreviewTabsChrome
+				tabs={previewTabs}
+				onActivate={onActivatePreviewTab}
+				onClose={onClosePreviewTab}
+			>
+				{#snippet trailing()}
+					{#if inlineFileIsPdf && hasUsableMedia}
+						{@render PdfHeaderControls()}
+					{/if}
+					{#if inlineFileCanGoBack}
+						<button
+							type="button"
+							class="icon-btn"
+							onclick={() => void onBackInlineFile()}
+							title="Back"
+							aria-label="Back"
+						>
+							<ArrowLeft class="h-4 w-4" />
+						</button>
+					{/if}
+					{@render FileHeaderCoreActions(activeFilePath)}
+				{/snippet}
+			</MobilePreviewTabsChrome>
+      {#if inlineFile?.loading}
         <CenteredLoading label="Loading file…" size="panel" />
-      {:else if inlineFile.tooLarge}
+      {:else if inlineFile?.tooLarge}
         {@render FileOpenFallback({
           title: "File too large to preview",
           detail: "This file exceeds 10MB and cannot be opened in the web editor.",
@@ -519,11 +717,12 @@ $effect(() => {
       {:else if showExclusiveFallback}
         {@render FileOpenFallback({
           title: "Couldn't open file",
-          detail: inlineFile.error ?? "Failed to open file",
+          detail: inlineFile?.error ?? "Failed to open file",
           variant: "error",
         })}
-      {:else if inlineFile.response}
+      {:else if inlineFile?.response}
         {@render SoftFailBanner()}
+        {@render SyncIssueBanner()}
         {#if hasUsableText}
           <div class="flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle bg-bg-surface px-3">
             {#if inlineFileHasRenderedPreview || showDiffMode}
@@ -540,31 +739,26 @@ $effect(() => {
             <div class="flex-1"></div>
             {#if showHtmlMark}
               <PreviewMarkHost
-                bind:open={htmlMarkOpenMobile}
-                target={htmlMarkTargetMobile}
-                buttonClass="icon-btn"
+                bind:open={htmlMarkOpen}
+                target={htmlMarkTarget}
               />
             {/if}
             <button type="button" class="icon-btn" onclick={() => void onCopyInlineFileContent()} title="Copy content">
               {#if inlineFileCopied}<Check class="w-4 h-4 text-success-soft" />{:else}<Copy class="w-4 h-4" />{/if}
             </button>
-            {#if !activeFsReadonly}
-              <button type="button" class="action-btn" onclick={() => void onSaveInlineFile()} disabled={inlineFile.saving || !inlineFileDirty || !canEditFiles} title="Save">
-                <Save class="w-4 h-4 shrink-0" />
-              </button>
-            {:else}
+            {#if activeFsReadonly}
               <span class="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-tertiary">Read-only snapshot</span>
             {/if}
           </div>
           <div class="flex-1 min-h-0">
-            {@render TextFileBody("mobile")}
+            {@render TextFileBody()}
           </div>
         {:else if inlineFileIsImage && inlineFileDataUrl}
           <div class="relative flex flex-1 items-center justify-center overflow-hidden p-4">
             {#if imageMarkTarget}
               <div class="pointer-events-none absolute top-2 right-2 z-20">
                 <div class="pointer-events-auto rounded-md border border-border-subtle bg-bg-surface/95 shadow-sm backdrop-blur-sm">
-                  <PreviewMarkHost bind:open={imageMarkOpenMobile} target={imageMarkTarget} buttonClass="icon-btn" />
+                  <PreviewMarkHost bind:open={imageMarkOpen} target={imageMarkTarget} />
                 </div>
               </div>
             {/if}
@@ -575,6 +769,22 @@ $effect(() => {
             <video src={inlineFileDataUrl} controls class="max-h-full max-w-full rounded-md">
               <track kind="captions" />
             </video>
+          </div>
+        {:else if inlineFileIsAudio && inlineFileDataUrl}
+          <div class="flex flex-1 items-center justify-center p-4">
+            <div class="w-full max-w-md">
+              <AudioPlayer
+                src={inlineFileDataUrl}
+                title={inlineFile.response.name}
+                subtitle={formatFileSize(inlineFile.response.size)}
+                downloadUrl={inlineFileDownloadUrl}
+                downloadName={inlineFileDownloadName}
+              />
+            </div>
+          </div>
+        {:else if inlineFileIsPdf && hasUsableMedia}
+          <div class="min-h-0 flex-1">
+            {@render PdfFilePreview()}
           </div>
         {:else}
           {@render FileOpenFallback({
@@ -587,33 +797,34 @@ $effect(() => {
       {:else}
         <div class="flex-1 flex items-center justify-center text-sm text-text-tertiary">No file selected</div>
       {/if}
-    </div>
-    <!-- Desktop side panel -->
-    <WorkspacePreviewPane
-      desktopOnly={true}
-      width={previewPanelWidth}
-      ariaLabel="File preview"
-      onResizeStart={onPreviewResizeStart}
-      immersive={previewImmersiveMode}
-      animate={animateShell}
-    >
-      <div class="inline-file-preview flex h-full min-w-0 flex-col bg-bg-content" class:inline-file-preview--immersive={previewImmersiveMode}>
-        <PreviewTabs tabs={previewTabs} onActivate={onActivatePreviewTab} onClose={onClosePreviewTab} treeVisible={treeVisible} onToggleTree={onToggleTree} />
-        {#if inlineFile.loading}
+		</div>
+	{:else}
+      <div class="inline-file-preview relative flex h-full min-w-0 flex-col bg-bg-content" class:inline-file-preview--immersive={previewImmersiveMode}>
+        {#if previewImmersiveMode}
+          <PreviewFloatChrome
+            tabs={previewTabs}
+            filesVisible={treeVisible}
+            onActivate={onActivatePreviewTab}
+            onClose={onClosePreviewTab}
+            onToggleFiles={onToggleTree}
+            onExit={onTogglePreviewImmersiveMode}
+          >
+            {#snippet context()}{@render FloatFileActions()}{/snippet}
+          </PreviewFloatChrome>
+        {/if}
+        {#if inlineFile?.loading}
           <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
-            <span class="preview-chrome-path flex-1 truncate text-xs text-text-secondary">{inlineFile.path}</span>
-            {@render FileHeaderCoreActions(inlineFile.path)}
-            {@render PreviewFocusButton()}
+            <span class="preview-chrome-path flex-1 truncate text-xs text-text-secondary">{activeFilePath}</span>
+            {@render FileHeaderCoreActions(activeFilePath)}
             <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
               <X class="w-4 h-4" />
             </button>
           </div>
           <CenteredLoading label="Loading file…" size="panel" />
-        {:else if inlineFile.tooLarge}
+        {:else if inlineFile?.tooLarge}
           <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
-            <span class="preview-chrome-path flex-1 truncate text-xs text-text-secondary">{inlineFile.path}</span>
-            {@render FileHeaderCoreActions(inlineFile.path)}
-            {@render PreviewFocusButton()}
+            <span class="preview-chrome-path flex-1 truncate text-xs text-text-secondary">{activeFilePath}</span>
+            {@render FileHeaderCoreActions(activeFilePath)}
             <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
               <X class="w-4 h-4" />
             </button>
@@ -626,20 +837,20 @@ $effect(() => {
           })}
         {:else if showExclusiveFallback}
           <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
-            <span class="preview-chrome-path flex-1 truncate text-xs text-text-secondary">{inlineFile.path}</span>
-            {@render FileHeaderCoreActions(inlineFile.path)}
-            {@render PreviewFocusButton()}
+            <span class="preview-chrome-path flex-1 truncate text-xs text-text-secondary">{activeFilePath}</span>
+            {@render FileHeaderCoreActions(activeFilePath)}
             <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
               <X class="w-4 h-4" />
             </button>
           </div>
           {@render FileOpenFallback({
             title: "Couldn't open file",
-            detail: inlineFile.error ?? "Failed to open file",
+            detail: inlineFile?.error ?? "Failed to open file",
             variant: "error",
           })}
-        {:else if inlineFile.response}
+        {:else if inlineFile?.response}
           {@render SoftFailBanner()}
+          {@render SyncIssueBanner()}
           {#if hasUsableText}
             <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
               {#if inlineFileCanGoBack}
@@ -648,9 +859,9 @@ $effect(() => {
                 </button>
               {/if}
               <div class="preview-chrome-path min-w-0 flex-1 truncate text-xs sm:text-sm text-text-secondary">
-                {inlineFile.response.path}
+                {activeResponsePath}
               </div>
-              {@render FileHeaderCoreActions(inlineFile.response.path)}
+              {@render FileHeaderCoreActions(activeResponsePath)}
               {#if inlineFileIsHtml && inlineFileViewMode === "preview"}
                 <button type="button" class="action-btn" onclick={onPublishInlineFile} title="Publish work">
                   <Rocket class="w-3.5 h-3.5 shrink-0" />
@@ -694,9 +905,8 @@ $effect(() => {
               {/if}
               {#if showHtmlMark}
                 <PreviewMarkHost
-                  bind:open={htmlMarkOpenDesktop}
-                  target={htmlMarkTargetDesktop}
-                  buttonClass="icon-btn"
+                  bind:open={htmlMarkOpen}
+                  target={htmlMarkTarget}
                 />
               {/if}
               <button type="button" class="icon-btn" onclick={() => void onCopyInlineFileContent()} title="Copy content">
@@ -708,36 +918,24 @@ $effect(() => {
               </button>
               {#if activeFsReadonly}
                 <span class="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-tertiary">Read-only snapshot</span>
-              {:else}
-                <button
-                  type="button"
-                  class="action-btn"
-                  onclick={() => void onSaveInlineFile()}
-                  disabled={inlineFile.saving || !inlineFileDirty || !canEditFiles}
-                  title="Save (Ctrl+S)"
-                >
-                  <Save class="w-3.5 h-3.5 shrink-0" />
-                  <span class="hidden sm:inline">Save</span>
-                </button>
               {/if}
-              {@render PreviewFocusButton()}
               <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
                 <X class="w-4 h-4" />
               </button>
             </div>
             <div class="flex-1 min-h-0">
-              {@render TextFileBody("desktop")}
+              {@render TextFileBody()}
             </div>
           {:else if inlineFileIsImage && inlineFileDataUrl}
             <div class="relative flex min-h-0 flex-1 flex-col">
               <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
                 <div class="preview-chrome-path min-w-0 flex-1 truncate text-xs sm:text-sm text-text-secondary">
-                  {inlineFile.response.path}
+                  {activeResponsePath}
                 </div>
                 <div class="text-xs text-text-tertiary hidden sm:inline">{formatFileSize(inlineFile.response.size)}</div>
-                {@render FileHeaderCoreActions(inlineFile.response.path)}
+                {@render FileHeaderCoreActions(activeResponsePath)}
                 {#if imageMarkTarget}
-                  <PreviewMarkHost bind:open={imageMarkOpenDesktop} target={imageMarkTarget} buttonClass="icon-btn" />
+                  <PreviewMarkHost bind:open={imageMarkOpen} target={imageMarkTarget} />
                 {/if}
                 <button type="button" class="zoom-btn" onclick={() => { inlineFileZoom = Math.max(0.25, inlineFileZoom - 0.25); inlineFilePanX = 0; inlineFilePanY = 0; }} title="Zoom out">
                   <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="7" y1="11" x2="15" y2="11"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -746,7 +944,6 @@ $effect(() => {
                 <button type="button" class="zoom-btn" onclick={() => { inlineFileZoom = Math.min(4, inlineFileZoom + 0.25); inlineFilePanX = 0; inlineFilePanY = 0; }} title="Zoom in">
                   <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="11" y1="7" x2="11" y2="15"/><line x1="7" y1="11" x2="15" y2="11"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                 </button>
-                {@render PreviewFocusButton()}
                 <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
                   <X class="w-4 h-4" />
                 </button>
@@ -766,11 +963,10 @@ $effect(() => {
           {:else if inlineFileIsVideo && inlineFileDataUrl}
             <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
               <div class="preview-chrome-path min-w-0 flex-1 truncate text-xs sm:text-sm text-text-secondary">
-                {inlineFile.response.path}
+                {activeResponsePath}
               </div>
               <div class="text-xs text-text-tertiary hidden sm:inline">{formatFileSize(inlineFile.response.size)}</div>
-              {@render FileHeaderCoreActions(inlineFile.response.path)}
-              {@render PreviewFocusButton()}
+              {@render FileHeaderCoreActions(activeResponsePath)}
               <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
                 <X class="w-4 h-4" />
               </button>
@@ -780,14 +976,49 @@ $effect(() => {
                 <track kind="captions" />
               </video>
             </div>
+          {:else if inlineFileIsAudio && inlineFileDataUrl}
+            <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
+              <div class="preview-chrome-path min-w-0 flex-1 truncate text-xs sm:text-sm text-text-secondary">
+                {activeResponsePath}
+              </div>
+              <div class="text-xs text-text-tertiary hidden sm:inline">{formatFileSize(inlineFile.response.size)}</div>
+              {@render FileHeaderCoreActions(activeResponsePath)}
+              <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
+                <X class="w-4 h-4" />
+              </button>
+            </div>
+            <div class="flex flex-1 items-center justify-center p-4">
+              <div class="w-full max-w-md">
+                <AudioPlayer
+                  src={inlineFileDataUrl}
+                  title={inlineFile.response.name}
+                  subtitle={formatFileSize(inlineFile.response.size)}
+                  downloadUrl={inlineFileDownloadUrl}
+                  downloadName={inlineFileDownloadName}
+                />
+              </div>
+            </div>
+          {:else if inlineFileIsPdf && hasUsableMedia}
+            <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
+              <div class="min-w-0 flex-1">
+                {@render PdfHeaderControls()}
+              </div>
+              <div class="hidden text-xs text-text-tertiary sm:inline">{formatFileSize(inlineFile.response.size)}</div>
+              {@render FileHeaderCoreActions(activeResponsePath)}
+              <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
+                <X class="h-4 w-4" />
+              </button>
+            </div>
+            <div class="min-h-0 flex-1">
+              {@render PdfFilePreview()}
+            </div>
           {:else}
             <div class="preview-chrome flex h-11 shrink-0 items-center gap-1.5 border-b border-border-subtle bg-bg-surface px-3">
               <div class="preview-chrome-path min-w-0 flex-1 truncate text-xs sm:text-sm text-text-secondary">
-                {inlineFile.response.path}
+                {activeResponsePath}
               </div>
-              <div class="text-xs text-text-tertiary hidden sm:inline">{formatFileSize(inlineFile.response.size)}</div>
-              {@render FileHeaderCoreActions(inlineFile.response.path)}
-              {@render PreviewFocusButton()}
+              <div class="text-xs text-text-tertiary hidden sm:inline">{formatFileSize(inlineFile?.response ? inlineFile.response.size : 0)}</div>
+              {@render FileHeaderCoreActions(activeResponsePath)}
               <button type="button" class="icon-btn" onclick={onCloseInlineFile} title="Close file">
                 <X class="w-4 h-4" />
               </button>
@@ -803,50 +1034,75 @@ $effect(() => {
           <div class="flex-1 flex items-center justify-center text-xs text-text-tertiary">No file selected</div>
         {/if}
       </div>
-    </WorkspacePreviewPane>
-  {/if}
+{/if}
 
 <style>
-  /* Float mode: content fills stage; chrome becomes a compact floating pill. */
-  .inline-file-preview--immersive {
-    position: relative;
-  }
-
-  /* Hide tab strip — tabs are not useful full-bleed in float mode. */
-  .inline-file-preview--immersive > :global(:first-child) {
-    display: none;
-  }
-
   .inline-file-preview--immersive :global(.preview-chrome) {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    left: auto;
-    z-index: 25;
-    width: auto;
-    max-width: min(520px, calc(100% - 24px));
-    height: auto;
-    min-height: 40px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 6px;
-    border: 1px solid var(--border-subtle);
-    border-radius: 12px;
-    border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
-    padding: 6px 8px;
-    box-shadow: 0 12px 28px color-mix(in srgb, var(--overlay-scrim-strong) 16%, transparent);
-    backdrop-filter: blur(14px);
-  }
-
-  /* Long path wastes space in the pill — keep actions only. */
-  .inline-file-preview--immersive :global(.preview-chrome-path) {
     display: none;
   }
 
-  /* Body fills the stage under the floating chrome. */
-  .inline-file-preview--immersive > :global(.preview-chrome + *) {
-    flex: 1 1 auto;
-    min-height: 0;
+  .inline-file-preview--immersive :global(.preview-float-chrome + .file-status-banner) {
+    margin-top: 58px;
+  }
+
+  .pdf-header-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .pdf-page-input {
+    width: 2.5rem;
+    height: 1.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+
+  .pdf-page-input:focus {
+    border-color: color-mix(in srgb, var(--brand) 50%, transparent);
+    outline: none;
+  }
+
+  .pdf-page-total,
+  .pdf-scale {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pdf-scale {
+    width: 2.75rem;
+    text-align: center;
+  }
+
+  .pdf-header-divider {
+    width: 1px;
+    height: 1rem;
+    margin-inline: 2px;
+    background: var(--border-subtle);
+  }
+
+  .float-view-mode,
+  .float-image-zoom {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-input);
+    padding: 2px;
+  }
+
+  @container (max-width: 620px) {
+    .float-view-mode .segmented-btn:not(.active) {
+      display: none;
+    }
   }
 </style>

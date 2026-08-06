@@ -1,21 +1,11 @@
-import { defineConfig } from "tsdown";
+import { defineConfig, type UserConfig } from "tsdown";
 
-const entry = {
-  index: "src/index.ts",
-  http: "src/http.ts",
-  websocket: "src/websocket.ts",
-  "voice-input": "src/voice-input.ts",
-  debugger: "src/debugger.ts",
-};
-
-export default defineConfig({
-  entry,
+const shared = {
   format: "esm",
-  // Resolve @cohub/protocol via package exports (dist) so TS7 native dts emit stays inside rootDir.
-  // Dev typecheck still uses tsconfig.json path aliases to protocol source.
+  // Resolve @cohub/protocol through its built exports. The bundled SDK inlines it,
+  // while the unbundled Board build emits private protocol modules under dist.
   tsconfig: "tsconfig.build.json",
   dts: true,
-  clean: true,
   target: "es2022",
   fixedExtension: false,
   hash: false,
@@ -26,7 +16,28 @@ export default defineConfig({
     js: ".js",
     dts: ".d.ts",
   }),
-  outputOptions: {
-    chunkFileNames: "chunks/[name].js",
+} satisfies UserConfig;
+
+export default defineConfig([
+  {
+    ...shared,
+    entry: {
+      index: "src/index.ts",
+      http: "src/http.ts",
+      websocket: "src/websocket.ts",
+      "voice-input": "src/voice-input.ts",
+      debugger: "src/debugger.ts",
+    },
+    clean: true,
+    outputOptions: {
+      chunkFileNames: "chunks/[name].js",
+    },
   },
-});
+  {
+    ...shared,
+    entry: ["src/board/**/*.ts"],
+    root: "src",
+    unbundle: true,
+    clean: false,
+  },
+]);

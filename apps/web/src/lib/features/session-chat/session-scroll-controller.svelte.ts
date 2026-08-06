@@ -11,6 +11,20 @@ export type SessionScrollAnchor = {
 	updatedAt: number;
 };
 
+export function resolveSessionScrollRestore(input: {
+	anchorTop: number;
+	anchorOffset: number;
+	scrollHeight: number;
+	clientHeight: number;
+}) {
+	const desiredScrollTop = Math.max(0, input.anchorTop + input.anchorOffset);
+	const maxScrollTop = Math.max(0, input.scrollHeight - input.clientHeight);
+	return {
+		scrollTop: Math.min(desiredScrollTop, maxScrollTop),
+		reached: desiredScrollTop <= maxScrollTop + 1,
+	};
+}
+
 const AUTO_FOLLOW_THRESHOLD_PX = 60;
 
 /**
@@ -66,7 +80,7 @@ export function createSessionScrollController() {
 		(SessionScrollAnchor & { sessionId: string }) | null
 	>(null);
 	let pendingTimelineMarkdownRenders = $state(0);
-	let anchorRestoreWaitingForMarkdown = $state(false);
+	let anchorRestoreWaitingForLayout = $state(false);
 	let vimScrollFrame: number | null = null;
 	let vimScrollVelocity = 0;
 	let vimScrollStopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -107,7 +121,10 @@ export function createSessionScrollController() {
 		sessionId: string,
 		anchor: SessionScrollAnchor,
 	) {
-		scrollAnchorBySession.set(sessionId, anchor);
+		// Reassign so `$state.raw` consumers observe the write.
+		const next = new Map(scrollAnchorBySession);
+		next.set(sessionId, anchor);
+		scrollAnchorBySession = next;
 		persistSessionScrollAnchorsNow(storageKey);
 	}
 
@@ -116,7 +133,10 @@ export function createSessionScrollController() {
 	}
 
 	function clearSessionScrollAnchor(storageKey: string, sessionId: string) {
-		if (!scrollAnchorBySession.delete(sessionId)) return;
+		if (!scrollAnchorBySession.has(sessionId)) return;
+		const next = new Map(scrollAnchorBySession);
+		next.delete(sessionId);
+		scrollAnchorBySession = next;
 		persistSessionScrollAnchorsNow(storageKey);
 	}
 
@@ -272,7 +292,7 @@ export function createSessionScrollController() {
 		pendingRestoreSessionId = null;
 		activeAnchorRestore = null;
 		pendingTimelineMarkdownRenders = 0;
-		anchorRestoreWaitingForMarkdown = false;
+		anchorRestoreWaitingForLayout = false;
 		shouldAutoFollow = true;
 	}
 
@@ -368,14 +388,14 @@ export function createSessionScrollController() {
 		set pendingTimelineMarkdownRenders(value: number) {
 			pendingTimelineMarkdownRenders = value;
 		},
-		get anchorRestoreWaitingForMarkdown() {
-			return anchorRestoreWaitingForMarkdown;
+		get anchorRestoreWaitingForLayout() {
+			return anchorRestoreWaitingForLayout;
 		},
 		get vimPendingGActive() {
 			return Boolean(vimPendingGTimer);
 		},
-		set anchorRestoreWaitingForMarkdown(value: boolean) {
-			anchorRestoreWaitingForMarkdown = value;
+		set anchorRestoreWaitingForLayout(value: boolean) {
+			anchorRestoreWaitingForLayout = value;
 		},
 		loadSessionScrollAnchors,
 		persistSessionScrollAnchorsNow,

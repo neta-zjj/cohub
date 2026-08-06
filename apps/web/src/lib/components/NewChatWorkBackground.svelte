@@ -42,6 +42,7 @@ $effect(() => {
 		space={state.data.space}
 		owner={state.data.owner}
 		content={state.data.content ?? null}
+		launchState={workUrl}
 	/>
 {:else if state.status === "error"}
 	<div class="work-background-state">Work background is unavailable.</div>

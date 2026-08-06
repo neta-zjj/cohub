@@ -101,6 +101,7 @@ type ConfiguredBillingSdk = ReturnType<typeof createConfiguredSdk>;
 
 const ENSURE_CUSTOMER_CACHE_TTL_MS = 5 * 60 * 1000;
 const BILLING_STATIC_CATALOG_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const BILLING_CATALOG_APP_NAME = "cohub";
 const CHECKOUT_LOCK_TTL_MS = 30_000;
 const CHECKOUT_LOCK_RETRY_DELAY_MS = 250;
 const CHECKOUT_LOCK_RETRY_COUNT = 24;
@@ -132,6 +133,10 @@ type BillingListPage<T> = {
   };
 };
 type CreditGrantDisplayStatus = (typeof CREDIT_GRANT_DISPLAY_STATUSES)[number];
+
+function isCohubCatalogProduct(product: Product): boolean {
+  return product.meta?.appName === BILLING_CATALOG_APP_NAME;
+}
 
 function isNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
@@ -1641,7 +1646,9 @@ export function createTalesofaiBillingOperations(
     );
     return products.filter(
       (product) =>
-        product.status === "active" && product.visibility === "public",
+        product.status === "active" &&
+        product.visibility === "public" &&
+        isCohubCatalogProduct(product),
     );
   };
 
@@ -1668,7 +1675,9 @@ export function createTalesofaiBillingOperations(
     if (missingKeys.length === 0) return input.products;
     const referencedProducts = await Promise.all(missingKeys.map(getProductOrNull));
     for (const product of referencedProducts) {
-      if (product?.status === "active") byKey.set(product.key, product);
+      if (product?.status === "active" && isCohubCatalogProduct(product)) {
+        byKey.set(product.key, product);
+      }
     }
     return [...byKey.values()];
   };
@@ -1707,7 +1716,8 @@ export function createTalesofaiBillingOperations(
           (product) =>
             product.id === defaultPlan.product_id &&
             product.status === "active" &&
-            product.billing_type === "recurring",
+            product.billing_type === "recurring" &&
+            isCohubCatalogProduct(product),
         ) ?? null
       );
     } catch (error) {
@@ -1758,7 +1768,7 @@ export function createTalesofaiBillingOperations(
 
   const getStaticCatalog = async (): Promise<BillingStaticCatalogCache> =>
     getBillingCache(
-      `billing:catalog:static:${businessKey}:v1`,
+      `billing:catalog:static:${businessKey}:v2`,
       BILLING_STATIC_CATALOG_CACHE_TTL_SECONDS,
       async () => {
         const [publicProducts, creditBenefits, defaultPlanProduct, payment] = await Promise.all([
@@ -1806,6 +1816,7 @@ export function createTalesofaiBillingOperations(
         })
       : catalogProducts;
     const mappedProducts = products
+      .filter(isCohubCatalogProduct)
       .map((product) =>
         mapCatalogProduct(product, defaultPlanProductKey, creditBenefits),
       )
@@ -2684,4 +2695,3 @@ export function createBusinessBillingOperations(input: {
     consume,
   };
 }
-

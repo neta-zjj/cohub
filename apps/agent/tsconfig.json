@@ -56,8 +56,17 @@
       "@cohub/infra/bullmq": [
         "../../packages/infra/src/bullmq/index.ts"
       ],
+      "@cohub/infra/space-hooks": [
+        "../../packages/infra/src/space-hooks/index.ts"
+      ],
       "@cohub/infra/config-runtime/models": [
         "../../packages/infra/src/config-runtime/models.ts"
+      ],
+      "@cohub/infra/config-runtime/image-to-text": [
+        "../../packages/infra/src/config-runtime/image-to-text.ts"
+      ],
+      "@cohub/infra/config-runtime/skills": [
+        "../../packages/infra/src/config-runtime/skills.ts"
       ],
       "@cohub/infra/tracing/propagator": [
         "../../packages/infra/src/tracing/propagator.ts"

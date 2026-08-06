@@ -1,8 +1,10 @@
 import {
   getRealtimeSpaceRoom,
   getSessionTurnPatchStreamKey,
+  WS_BOARD_AWARENESS_CAPABILITY,
   WS_COMPACT_STREAM_CAPABILITY,
   WS_ROOM_SUBSCRIPTION_CAPABILITY,
+  WS_REALTIME_ROOM_CAPABILITY,
   normalizeRealtimeRooms,
   type ChannelEnvelope,
   type RealtimeCompactFrame,
@@ -10,7 +12,9 @@ import {
   type RealtimeRoom,
   type WsClientEvent,
 } from "@cohub/protocol/realtime/types";
+import type { BoardAwarenessUpdate } from "@cohub/protocol/realtime";
 import type { ContentBlock } from "@cohub/protocol/core";
+import type { ModelThinkingLevel } from "@cohub/protocol";
 import type { CohubEnvironment } from "./environment.js";
 import { extractBillingPayload } from "./http-error.js";
 import type { BillingResponsePayload } from "./types.js";
@@ -39,7 +43,7 @@ export type WebsocketClientOptions = {
   pingIntervalMs?: number;
   pongTimeoutMs?: number;
   debug?: boolean;
-  getAccessToken?: () => Promise<string | null> | string | null;
+  getAccessToken?: (options?: { forceRefresh?: boolean }) => Promise<string | null> | string | null;
   WebSocketImpl?: WebSocketConstructor;
 };
 
@@ -53,7 +57,7 @@ export type WebsocketClientEvents = {
   error: { error: unknown; recoverable: boolean };
   event: WebsocketEventPayload;
   ready: { connectionId: string };
-  auth: { connectionId: string; user: Record<string, unknown> };
+  auth: { connectionId: string; user: Record<string, unknown>; capabilities: string[] };
   messageAccepted: {
     requestId?: string | null;
     clientMessageId?: string | null;
@@ -115,13 +119,14 @@ const normalizeOptions = (options: WebsocketClientOptions = {}) => ({
 const formatCloseMessage = (code?: number, reason?: string) =>
   `WebSocket closed: ${code ?? 0} ${reason || ""}`.trim();
 
+const AUTH_CLOSE_CODE = 4003;
+const AUTH_CLOSE_REASON = "authentication failed";
+
 const isRetryableCloseCode = (code: number) => {
   if (code === 1000) return false;
-  if (code === 4003) return false;
+  if (code === AUTH_CLOSE_CODE) return false;
   return true;
 };
-
-const AUTH_CLOSE_REASON = "authentication failed";
 const PATCH_STREAM_BUFFER_MAX_PENDING = 128;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -149,7 +154,7 @@ const isRealtimeEnvelope = (value: unknown): value is ChannelEnvelope => {
   if (!isRecord(value)) return false;
   if (typeof value.id !== "string") return false;
   if (typeof value.timestamp !== "number") return false;
-  if (value.domain !== "system" && value.domain !== "session" && value.domain !== "space" && value.domain !== "label") return false;
+  if (value.domain !== "system" && value.domain !== "session" && value.domain !== "space" && value.domain !== "label" && value.domain !== "room") return false;
   if (typeof value.type !== "string") return false;
   if (!isRecord(value.payload)) return false;
   return true;
@@ -211,7 +216,7 @@ export class WebsocketClient {
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
   private readonly debug: boolean;
-  private readonly getAccessToken?: () => Promise<string | null> | string | null;
+  private readonly getAccessToken?: WebsocketClientOptions["getAccessToken"];
   private readonly WebSocketImpl: WebSocketConstructor;
 
   private ws: WebSocketLike | null = null;
@@ -219,6 +224,9 @@ export class WebsocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimerResolver: (() => void) | null = null;
   private reconnectAttempt = 0;
+  private authReconnectAttempted = false;
+  private forceRefreshOnNextAuth = false;
+  private retryAuthClose = false;
   private manuallyClosed = false;
   private connectPromise: Promise<void> | null = null;
   private authWaiter: {
@@ -232,9 +240,14 @@ export class WebsocketClient {
   private readonly compactStreamContexts = new Map<string, CompactStreamContext>();
   private readonly patchStreamBuffers = new Map<string, PatchStreamBuffer>();
   private readonly roomSubscriptions = new Map<RealtimeRoom, RoomSubscriptionState>();
+  private readonly serverCapabilities = new Set<string>();
 
   public state: WebsocketClientState = "idle";
   public connectionId: string | null = null;
+
+  supportsCapability(capability: string) {
+    return this.serverCapabilities.has(capability);
+  }
 
   private readonly listeners = createEventMap();
 
@@ -319,9 +332,20 @@ export class WebsocketClient {
         } catch (error) {
           const authError =
             error instanceof Error ? error : new Error("authentication failed");
-          this.emit("error", { error: authError, recoverable: false });
+          const recoverable = Boolean(
+            this.getAccessToken &&
+            this.autoReconnect &&
+            !this.manuallyClosed &&
+            !this.authReconnectAttempted
+          );
+          this.retryAuthClose = recoverable;
+          if (recoverable) {
+            this.authReconnectAttempted = true;
+            this.forceRefreshOnNextAuth = true;
+          }
+          this.emit("error", { error: authError, recoverable });
           rejectOnce(authError);
-          ws.close(4003, AUTH_CLOSE_REASON);
+          ws.close(AUTH_CLOSE_CODE, AUTH_CLOSE_REASON);
         }
       };
 
@@ -342,7 +366,11 @@ export class WebsocketClient {
         this.patchStreamBuffers.clear();
         const closeError = new Error(formatCloseMessage(event.code, event.reason));
         this.rejectAuthWaiter(closeError);
-        const willReconnect = !this.manuallyClosed && this.autoReconnect && isRetryableCloseCode(event.code);
+        const retryAuthClose = event.code === AUTH_CLOSE_CODE && this.retryAuthClose;
+        this.retryAuthClose = false;
+        const willReconnect = !this.manuallyClosed && this.autoReconnect && (
+          retryAuthClose || isRetryableCloseCode(event.code)
+        );
         this.log("closed", { code: event.code, reason: event.reason, willReconnect, wasConnecting });
         this.emit("close", {
           code: event.code,
@@ -370,38 +398,15 @@ export class WebsocketClient {
     this.ws?.close(code, reason);
     this.ws = null;
     this.connectPromise = null;
+    this.authReconnectAttempted = false;
+    this.forceRefreshOnNextAuth = false;
+    this.retryAuthClose = false;
     this.compactStreamContexts.clear();
     this.patchStreamBuffers.clear();
     for (const state of this.roomSubscriptions.values()) {
       state.subscribed = false;
       state.pending = false;
     }
-  }
-
-  async sendCanvasTransaction(input: {
-    spaceId: string;
-    documentId: string;
-    txId: string;
-    ops: Array<Record<string, unknown>>;
-    baseVersion?: number | null;
-    clientId?: string | null;
-    undoGroupId?: string | null;
-    requestId?: string;
-  }) {
-    await this.ensureOpen();
-    this.send({
-      type: "canvas.tx",
-      requestId: input.requestId,
-      payload: {
-        spaceId: input.spaceId,
-        documentId: input.documentId,
-        txId: input.txId,
-        baseVersion: input.baseVersion ?? null,
-        clientId: input.clientId ?? null,
-        undoGroupId: input.undoGroupId ?? null,
-        ops: input.ops,
-      },
-    });
   }
 
   async updatePresence(input: {
@@ -420,6 +425,77 @@ export class WebsocketClient {
     });
   }
 
+  async updateBoardAwareness(input: {
+    spaceId: string;
+    boardId: string;
+    seq: number;
+    update: BoardAwarenessUpdate;
+    requestId?: string;
+  }) {
+    await this.ensureOpen();
+    this.send({
+      type: "board.awareness.update",
+      requestId: input.requestId,
+      payload: {
+        spaceId: input.spaceId,
+        boardId: input.boardId,
+        seq: input.seq,
+        update: input.update,
+      },
+    });
+  }
+
+  async joinRealtimeRoom(input: { roomId: string; ticket: string; requestId?: string }) {
+    await this.ensureOpen();
+    this.send({
+      type: "realtime.room.join",
+      requestId: input.requestId,
+      payload: { roomId: input.roomId, ticket: input.ticket },
+    });
+  }
+
+  async publishRealtimeRoom(input: {
+    roomId: string;
+    event: string;
+    data: unknown;
+    clientEventId?: string;
+    requestId?: string;
+  }) {
+    await this.ensureOpen();
+    this.send({
+      type: "realtime.room.publish",
+      requestId: input.requestId,
+      payload: {
+        roomId: input.roomId,
+        event: input.event,
+        data: input.data,
+        clientEventId: input.clientEventId,
+      },
+    });
+  }
+
+  async leaveRealtimeRoom(input: { roomId: string; requestId?: string }) {
+    await this.ensureOpen();
+    this.send({
+      type: "realtime.room.leave",
+      requestId: input.requestId,
+      payload: { roomId: input.roomId },
+    });
+  }
+
+  async updateRealtimeRoomPresence(input: {
+    roomId: string;
+    presence: Record<string, unknown> | null;
+    requestId?: string;
+  }) {
+    await this.ensureOpen();
+    this.send({
+      type: "realtime.room.presence.update",
+      requestId: input.requestId,
+      payload: { roomId: input.roomId, presence: input.presence },
+    });
+  }
+
   async sendMessage(input: {
     spaceId: string;
     sessionId: string;
@@ -428,6 +504,7 @@ export class WebsocketClient {
     requestId?: string;
     model?: string;
     provider?: string;
+    thinkingLevel?: ModelThinkingLevel;
   }) {
     await this.ensureOpen();
     this.send({
@@ -440,6 +517,7 @@ export class WebsocketClient {
         clientMessageId: input.clientMessageId,
         model: input.model,
         provider: input.provider,
+        thinkingLevel: input.thinkingLevel,
       },
     });
   }
@@ -520,16 +598,21 @@ export class WebsocketClient {
   }
 
   private async authenticate() {
-    const token = this.getAccessToken ? await this.getAccessToken() : null;
+    const forceRefresh = this.forceRefreshOnNextAuth;
+    this.forceRefreshOnNextAuth = false;
+    const token = this.getAccessToken
+      ? await this.getAccessToken(forceRefresh ? { forceRefresh: true } : undefined)
+      : null;
     if (!token) throw new WebsocketAuthError("missing access token");
 
     const waiter = this.createAuthWaiter();
     this.send({
       type: "auth",
-      payload: { token, capabilities: [WS_COMPACT_STREAM_CAPABILITY, WS_ROOM_SUBSCRIPTION_CAPABILITY] },
+      payload: { token, capabilities: [WS_COMPACT_STREAM_CAPABILITY, WS_ROOM_SUBSCRIPTION_CAPABILITY, WS_BOARD_AWARENESS_CAPABILITY, WS_REALTIME_ROOM_CAPABILITY] },
     });
     await waiter.promise;
     await this.restoreRoomSubscriptions();
+    this.authReconnectAttempted = false;
   }
 
   private flushRoomSubscriptions() {
@@ -620,9 +703,14 @@ export class WebsocketClient {
         const user = envelope.payload.user && typeof envelope.payload.user === "object"
           ? (envelope.payload.user as Record<string, unknown>)
           : {};
+        const capabilities = Array.isArray(envelope.payload.capabilities)
+          ? envelope.payload.capabilities.filter((value): value is string => typeof value === "string")
+          : [];
+        this.serverCapabilities.clear();
+        for (const capability of capabilities) this.serverCapabilities.add(capability);
         if (connectionId) {
           this.connectionId = connectionId;
-          this.emit("auth", { connectionId, user });
+          this.emit("auth", { connectionId, user, capabilities });
         }
         this.resolveAuthWaiter();
         this.emit("event", envelope);
@@ -973,7 +1061,7 @@ export class WebsocketClient {
       if (this.manuallyClosed) return;
     }
     await this.connect().catch((error) => {
-      this.emit("error", { error, recoverable: true });
+      this.emit("error", { error, recoverable: this.state === "reconnecting" });
     });
   }
 }

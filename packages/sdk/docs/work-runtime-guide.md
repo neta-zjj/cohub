@@ -205,7 +205,8 @@ result needs `taskrun.view` (a work scope).
 |---|---|---|---|
 | Read space config | `space.get()` / `space.getConfig()` | `space.view` | work |
 | List models | `client.models.list()` / `listMultimodal()` | *(none — just authenticated)* | — |
-| Send a prompt | `space.prompt({ content, ... })` | `session.prompt.fullaccess` (or `.readonly`) | viewer |
+| Send a prompt (full) | `space.prompt({ accessMode: "full_access", content, ... })` | `session.prompt.fullaccess` | viewer |
+| Send a prompt (read-only) | `space.prompt({ accessMode: "read_only", content, ... })` | `session.prompt.readonly` | viewer |
 | Read turn result | `session.turns.get(turnId)` | `session.view` | work |
 | Stream generation | `session.subscribeGeneration({ state, finalized })` | `session.view` | work |
 | Read file tree | `space.files.tree()` | `file.view` | work |
@@ -385,14 +386,23 @@ Assume `client` and `space` are already initialized per [§4](#4-initialization-
 ### LLM chat (`space.prompt` + `subscribeGeneration`)
 
 **Scopes:** viewer `session.prompt.fullaccess` (to send) + work `session.view` (to read/stream).
+For a read-only prompt (no side effects), use viewer `session.prompt.readonly`
+instead — but you **must** pass `accessMode: "read_only"` in the call (see the
+read-only recipe below).
+
+> **`accessMode` defaults to `full_access`.** If you omit it, the backend
+treats the call as full-access and requires `session.prompt.fullaccess`. This
+is the #1 cause of "I requested `session.prompt.readonly` but still got 403".
+Always set `accessMode` explicitly to match the scope you requested.
 
 `space.prompt()` is **asynchronous** — it returns immediately with a turn
 whose `assistantText` is `null`. You must either stream the reply via
 `subscribeGeneration` or poll `turns.get()`.
 
 ```js
-// Send a prompt (creates or continues a session)
+// Send a prompt (creates or continues a session) — full access
 const result = await space.prompt({
+  accessMode: "full_access", // default; needs session.prompt.fullaccess
   content: [{ type: "text", text: "Describe a shiba inu on Mars." }],
   sessionId: null,        // null → creates a new session; pass an id to continue
   model: "gpt-5.5",       // optional; omit for default
@@ -448,6 +458,58 @@ const reply = turn.assistantText;
 `session.view` is missing, the WebSocket subscription fails. If you catch and
 ignore it, your code silently degrades to polling — which will also 403.
 Surface the error so you can diagnose the missing scope.
+
+#### Read-only prompt (`accessMode: "read_only"`)
+
+Use this when your Work only needs to **generate** a reply without persisting
+any side effects (no new session is written, no turn stored on the space's
+history). It requires the lighter viewer scope `session.prompt.readonly`
+instead of `session.prompt.fullaccess`.
+
+The critical detail: you **must** pass `accessMode: "read_only"` explicitly
+in the `space.prompt()` call. The scope you request via `auth.request` and
+the `accessMode` you send must match — the backend picks the permission check
+based on `accessMode`, defaulting to `full_access` when omitted.
+
+```js
+// 1. Request ONLY the read-only scope from a user gesture
+await client.auth.request({
+  scopes: ["session.prompt.readonly"],
+  reason: "Generate a one-off character reply (read-only).",
+});
+
+// 2. Send the prompt with accessMode matching the granted scope
+const result = await space.prompt({
+  accessMode: "read_only",   // ← required; omitting it → full_access → 403
+  sessionId: null,           // read-only prompts use a throwaway session
+  content: [{ type: "text", text: prompt }],
+});
+const sessionId = result.session.id;
+const turnId = result.turn.id;
+
+// 3. Read the reply — still needs the work scope: session.view
+const stop = space.session(sessionId).subscribeGeneration({
+  finalized: (event) => {
+    const reply = event.turn.assistantText
+      ?? (event.turn.assistantContent ?? [])
+          .filter(b => b.type === "text").map(b => b.text).join("");
+    console.log("reply:", reply);
+    stop();
+  },
+  error: (event) => console.error("stream error:", event),
+});
+```
+
+Publish the Work with:
+- workScopes: `["space.view", "session.view"]` (still needed to read the reply)
+- allowedViewerScopes: `["session.prompt.readonly"]`
+
+> **Scope/accessMode mismatch → 403.** Requesting `session.prompt.readonly`
+but calling `space.prompt({ content })` (no `accessMode`) fails because the
+backend defaults to `full_access` and checks `session.prompt.fullaccess`.
+Symmetrically, requesting `session.prompt.fullaccess` while passing
+`accessMode: "read_only"` also works only if `session.prompt.readonly` is
+additionally granted — otherwise 403. Always keep them in sync.
 
 ### Image / media generation (`generations.createAndWait`)
 
@@ -593,6 +655,10 @@ if (checkoutState.orderId) {
   const { order } = await client.work.commerce.getOrder(checkoutState.orderId);
 }
 ```
+
+`purchase()` creates a purchase attempt ID automatically. If application code
+retries the call after a timeout, pass the same `purchaseAttemptId` to ensure
+the retry resolves to the original Billing order.
 
 ---
 
@@ -895,6 +961,10 @@ Before publishing your Work, verify each item:
   (for file reads). Missing any of these → 403 on reads.
 - [ ] **Viewer scopes include all action operations**: `session.prompt.fullaccess`
   (or `.readonly`) for prompts, `generation.create` for generation.
+- [ ] **`session.prompt.*` scope matches `space.prompt({ accessMode })`.**
+  Omitting `accessMode` defaults to `full_access`, so requesting only
+  `session.prompt.readonly` and then calling `space.prompt({ content })` → 403.
+  Set `accessMode: "read_only"` explicitly when using the readonly scope.
 - [ ] **`session.prompt.fullaccess` does NOT include `session.view`** — they
   are separate. Sending a prompt succeeds but reading the reply 403s without
   `session.view`.
@@ -914,6 +984,98 @@ Before publishing your Work, verify each item:
   to fetch available models dynamically (requires auth but no scope).
 
 ---
+
+## Realtime rooms in a Work
+
+Realtime rooms are available through `client.work.realtime` and use the Work
+runtime identity automatically. They do not require a viewer scope or an
+additional consent dialog.
+
+```js
+const room = await client.work.realtime.createRoom({
+  code: "TEAM-ALPHA",
+  maxParticipants: 64,
+  expiresInSeconds: 2 * 60 * 60,
+});
+
+const stop = room.subscribe("shared.state.updated", (event) => {
+  console.log(event.sequence, event.data);
+});
+
+await room.publish("shared.state.updated", { value: 42 });
+await room.leave();
+stop();
+```
+
+A Work can join an existing room with `client.work.realtime.joinRoom({ code })`.
+Room codes are scoped to the Work and are case-insensitive. They identify a
+room but are not credentials; the runtime Work session and the short-lived
+room admission ticket provide authorization.
+
+`expiresInSeconds` is an absolute lifetime measured from server-side creation.
+Activity never extends it, and the maximum lifetime is 24 hours. The room is
+logically expired at `expiresAt`; connected clients receive a closed state and
+new publishes or joins fail.
+
+Each Work can hold up to 512 active rooms at once. Expired rooms free their slot
+automatically, and `createRoom` fails with HTTP 429 and `ROOM_QUOTA_EXCEEDED`
+when the limit is reached.
+
+Events are generic JSON payloads. The SDK does not define business event names,
+and the Work should define its own event map in TypeScript. Events are ordered
+and acknowledged while a connection is live. Events missed during a disconnect
+are not replayed, so applications should publish a current state snapshot after
+rejoining when needed. Payloads are transient and are not stored in the Work.
+
+### High-frequency events
+
+`publish` waits for a server ack, so a loop that awaits every call is capped at
+roughly `1000 / rtt` events per second. For input frames and other high-rate
+traffic use `send`, which skips the ack:
+
+```js
+// 30 input frames per second, no per-event round trip
+room.send("input.frame", { frame, pad });
+
+room.onSendError((error) => console.warn("dropped frame", error.message));
+room.onStateChange((state) => { if (state !== "joined") pauseSimulation(); });
+```
+
+Ordering is still guaranteed by the server. Failures (rate limit, membership lost)
+arrive through `onSendError` for the room that failed, and calls while the room is
+not joined are dropped rather than queued. An invalid event name, an oversized
+payload, or data JSON cannot encode (`undefined`, a function, a symbol) is rejected
+locally before reaching the server. Use `publish` when a specific event must be
+confirmed, and `send` for the steady stream.
+
+### Seats and participant identity
+
+By default every connection is its own participant, so a viewer who opens the
+Work in two tabs appears twice. This suits presence-style features such as
+multiple cursors. Each member also carries an opaque `userKey` that is stable per
+room and viewer, so an application can group or de-duplicate participants without
+seeing the underlying account.
+
+A room created with `seatPerUser: true` instead gives each viewer at most one
+seat:
+
+```js
+const room = await client.work.realtime.createRoom({
+  maxParticipants: 2,
+  seatPerUser: true,
+});
+```
+
+Joining then takes over the seat the viewer already holds instead of consuming
+another one. This matters for small fixed-size rooms: after an unclean disconnect
+(a killed tab, a dropped network, a sleeping laptop) the previous seat stays
+leased for up to a minute, and in a two-seat room that would otherwise block the
+viewer from rejoining. A clean close releases the seat immediately either way.
+
+On takeover the server keeps the existing participant id, so peers see no churn,
+and `room.participantId` reflects the server value rather than the id issued at
+admission. The superseded connection is closed with reason `superseded` and emits
+no leave event, because the participant is still present.
 
 ## 8. Publishing a Work (API/SDK)
 

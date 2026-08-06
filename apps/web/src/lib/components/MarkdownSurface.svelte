@@ -1,5 +1,10 @@
 <script lang="ts">
-import { onDestroy, onMount } from "svelte";
+import {
+	mount as mountComponent,
+	onDestroy,
+	onMount,
+	unmount as unmountComponent,
+} from "svelte";
 import { mediaLightbox } from "$lib/components/media-lightbox.svelte";
 import { insertComposerSnippet } from "$lib/stores/composer-insert";
 import {
@@ -31,6 +36,11 @@ let markdownEl = $state<HTMLElement | null>(null);
 let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 let themeObserver: MutationObserver | null = null;
 
+const mountedAudioPlayers: {
+	mount: HTMLElement;
+	instance: ReturnType<typeof mountComponent>;
+}[] = [];
+
 const COPY_ICON =
 	'<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 
@@ -40,10 +50,70 @@ const CHECK_ICON =
 $effect(() => {
 	const _stableHtml = stableHtml;
 	const _streamingLive = streamingLive;
-	if (!markdownEl || _streamingLive) return;
+	if (!markdownEl) return;
+	// Sweep even while streaming: {@html} can drop mounted players when the
+	// stable region is cleared, and Svelte won't dispose those instances.
+	sweepDisconnectedAudioPlayers();
+	if (_streamingLive) return;
 	enhanceCodeBlocks();
 	renderMermaid();
+	enhanceAudioPlayers();
 });
+
+function sweepDisconnectedAudioPlayers() {
+	for (let i = mountedAudioPlayers.length - 1; i >= 0; i -= 1) {
+		if (!mountedAudioPlayers[i].mount.isConnected) {
+			unmountComponent(mountedAudioPlayers[i].instance);
+			mountedAudioPlayers.splice(i, 1);
+		}
+	}
+}
+
+function enhanceAudioPlayers() {
+	if (!markdownEl) return;
+
+	sweepDisconnectedAudioPlayers();
+
+	for (const figure of markdownEl.querySelectorAll<HTMLElement>(
+		"figure.markdown-audio",
+	)) {
+		if (figure.dataset.audioEnhanced === "true") continue;
+		const audio = figure.querySelector<HTMLAudioElement>("audio");
+		if (!audio?.src) continue;
+
+		figure.dataset.audioEnhanced = "true";
+		const src = audio.currentSrc || audio.src;
+		const caption =
+			figure.querySelector("figcaption")?.textContent?.trim() || null;
+
+		const target = document.createElement("div");
+		target.className = "markdown-audio-mount";
+		figure.insertBefore(target, audio);
+
+		void import("$lib/components/AudioPlayer.svelte")
+			.then(({ default: AudioPlayer }) => {
+				if (!target.isConnected) return;
+				const instance = mountComponent(AudioPlayer, {
+					target,
+					props: { src, title: caption },
+				});
+				mountedAudioPlayers.push({ mount: target, instance });
+				// Release the native element only after the enhanced player is in
+				// place — avoids a duplicate media instance while keeping the
+				// native <audio> as the no-JS / streaming fallback.
+				audio.remove();
+				// The caption is now rendered inside the player; drop the duplicate.
+				figure.querySelector("figcaption")?.remove();
+			})
+			.catch(() => {
+				// Dynamic import failed: keep the native player usable and allow
+				// retrying on the next render pass.
+				if (target.isConnected) target.remove();
+				audio.hidden = false;
+				delete figure.dataset.audioEnhanced;
+			});
+	}
+}
 
 function markMermaidLoadError(error: unknown) {
 	console.warn("[mermaid] renderer chunk failed to load", { error });
@@ -292,6 +362,10 @@ onMount(() => {
 onDestroy(() => {
 	if (copyResetTimer) clearTimeout(copyResetTimer);
 	themeObserver?.disconnect();
+	for (const { instance } of mountedAudioPlayers) {
+		unmountComponent(instance);
+	}
+	mountedAudioPlayers.length = 0;
 });
 </script>
 

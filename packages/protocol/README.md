@@ -4,11 +4,7 @@ Shared protocol definitions for the Cohub agent collaboration platform.
 
 This package provides the stable type surface used across Cohub services and client SDKs — covering spaces, checkpoints, sessions, realtime events, gateway contracts, tasks, and filesystem operations.
 
-## Install
-
-```bash
-npm install @cohub/protocol
-```
+This is a **private monorepo package**. It is not published to npm; consume it via workspace imports inside this repository.
 
 ## Subpath exports
 

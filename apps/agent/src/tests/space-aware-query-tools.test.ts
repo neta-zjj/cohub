@@ -63,5 +63,3 @@ await assert.rejects(
   runReadTool({ targetProvider: "cloud", spaceId: "limit\u200b=30" }),
   /Invalid space_id: expected a UUID/,
 );
-
-console.log("space-aware query tool routing checks passed");

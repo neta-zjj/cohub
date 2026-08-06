@@ -65,5 +65,3 @@ assert.equal(
   false,
   "non-network errors should not spin for 60s",
 );
-
-console.log("infra-error classification checks passed");

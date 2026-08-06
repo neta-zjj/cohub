@@ -1,0 +1,79 @@
+import type { SpaceFsFileResponse } from "@neta-art/cohub";
+import { isTextFileResponse, normalizeMime } from "$lib/space-file-text";
+
+export type FilePreviewKind =
+	| "markdown"
+	| "html"
+	| "text"
+	| "image"
+	| "video"
+	| "audio"
+	| "pdf"
+	| "fallback";
+
+export type FilePreviewModel = {
+	kind: FilePreviewKind;
+	isText: boolean;
+	hasRenderedPreview: boolean;
+	language: string;
+	mediaUrl: string | null;
+};
+
+export function isMarkdownPath(path: string) {
+	return /\.md$/i.test(path);
+}
+
+export function isHtmlPath(path: string) {
+	return /\.html?$/i.test(path);
+}
+
+export function isPdfPath(path: string) {
+	return /\.pdf$/i.test(path);
+}
+
+export function filePreviewModel(
+	file: SpaceFsFileResponse | null | undefined,
+): FilePreviewModel {
+	if (!file) {
+		return {
+			kind: "fallback",
+			isText: false,
+			hasRenderedPreview: false,
+			language: "plaintext",
+			mediaUrl: null,
+		};
+	}
+	const mimeType = normalizeMime(file.mimeType);
+	const isText = isTextFileResponse(file);
+	const language = isText
+		? (file.name.split(".").pop()?.toLowerCase() ?? "plaintext")
+		: "plaintext";
+	const mediaUrl = isText
+		? null
+		: file.delivery === "url"
+			? (file.url ?? null)
+			: `data:${file.mimeType ?? "application/octet-stream"};base64,${file.content}`;
+	const kind: FilePreviewKind =
+		isText && isMarkdownPath(file.path)
+			? "markdown"
+			: isText && isHtmlPath(file.path)
+				? "html"
+				: isText
+					? "text"
+					: mimeType?.startsWith("image/")
+						? "image"
+						: mimeType?.startsWith("video/")
+							? "video"
+							: mimeType?.startsWith("audio/")
+								? "audio"
+								: mimeType === "application/pdf" || isPdfPath(file.path)
+									? "pdf"
+									: "fallback";
+	return {
+		kind,
+		isText,
+		hasRenderedPreview: kind === "markdown" || kind === "html",
+		language,
+		mediaUrl,
+	};
+}

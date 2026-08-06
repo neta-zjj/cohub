@@ -1,4 +1,4 @@
-export type WorkspacePreviewKind = "file" | "canvas" | "port";
+export type WorkspacePreviewKind = "file" | "board" | "port";
 
 export type WorkspacePreviewRef = {
 	kind: WorkspacePreviewKind;
@@ -27,7 +27,7 @@ export function parsePreviewParam(
 	const kind = value.slice(0, separator);
 	const key = value.slice(separator + 1);
 	if (!key) return null;
-	if (kind !== "file" && kind !== "canvas" && kind !== "port") return null;
+	if (kind !== "file" && kind !== "board" && kind !== "port") return null;
 	if (kind === "port" && !isValidPortKey(key)) return null;
 	return { kind, key };
 }
@@ -73,6 +73,21 @@ export function withCurrentPreview(
 	const preview = readPreviewFromSearch(search);
 	if (!preview) return pathname;
 	return withPreviewParam(pathname, null, preview);
+}
+
+/**
+ * Sidebar-driven Main navigation. Desktop keeps the open preview pane;
+ * mobile drops it so the full-screen overlay does not cover the target.
+ */
+export function withSidebarMainPreview(
+	pathname: string,
+	options: {
+		isMobile: boolean;
+		currentSearch?: string | URLSearchParams | null;
+	},
+): string {
+	if (options.isMobile) return pathname;
+	return withCurrentPreview(pathname, options.currentSearch);
 }
 
 /** Deterministic ingress for legacy `/spaces/:id/files/...` routes. */

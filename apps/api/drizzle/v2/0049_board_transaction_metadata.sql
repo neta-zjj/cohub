@@ -1,0 +1,1 @@
+ALTER TABLE "v2"."board_transactions" ADD COLUMN "metadata" jsonb DEFAULT '{}'::jsonb NOT NULL;

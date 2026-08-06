@@ -9,8 +9,16 @@ import {
 	isDisplayableDurationMs,
 } from "$lib/format-duration";
 import {
+	formatTokenCount,
+	formatUsageCost,
+	getDisplayInputTokens,
+	getUsageCostTotal,
+} from "$lib/format-usage";
+import {
 	findModelCatalogItem,
+	formatThinkingLevelShort,
 	getModelDisplayName,
+	getRequestedThinkingLevel,
 	type ModelCatalogItem,
 } from "$lib/model-catalog";
 import type { ChatMessage } from "$lib/session-tree";
@@ -166,7 +174,7 @@ const messageBubbleClass = $derived.by(() => {
 	if (message.role === "assistant") {
 		return assistantErrorMessage
 			? `${base} rounded-xl bg-status-error/5 text-text-primary`
-			: `${base} text-text-primary`;
+			: `${base} bg-[var(--chat-assistant-message-bg)] text-[var(--chat-assistant-message-fg)]`;
 	}
 	if (message.role === "system") return `${base} bg-info-bg text-info-soft`;
 	return `${base} bg-error-bg text-error-soft`;
@@ -250,18 +258,13 @@ const modelHoverText = $derived(
 		: "",
 );
 
-// Token display
-function formatTokenCount(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-	return `${n}`;
-}
+const requestedThinkingLevel = $derived(getRequestedThinkingLevel(turnMeta));
 
-function formatCost(n: number): string {
-	const formatted =
-		n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : n.toFixed(4);
-	return `$${formatted}`;
-}
+const requestedThinkingLevelShort = $derived(
+	requestedThinkingLevel
+		? formatThinkingLevelShort(requestedThinkingLevel)
+		: "",
+);
 
 const hasDuration = $derived.by(() => {
 	const durationMs = message.meta?.durationMs;
@@ -300,11 +303,9 @@ const hasUsage = $derived.by(() => {
 	);
 });
 
-const displayInputTokens = $derived.by(() => {
-	const u = message.meta?.usage;
-	if (!u) return 0;
-	return (u.input ?? 0) + (u.cacheRead ?? 0);
-});
+const displayInputTokens = $derived.by(() =>
+	getDisplayInputTokens(message.meta?.usage),
+);
 
 const cachedInputTokens = $derived.by(
 	() => message.meta?.usage?.cacheRead ?? 0,
@@ -313,7 +314,8 @@ const cachedInputTokens = $derived.by(
 const tokenDisplay = $derived.by(() => {
 	const u = message.meta?.usage;
 	if (!u) return "";
-	const parts = [];
+	// Cost stays in hover detail only; outer bar keeps the existing token-first layout.
+	const parts: string[] = [];
 	if (displayInputTokens > 0) {
 		const inputLabel = `↑${formatTokenCount(displayInputTokens)}`;
 		parts.push(
@@ -327,14 +329,15 @@ const tokenDisplay = $derived.by(() => {
 	if (u.totalTokens) return `${formatTokenCount(u.totalTokens)} tokens`;
 	if (u.cacheRead) return `cache ${formatTokenCount(u.cacheRead)}`;
 	if (u.cacheWrite) return `cache write ${formatTokenCount(u.cacheWrite)}`;
-	if (u.cost?.total) return formatCost(u.cost.total);
+	const costTotal = getUsageCostTotal(u);
+	if (costTotal != null) return formatUsageCost(costTotal);
 	return "";
 });
 
 const tokenDetailText = $derived.by(() => {
 	const u = message.meta?.usage;
 	if (!u) return "";
-	const parts = [];
+	const parts: string[] = [];
 	if (displayInputTokens > 0) {
 		parts.push(
 			cachedInputTokens > 0
@@ -346,7 +349,8 @@ const tokenDetailText = $derived.by(() => {
 	if (u.cacheWrite)
 		parts.push(`Cache write: ${formatTokenCount(u.cacheWrite)}`);
 	if (u.totalTokens) parts.push(`Total: ${formatTokenCount(u.totalTokens)}`);
-	if (u.cost?.total) parts.push(`Cost: ${formatCost(u.cost.total)}`);
+	const costTotal = getUsageCostTotal(u);
+	if (costTotal != null) parts.push(`Cost: ${formatUsageCost(costTotal)}`);
 	return parts.join("  ·  ");
 });
 
@@ -433,7 +437,7 @@ function handleCopy() {
 
     </div>
 
-    {#if (message.role === 'assistant' && (message.meta?.model || timeDisplay)) || (message.role === 'user' && timeDisplay)}
+    {#if (message.role === 'assistant' && (message.meta?.model || hasUsage || hasDuration || timeDisplay)) || (message.role === 'user' && timeDisplay)}
       <!-- Meta bar: copy | identity/model | tokens | time -->
       <div class="mt-1 flex items-center gap-1 px-2 text-[11px] text-text-placeholder/50 select-none">
         <!-- Copy button -->
@@ -492,6 +496,12 @@ function handleCopy() {
           {#if modelDisplayName}
             <span class="min-w-0 truncate cursor-default" title={modelHoverText}>
               {modelDisplayName}
+            </span>
+          {/if}
+
+          {#if requestedThinkingLevel}
+            <span class="shrink-0 text-text-placeholder/65">
+              {requestedThinkingLevelShort}
             </span>
           {/if}
 

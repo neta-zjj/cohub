@@ -19,7 +19,7 @@ export type AgentTurnAbortEvent = {
   timestamp: number;
 };
 
-const subscriber = new Redis(env.REDIS_URL);
+const subscriber = new Redis(env.REDIS_URL, { disableClientInfo: true });
 
 export async function subscribeAbortEvents(handler: (event: AgentTurnAbortEvent) => void) {
   await subscriber.subscribe(AGENT_TURN_ABORT_CHANNEL);

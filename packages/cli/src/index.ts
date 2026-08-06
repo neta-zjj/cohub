@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { registerAuth } from "./commands/auth.js";
+import { registerBoards } from "./commands/boards.js";
 import { registerChannels } from "./commands/channels.js";
 import { registerCronJobs } from "./commands/cron-jobs.js";
 import { registerGenerations } from "./commands/generations.js";
@@ -50,6 +51,8 @@ Common commands:
   cohub -s <space-id> run -- git status
   cohub sandbox up ./my-project
   cohub search "release notes"
+  cohub -s <space-id> boards inspect <board-id>
+  cohub -s <space-id> spaces turns ls --author others
   cohub -s <space-id> spaces sessions turns ls <session-id>
   cohub -s <space-id> spaces files ls
   cohub -s <space-id> works publish demo --file dist/index.html
@@ -64,6 +67,7 @@ Environment:
 `);
 
 registerAuth(program);
+registerBoards(program);
 registerProfile(program);
 registerMe(program);
 registerPrompt(program);

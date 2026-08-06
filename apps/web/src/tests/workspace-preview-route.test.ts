@@ -8,9 +8,10 @@ import {
 	readPreviewFromSearch,
 	withCurrentPreview,
 	withPreviewParam,
+	withSidebarMainPreview,
 } from "../lib/features/space/modules/workspace-preview-route.ts";
 
-test("parsePreviewParam accepts file/canvas/port", () => {
+test("parsePreviewParam accepts file/board/port", () => {
 	assert.deepEqual(parsePreviewParam("file:docs/a.md"), {
 		kind: "file",
 		key: "docs/a.md",
@@ -57,8 +58,8 @@ test("readPreviewFromSearch reads query", () => {
 		key: "readme.md",
 	});
 	assert.deepEqual(
-		readPreviewFromSearch(new URLSearchParams("preview=canvas:board.covas")),
-		{ kind: "canvas", key: "board.covas" },
+		readPreviewFromSearch(new URLSearchParams("preview=board:board.board")),
+		{ kind: "board", key: "board.board" },
 	);
 });
 
@@ -109,6 +110,22 @@ test("new chat -> session keeps preview (send must not collapse Files)", () => {
 	assert.equal(
 		afterSend,
 		`/spaces/s1/sessions/sess-created?preview=${encodeURIComponent("file:docs/a.md")}`,
+	);
+});
+
+test("sidebar main navigation drops preview on mobile, keeps it on desktop", () => {
+	const pathname = "/spaces/s1/sessions/sess-2";
+	const search = `preview=${encodeURIComponent("board:boards/main.board")}`;
+	assert.equal(
+		withSidebarMainPreview(pathname, { isMobile: true, currentSearch: search }),
+		pathname,
+	);
+	assert.equal(
+		withSidebarMainPreview(pathname, {
+			isMobile: false,
+			currentSearch: search,
+		}),
+		`${pathname}?preview=${encodeURIComponent("board:boards/main.board")}`,
 	);
 });
 

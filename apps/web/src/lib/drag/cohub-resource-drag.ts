@@ -12,6 +12,9 @@ export type CohubDragResource = {
 	subtitle?: string | null;
 	href?: string;
 	path?: string;
+	mimeType?: string | null;
+	size?: number;
+	mtimeMs?: number;
 };
 
 export type CohubDragOrigin =

@@ -4,20 +4,16 @@ import { onMount } from "svelte";
 import { browser } from "$app/environment";
 import { goto } from "$app/navigation";
 import { page } from "$app/state";
+import { resolveAppEntryRoute } from "$lib/app-entry";
 import { hasLocalSessionHint, signInWithRedirectPath } from "$lib/auth";
 import LandingConcepts from "$lib/components/landing/LandingConcepts.svelte";
+import LandingDifferentials from "$lib/components/landing/LandingDifferentials.svelte";
+import LandingHowItWorks from "$lib/components/landing/LandingHowItWorks.svelte";
 import LandingIdeaArt from "$lib/components/landing/LandingIdeaArt.svelte";
 import LandingSpaceDemo from "$lib/components/landing/LandingSpaceDemo.svelte";
 import PublicHeader from "$lib/components/PublicHeader.svelte";
-import { sdk } from "$lib/sdk";
 import { canonicalUrl as buildCanonical } from "$lib/seo";
-import { buildSpaceLandingRoute } from "$lib/space-routes";
 import { authStore } from "$lib/stores/auth.svelte";
-import { getRecentSpace } from "$lib/stores/recent-space";
-import {
-	getCachedSpaceList,
-	setCachedSpaceList,
-} from "$lib/stores/space-list-cache";
 import { getResolvedTheme } from "$lib/theme.svelte";
 
 // Home marketing is always dark (app.html also forces it for first paint).
@@ -51,35 +47,26 @@ async function handlePrimaryCta() {
 	try {
 		await authStore.ensureLoaded(true);
 		if (authStore.isAuthenticated) {
-			await goto("/spaces/new");
+			redirecting = true;
+			if (browser)
+				document.documentElement.setAttribute("data-home-redirect", "1");
+			const dest = await resolveAppEntryRoute();
+			if (dest) {
+				await goto(dest);
+				return;
+			}
+			redirecting = false;
+			clearHomeRedirectAttr();
+			console.error("[home] Authenticated but no default space available");
 			return;
 		}
-		await signInWithRedirectPath("/spaces/new");
+		// After login, / resolves default (and ensures Home if needed).
+		await signInWithRedirectPath("/");
 	} catch (error) {
+		redirecting = false;
+		clearHomeRedirectAttr();
 		console.error("[home] Failed to start Cohub:", error);
 	}
-}
-
-async function resolveHomeDestination(): Promise<string> {
-	const userKey = authStore.userUuid;
-	if (userKey) {
-		const recent = getRecentSpace(userKey);
-		if (recent?.spaceId) return buildSpaceLandingRoute(recent.spaceId);
-	}
-
-	const cached = getCachedSpaceList();
-	if (cached?.[0]?.id) return buildSpaceLandingRoute(cached[0].id);
-
-	try {
-		const spaces = setCachedSpaceList(await sdk.spaces.list());
-		const defaultResult = await sdk.spaces.getDefault().catch(() => null);
-		const targetSpace = defaultResult?.space ?? spaces[0] ?? null;
-		if (targetSpace) return buildSpaceLandingRoute(targetSpace.id);
-	} catch {
-		// Authenticated with no reachable space → create flow.
-	}
-
-	return "/spaces/new";
 }
 
 onMount(() => {
@@ -104,7 +91,13 @@ onMount(() => {
 				clearHomeRedirectAttr();
 				return;
 			}
-			const dest = await resolveHomeDestination();
+			const dest = await resolveAppEntryRoute();
+			if (!dest) {
+				redirecting = false;
+				clearHomeRedirectAttr();
+				console.warn("[home] No default space after ensure");
+				return;
+			}
 			await goto(dest);
 		} catch (error) {
 			console.warn("[home] Session redirect failed:", error);
@@ -153,31 +146,31 @@ const ideas = [
 	{
 		num: "01",
 		title: "Fun to start",
-		body: "Open a Space and play with ideas, prompts, files, and agents. No setup, no blank-page dread — just start typing and watch things take shape.",
+		body: "Open a Space and play with ideas, prompts, files, and agents. No setup — just start typing and watch things take shape.",
 		kind: "spark" as const,
 	},
 	{
 		num: "02",
 		title: "Build together",
-		body: "People and agents share one context. Everyone sees the same conversation, files, and tool calls in realtime — co-create, save, and share without losing the thread.",
+		body: "People and agents share one context. Same chat, files, and tool calls — co-create, save a Checkpoint, keep the thread.",
 		kind: "build" as const,
 	},
 	{
 		num: "03",
 		title: "Open everywhere",
-		body: "Web, mobile, CLI, Discord, WeChat, Feishu. The Space follows you — talk from any channel and the agent replies back through the same one.",
+		body: "Same Space from the web, CLI, API, or a scheduled prompt. Point the CLI at a local folder with cohub sandbox up and that directory becomes the sandbox.",
 		kind: "open" as const,
 	},
 	{
 		num: "04",
-		title: "Powerful for real work",
-		body: "Games, apps, media, automations — from playful to production. Preview a running app in the workspace, then publish it as a public Work with one click.",
+		title: "Publish Live Works",
+		body: "Publish a file, site, or running port as a public app on Cohub that exposes your Space. Visitors can authorize actions that go back to the Space.",
 		kind: "work" as const,
 	},
 	{
 		num: "05",
 		title: "Never start blank",
-		body: "Fork a checkpoint into a new Space, or reference any Space with @space as context. Every project stands on the shoulders of another.",
+		body: "Fork a Checkpoint into a new Space, or @space so the agent can pull other context in. You stay in one session — not hopping between agents.",
 		kind: "fork" as const,
 	},
 ];
@@ -187,7 +180,7 @@ const ideas = [
 	<title>Cohub — create, play, and build with people and agents</title>
 	<meta
 		name="description"
-		content="A living Space for people and agents to create, play, and build together. Start anywhere, make in any medium, share as Works."
+		content="A living Space for people and agents. Create on the web or connect a local folder with the CLI, save Checkpoints, and publish Live Works that still run on Cohub."
 	/>
 	<link rel="canonical" href={canonical} />
 	<meta property="og:type" content="website" />
@@ -195,14 +188,14 @@ const ideas = [
 	<meta property="og:title" content="Cohub — create, play, and build with people and agents" />
 	<meta
 		property="og:description"
-		content="A living Space for people and agents. Start anywhere, make in any medium, share as Works."
+		content="A living Space for people and agents. Start on the web or from a local folder via CLI. Save Checkpoints. Publish Live Works."
 	/>
 	<meta property="og:url" content={canonical} />
 	<meta name="twitter:card" content="summary" />
 	<meta name="twitter:title" content="Cohub — create, play, and build with people and agents" />
 	<meta
 		name="twitter:description"
-		content="A living Space for people and agents. Start anywhere, make in any medium, share as Works."
+		content="A living Space for people and agents. Start on the web or from a local folder via CLI. Save Checkpoints. Publish Live Works."
 	/>
 </svelte:head>
 
@@ -221,7 +214,7 @@ const ideas = [
 		></div>
 
 		<!-- Header -->
-		<PublicHeader sticky cta="start" onStart={handlePrimaryCta} />
+		<PublicHeader cta="start" onStart={handlePrimaryCta} />
 
 		<main class="relative flex-1">
 			<!-- Hero -->
@@ -243,8 +236,8 @@ const ideas = [
 							agents.
 						</h1>
 						<p class="rise rise-3 mt-5 max-w-md text-[15px] leading-7 text-text-tertiary sm:text-[16px]">
-							A living Space where people and agents work in one context. Start anywhere, make in
-							any medium, save the moments that matter, and share them as Works.
+							A living Space where people and agents work in one context. Start on the web, or connect a
+							local folder with the CLI. Make in any medium, save Checkpoints, and share as Live Works.
 						</p>
 						<div class="rise rise-4 mt-8 flex flex-wrap items-center gap-x-4 gap-y-3">
 							<button
@@ -255,14 +248,10 @@ const ideas = [
 								Start a Space
 								<ArrowRight class="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
 							</button>
-							<span class="inline-flex items-center gap-2 text-[12.5px] text-text-placeholder">
-								or reference any space with
-								<code
-									class="rounded-[5px] border border-border-subtle bg-bg-code px-1.5 py-0.5 font-mono text-[11.5px] text-text-secondary"
-									>@space</code
-								>
-							</span>
 						</div>
+						<p class="rise rise-4 mt-3 font-mono text-[11.5px] text-text-placeholder">
+							$ cohub sandbox up ./my-project
+						</p>
 					</div>
 
 					<div class="rise rise-5 relative lg:pt-2">
@@ -293,20 +282,62 @@ const ideas = [
 				</div>
 			</section>
 
-			<!-- Ideas -->
+			<!-- How it works -->
 			<section class="mx-auto w-full max-w-6xl px-5 pb-4 pt-20 sm:px-8 lg:pt-24">
 				<div class="max-w-2xl">
 					<div class="text-[12px] font-semibold uppercase tracking-[0.16em] text-brand">
-						One surface, from play to production
+						How it works
 					</div>
 					<h2
 						class="mt-3 text-[clamp(1.7rem,3.2vw,2.5rem)] font-semibold leading-tight tracking-[-0.03em] text-text-primary"
 					>
-						Everything happens inside a Space.
+						Start a Space. Build in it. Publish live.
 					</h2>
 					<p class="mt-3.5 max-w-xl text-[15px] leading-7 text-text-tertiary">
-						A Space is a live, isolated environment where people and agents create together —
-						conversations, files, generations, previews, and automations in one place.
+						Open one on the web or from a local folder with the CLI. Work together, save a Checkpoint,
+						then publish a Live Work that keeps running on Cohub.
+					</p>
+				</div>
+				<div use:reveal class="reveal-row mt-9">
+					<LandingHowItWorks />
+				</div>
+			</section>
+
+			<!-- Differentials -->
+			<section class="mx-auto w-full max-w-6xl px-5 pb-4 pt-20 sm:px-8 lg:pt-24">
+				<div class="max-w-2xl">
+					<div class="text-[12px] font-semibold uppercase tracking-[0.16em] text-brand">
+						What makes it different
+					</div>
+					<h2
+						class="mt-3 text-[clamp(1.7rem,3.2vw,2.5rem)] font-semibold leading-tight tracking-[-0.03em] text-text-primary"
+					>
+						Share live. Reuse context.
+					</h2>
+					<p class="mt-3.5 max-w-xl text-[15px] leading-7 text-text-tertiary">
+						Publish an app that exposes your Space, or let the agent pull context in with
+						<code class="rounded-[5px] bg-brand-muted px-1.5 py-0.5 font-mono text-[0.92em] text-brand">@space</code>
+						— other Spaces as context, not a hunt for another agent. Useful once you are building.
+					</p>
+				</div>
+				<div use:reveal class="reveal-row mt-9">
+					<LandingDifferentials />
+				</div>
+			</section>
+
+			<!-- Ideas -->
+			<section class="mx-auto w-full max-w-6xl px-5 pb-4 pt-20 sm:px-8 lg:pt-24">
+				<div class="max-w-2xl">
+					<div class="text-[12px] font-semibold uppercase tracking-[0.16em] text-brand">
+						Inside a Space
+					</div>
+					<h2
+						class="mt-3 text-[clamp(1.7rem,3.2vw,2.5rem)] font-semibold leading-tight tracking-[-0.03em] text-text-primary"
+					>
+						Everything happens in a Space.
+					</h2>
+					<p class="mt-3.5 max-w-xl text-[15px] leading-7 text-text-tertiary">
+						Chats, files, previews, scheduled prompts, and published Works — people and agents, one place.
 					</p>
 				</div>
 
@@ -325,11 +356,16 @@ const ideas = [
 								</h3>
 								<p class="mt-3 max-w-md text-[15px] leading-7 text-text-tertiary">
 									{#if idea.kind === "fork"}
-										Fork a checkpoint into a new Space, or reference any Space with
-										<code
-											class="rounded-[5px] bg-brand-muted px-1.5 py-0.5 font-mono text-[0.92em] text-brand"
-											>@space</code
-										> as context. Every project stands on the shoulders of another.
+										Fork a Checkpoint into a new Space, or use
+										<code class="rounded-[5px] bg-brand-muted px-1.5 py-0.5 font-mono text-[0.92em] text-brand">@space</code>
+										so the agent pulls other context in. You stay in one session — not hopping between agents.
+									{:else if idea.kind === "work"}
+										Publish a file, site, or running port as a public app that exposes your Space.
+										After a visitor authorizes, it can still prompt or generate back in the Space.
+									{:else if idea.kind === "open"}
+										Same Space from the web, CLI, API, or a schedule. Link a local folder with
+										<code class="rounded-[5px] bg-brand-muted px-1.5 py-0.5 font-mono text-[0.92em] text-brand">cohub sandbox up</code>
+										and work from your machine.
 									{:else}
 										{idea.body}
 									{/if}
@@ -352,11 +388,12 @@ const ideas = [
 					<h2
 						class="mt-3 text-[clamp(1.7rem,3.2vw,2.5rem)] font-semibold leading-tight tracking-[-0.03em] text-text-primary"
 					>
-						A few ideas, endlessly composable.
+						A few ideas, used together.
 					</h2>
 					<p class="mt-3.5 text-[15px] leading-7 text-text-tertiary">
-						Cohub is built around one idea: people create in Spaces, and useful context gets saved
-						as Checkpoints.
+						You work in Spaces, save Checkpoints, and share Live Works.
+						<code class="rounded-[5px] bg-brand-muted px-1.5 py-0.5 font-mono text-[0.92em] text-brand">@space</code>
+						lets the agent reach for other context; Fork opens a new Space when you need a branch.
 					</p>
 				</div>
 				<div use:reveal class="reveal-row mt-9">
@@ -376,7 +413,7 @@ const ideas = [
 						<p
 							class="mt-3.5 text-[16px] leading-7 text-[color-mix(in_srgb,var(--brand-contrast-fg)_88%,transparent)]"
 						>
-							One Space to play, build, and share — with people and agents, from anywhere.
+							One Space to play, build, and share — on the web or from a local folder via CLI.
 						</p>
 						<div class="mt-8">
 							<button
@@ -414,6 +451,13 @@ const ideas = [
 								Product
 							</div>
 							<ul class="mt-4 space-y-2.5 text-[13px]">
+								<li>
+									<a
+										href="/docs"
+										class="text-text-secondary transition-colors hover:text-text-primary"
+										>Docs</a
+									>
+								</li>
 								<li>
 									<a
 										href="/pricing"

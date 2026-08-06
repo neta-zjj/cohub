@@ -16,5 +16,3 @@ assert.deepEqual(deleteChannelResponse("deleted"), {
   body: { ok: true },
   status: 200,
 });
-
-console.log("api channel delete response checks passed");

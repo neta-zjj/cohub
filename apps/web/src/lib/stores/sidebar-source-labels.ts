@@ -8,8 +8,9 @@ import { buildSpaceSessionRoute } from "$lib/space-routes";
 export const ALL_CHATS_LABEL_ID = "__all_chats__";
 export const SESSION_SOURCE_LABEL_SYSTEM_KEY_PREFIX = "session-source:";
 export const SESSION_USER_LABEL_SYSTEM_KEY_PREFIX = "session-user:";
+export const SESSION_CHANNEL_LABEL_SYSTEM_KEY_PREFIX = "session-channel:";
 export const SESSION_USER_ROOT_LABEL_SYSTEM_KEY = `${SESSION_USER_LABEL_SYSTEM_KEY_PREFIX}root`;
-export const SESSION_CHANNEL_ROOT_LABEL_SYSTEM_KEY = "session-channel:root";
+export const SESSION_CHANNEL_ROOT_LABEL_SYSTEM_KEY = `${SESSION_CHANNEL_LABEL_SYSTEM_KEY_PREFIX}root`;
 export const WEB_APP_SOURCE_LABEL_SYSTEM_KEY = `${SESSION_SOURCE_LABEL_SYSTEM_KEY_PREFIX}web`;
 
 export function isWebAppSourceLabel(label: LabelListItem) {
@@ -96,7 +97,34 @@ export function getSystemChannelLabels(labels: LabelListItem[]) {
 }
 
 export function getDisplayLabels(labels: LabelListItem[]) {
-	return labels.filter((label) => label.source === "user");
+	return labels.filter((label) => !isSystemLabel(label, labels));
+}
+
+// `legacy:pinned` belongs to migrated user labels; only active session keys
+// provide a system-ownership fallback when historical source data is incorrect.
+function hasSessionSystemKey(label: LabelListItem) {
+	const systemKey = label.systemKey?.trim();
+	return Boolean(
+		systemKey &&
+			[
+				SESSION_SOURCE_LABEL_SYSTEM_KEY_PREFIX,
+				SESSION_USER_LABEL_SYSTEM_KEY_PREFIX,
+				SESSION_CHANNEL_LABEL_SYSTEM_KEY_PREFIX,
+			].some((prefix) => systemKey.startsWith(prefix)),
+	);
+}
+
+export function isSystemLabel(
+	label: LabelListItem,
+	allLabels: LabelListItem[] = [],
+): boolean {
+	if (label.source === "system" || hasSessionSystemKey(label)) return true;
+	if (label.source !== "user") return true;
+	if (label.parentId && allLabels.length > 0) {
+		const parent = allLabels.find((l) => l.id === label.parentId);
+		if (parent && isSystemLabel(parent, allLabels)) return true;
+	}
+	return false;
 }
 
 export function findWebAppSourceLabel(labels: LabelListItem[]) {

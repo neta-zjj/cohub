@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import type { Job } from "bullmq";
+import { UnrecoverableError, type Job } from "bullmq";
 import { recordJobFailure } from "@cohub/infra/bullmq";
 import { getAgentTracer, wrapToolCall } from "@cohub/infra/tracing/agent";
 import { createSandboxCodingTools } from "./sandbox/tools.js";
@@ -158,6 +158,8 @@ export async function processSandboxBashJob(job: Job<AgentSandboxBashUploadJobDa
         },
       });
       logger.error("[SandboxBash] upload command failed", failure);
+      if (exitCode === 3) throw new UnrecoverableError(`upload_size_mismatch: ${error.message}`);
+      if (exitCode === 2 || exitCode === 127) throw new UnrecoverableError(error.message);
       throw error;
     }
   }));

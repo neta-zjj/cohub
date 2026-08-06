@@ -2,7 +2,6 @@
 import {
 	Check,
 	Copy,
-	ExternalLink,
 	Loader2,
 	Monitor,
 	Moon,
@@ -16,12 +15,12 @@ import { onMount } from "svelte";
 import { page } from "$app/state";
 import { ensureAuth } from "$lib/auth";
 import { handleUnauthorizedError } from "$lib/auth-redirect";
+import UploadProgress from "$lib/components/UploadProgress.svelte";
 import UserAvatar from "$lib/components/UserAvatar.svelte";
 import { isComposingKeyboardEvent } from "$lib/keyboard";
 import { uploadUserAvatarImage } from "$lib/public-asset-images";
 import { sdk } from "$lib/sdk";
 import { validateUsernameInput } from "$lib/slug-rules";
-import { buildUserProfileRoute } from "$lib/space-routes";
 import { authStore } from "$lib/stores/auth.svelte";
 import { getTheme } from "$lib/theme.svelte";
 import { THEME_OPTIONS, type ThemeMode } from "$lib/theme-registry";
@@ -46,14 +45,15 @@ let editingField = $state<EditableField | null>(null);
 let draftValue = $state("");
 let savingField = $state<EditableField | null>(null);
 let uploadingAvatar = $state(false);
+let avatarUploadStage = $state<"idle" | "preparing" | "uploading" | "saving">(
+	"idle",
+);
+let avatarUploadProgress = $state(0);
 let uuidCopiedTimer: ReturnType<typeof setTimeout> | null = null;
 
 const profileTitle = $derived(displayName || username || "User");
 const usernameLabel = $derived(username ? `@${username}` : "Set username");
 const uuidLabel = $derived(formatUuid(userUuid));
-const publicProfileHref = $derived(
-	username ? buildUserProfileRoute(username) : null,
-);
 
 const themeIcon = {
 	dark: Moon,
@@ -184,8 +184,16 @@ async function uploadAvatar(file: File) {
 	if (uploadingAvatar) return;
 	inlineError = "";
 	uploadingAvatar = true;
+	avatarUploadStage = "preparing";
+	avatarUploadProgress = 0;
 	try {
-		const asset = await uploadUserAvatarImage(file);
+		const asset = await uploadUserAvatarImage(file, {
+			onProgress: ({ ratio }) => {
+				avatarUploadStage = "uploading";
+				avatarUploadProgress = Math.round(ratio * 100);
+			},
+		});
+		avatarUploadStage = "saving";
 		const profile = await authStore.updateProfile({
 			avatarUrl: asset.publicUrl,
 		});
@@ -195,6 +203,8 @@ async function uploadAvatar(file: File) {
 			error instanceof Error ? error.message : "Failed to upload avatar";
 	} finally {
 		uploadingAvatar = false;
+		avatarUploadStage = "idle";
+		avatarUploadProgress = 0;
 	}
 }
 
@@ -261,11 +271,14 @@ onMount(() => {
 									</span>
 									<input type="file" accept="image/jpeg,image/png,image/webp" class="sr-only" disabled={uploadingAvatar} onchange={handleAvatarFileChange} />
 								</label>
-								<label class="inline-flex cursor-pointer items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11px] leading-none text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus-within:bg-bg-hover focus-within:text-text-secondary {uploadingAvatar ? 'pointer-events-none opacity-50' : ''}">
+								<label class="inline-flex cursor-pointer items-center gap-1 rounded-[4px] px-1 py-0.5 text-[11px] leading-none text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus-within:bg-bg-hover focus-within:text-text-secondary {uploadingAvatar ? 'pointer-events-none opacity-70' : ''}">
 									{#if uploadingAvatar}<Loader2 class="h-3 w-3 animate-spin" />{:else}<Upload class="h-3 w-3" />{/if}
-									<span>{avatarUrl ? "Change" : "Upload"}</span>
+									<span aria-live="polite">{avatarUploadStage === "preparing" ? "Preparing" : avatarUploadStage === "uploading" ? `${avatarUploadProgress}%` : avatarUploadStage === "saving" ? "Saving" : avatarUrl ? "Change" : "Upload"}</span>
 									<input type="file" accept="image/jpeg,image/png,image/webp" class="sr-only" disabled={uploadingAvatar} onchange={handleAvatarFileChange} />
 								</label>
+								{#if uploadingAvatar}
+									<UploadProgress class="w-12 rounded-full" value={avatarUploadStage === "uploading" ? avatarUploadProgress : null} label="Avatar upload progress" />
+								{/if}
 							</div>
 						{/if}
 						<div class="min-w-0 flex-1 pt-0.5">
@@ -344,27 +357,6 @@ onMount(() => {
 						<div class="mt-4 rounded-md border border-error-soft/30 bg-error-bg p-3 text-[12px] text-error-soft break-all">{inlineError}</div>
 					{/if}
 				</div>
-			{/if}
-
-			{#if publicProfileHref}
-				<section class="border-t border-border-subtle py-6">
-					<div class="flex flex-wrap items-start justify-between gap-3">
-						<div class="min-w-0">
-							<h2 class="text-[14px] font-medium text-text-primary">Public profile</h2>
-							<p class="mt-1 text-[12px] leading-5 text-text-tertiary">
-								How others see your public spaces and works.
-							</p>
-						</div>
-						<a
-							href={publicProfileHref}
-							class="inline-flex h-8 items-center gap-1.5 rounded-[5px] border border-border-subtle bg-bg-surface px-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-border-strong hover:bg-bg-hover hover:text-text-primary"
-						>
-							View public profile
-							<ExternalLink class="h-3.5 w-3.5" />
-						</a>
-					</div>
-					<p class="mt-3 font-mono text-[12px] text-text-tertiary">{publicProfileHref}</p>
-				</section>
 			{/if}
 
 			<section class="border-t border-border-subtle py-6">

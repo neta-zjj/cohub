@@ -1,5 +1,182 @@
 # @neta-art/cohub
 
+## 4.9.0
+
+### Minor Changes
+
+- aea39ee: Add realtime rooms to the Work runtime. Works can create or join a code-scoped room through `client.work.realtime` and exchange generic JSON events over the existing WebSocket, with member presence, room-scoped sequencing, and short-lived admission tickets. High-frequency senders can use `room.send` to skip the per-event ack. Every connection is its own participant by default, and members carry an opaque `userKey` so an application can group a viewer's connections; a room created with `seatPerUser` gives each viewer a single seat instead.
+
+## 4.8.0
+
+### Minor Changes
+
+- 93c1267: Add platform-managed Cohub Balance components to Work Commerce products, including SDK response types, retry-safe checkout attempts, and CLI creation and listing support.
+
+## 4.7.1
+
+### Patch Changes
+
+- 3931642: Add idempotency keys to directory creation, deletion, move, and Board creation so interrupted filesystem mutations can be retried safely.
+
+## 4.7.0
+
+### Minor Changes
+
+- ec5ffdb: Add generation model discovery helpers and hide generation declarations marked `hidden` from default CLI discovery while preserving exact-ID and explicit-policy access.
+
+## 4.6.0
+
+### Minor Changes
+
+- 4735eea: Add optional browser upload progress and cancellation signals for public assets.
+
+## 4.5.0
+
+### Minor Changes
+
+- 59443a9: Add friendly-first space invite URLs, invitation location metadata, reliable invitation limits and usage tracking, and CLI commands for creating, listing, and revoking invite links.
+
+## 4.4.0
+
+### Minor Changes
+
+- f514b5e: Add paginated Space-level Turn listing with author and time boundaries, including CLI access.
+
+## 4.3.0
+
+### Minor Changes
+
+- 651476c: Expose mounted Mod provenance in skill catalog entries and show the source slug in CLI listings.
+
+## 4.2.0
+
+### Minor Changes
+
+- 4e9e994: Add SDK support for publishing arbitrary files and read-only Boards as Works.
+
+  Work responses now expose their content kind and immutable artifact metadata,
+  including captured Board snapshots and assets.
+
+- 22c00f4: Add negotiated presigned PUT support for durable chat attachments while retaining legacy POST uploads.
+
+## 4.1.0
+
+### Minor Changes
+
+- 3a9a51d: Add delayed, looping Board autoplay configured through Board metadata.
+
+## 4.0.1
+
+### Patch Changes
+
+- 1fb5002: Docs: clarify `accessMode` in the Work Runtime Guide to prevent read-only 403s.
+
+  The permission table and all `space.prompt()` examples only showed full-access
+  prompts, with no mention that `session.prompt.readonly` requires
+  `accessMode: "read_only"` in the call. Since the backend defaults `accessMode`
+  to `full_access`, requesting only `session.prompt.readonly` and reusing the
+  example code (no `accessMode`) yielded a 403.
+
+  - Split the "Send a prompt" table row into full-access / read-only rows that
+    name the `accessMode` parameter explicitly.
+  - Add an `accessMode`-default warning and a complete read-only prompt recipe
+    (auth.request + space.prompt + subscribeGeneration) to the LLM chat section.
+  - Add a pitfalls checklist item for scope / `accessMode` mismatch.
+
+## 4.0.0
+
+### Major Changes
+
+- b9e6840: Remove note board nodes and render Markdown file-card titles from frontmatter.
+
+### Minor Changes
+
+- 9350706: Add shared Board geometry for Figma-style rotation zones outside selection corners.
+- 9350706: Add black and white to the shared Board tool palette and color types.
+- ba7d325: Add shared Board tool-style defaults and controls, and increase the default text size.
+
+### Patch Changes
+
+- c1eb8ef: Allow Board hosts to render a themed image backdrop beneath the transparent canvas.
+- 95ae57d: Render freehand Board strokes with stable rounded outlines through sharp turns and self-intersections.
+- a98f930: Add typed `work.version.published` Space realtime events.
+- 9350706: Preserve image proportions in Board file-card covers and remove the metadata footer.
+
+## 3.2.0
+
+### Minor Changes
+
+- 54cd4d0: Move the Board document model, renderers, and image exporters into the Cohub SDK, organised by dependency so each entry only carries what it needs:
+
+  - `@neta-art/cohub/board` — document schema, geometry, shapes, timeline compilation, and export planning. No PixiJS, so it runs on servers, agents, and edge workers.
+  - `@neta-art/cohub/board/render` — the PixiJS card renderers, themes, and palette the editor draws with.
+  - `@neta-art/cohub/board/export` — rendering a planned export to a canvas in the browser.
+  - `@neta-art/cohub/board/headless` — Node.js image export on `@napi-rs/canvas`.
+
+  `pixi.js` and `@napi-rs/canvas` stay optional peers, needed only for the rendering and export entries. Board modules also keep their build boundaries, so consumers tree-shake unused schemas and renderers instead of pulling in the whole model.
+
+## 3.1.0
+
+### Minor Changes
+
+- 94a8f99: Board realtime: add optional `client.formFactor` to awareness state so peers can present a mobile touch contact as such, and carry server-owned `metadata` (including request provenance) on `board.transaction.applied` for CLI / Agent attribution.
+- b47510a: Add Board realtime awareness subscriptions and updates for cursors, selections, creation gestures, drawing, and transforms.
+
+## 3.0.0
+
+### Major Changes
+
+- ac1a3ce: Adopt Board across SDK types, REST endpoints, file formats, and realtime events. Add bound `BoardClient` entities with transaction and playback subscriptions.
+
+### Minor Changes
+
+- 077ce83: Add the Space startup API for preloading UI configuration and local preview sessions.
+
+## 2.15.0
+
+### Minor Changes
+
+- 7dfa1d8: Add optional `thinkingLevel` to session prompts, scheduled prompts, channel model config, and space hooks. The level is fully optional — omitted values inherit the session default, matching existing provider/model behavior. UI, CLI, and SDK all support per-model thinking level selection driven by models config (`reasoning`, `defaultThinkingLevel`, `thinkingLevelMap`). Effective thinking level is persisted to turn meta and exposed on turn records for multi-client recovery.
+
+### Patch Changes
+
+- 7dfa1d8: Add optional file write baselines and mutation identifiers for conflict-aware autosave.
+
+## 2.14.1
+
+### Patch Changes
+
+- dad311e: Recover WebSocket sessions from a transient authentication failure by forcing one access-token refresh, reconnecting once, and restoring room subscriptions without entering an infinite retry loop.
+
+## 2.14.0
+
+### Minor Changes
+
+- f72fa82: Expose structured canvas transaction conflicts and richer published Work metadata through the Cohub SDK and CLI dependency bundle.
+
+  - Export `CanvasTransactionError` with status, code, and `isVersionConflict` so clients can rebase and retry rejected canvas transactions.
+  - Add `lang` and `themeColor` to published Work metadata types.
+
+## 2.13.0
+
+### Minor Changes
+
+- Carry request provenance via `X-Cohub-Source-*` headers for cross-space traceability.
+
+  - **SDK**: `requestSource` on client options (static or per-request getter); transport stamps `X-Cohub-Source-*` automatically; re-export provenance helpers (`readRequestSourceFromEnv`, `requestSourceToHeaders`, `mergeRequestSourceIntoMeta`, …).
+  - **CLI**: every request sends `via: cli` and sandbox `COHUB_*` identity when present; drop ad-hoc `meta.source` / `versionMeta` / `meta.cohub` merge on works and generations.
+  - **Breaking note**: `WorkCreateInput.versionMeta` removed — publish provenance is taken from request headers instead.
+
+## 2.12.0
+
+### Minor Changes
+
+- d21c200: Ship the resource-references graph-edge model and empty-account Home space bootstrap that the API and agent already expose.
+
+  - **feat(references): graph-edge model with agent file access stats** — turn-level sources, file targets, and agent tool file kinds (`agent_tool_file_read|write|edit|ls|find|grep`); drop redundant `participant` edges; `ReferenceRecord` uses `sourceSpaceId` / `sourceSessionId`; aggregate supports `groupBy=target` and `limit`.
+  - **feat: auto-create Home space for empty accounts** — `spaces.getDefault()` creates a blank Home space (`slug=home`) when the account has no accessible space.
+  - **CLI**: `references query` accepts `turn:<uuid>`; aggregate `--group-by target` / `--limit`; file targets render as short space id + path.
+
 ## 2.11.2
 
 ### Patch Changes

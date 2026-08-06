@@ -20,4 +20,3 @@ deploy/agent/
 
 - `deploy/agent/README.md`
 - `docs/agent-sandbox-runtime.md`
-- `docs/prod-deploy-checklist.md`

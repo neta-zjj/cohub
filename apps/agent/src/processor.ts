@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { Job } from "bullmq";
+import { UnrecoverableError, type Job } from "bullmq";
 import type { ContentBlock } from "@cohub/protocol/core";
+import { ModelUnavailableError } from "@cohub/core/sessions";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { readPublicAssetImageUrl } from "./public-asset-storage.js";
 import { imageOmittedText, normalizeAgentImage, normalizeContentBlocksImages } from "./image-normalizer.js";
@@ -16,7 +17,8 @@ import { ensureSandboxConnection } from "./sandbox-pool.js";
 import { createSandboxCodingTools } from "./sandbox/tools.js";
 import { CohubModelRegistry } from "./runtime/model-registry.js";
 import { loadRuntimeModelsConfigs } from "./runtime/models-loader.js";
-import { maybeAutoCompact, OverflowRecoveryError, type CompactionOutcome } from "./runtime/compaction.js";
+import { loadImageToTextConfig } from "./runtime/image-to-text-config.js";
+import { CompactionStateRecoveryError, maybeAutoCompact, OverflowRecoveryError, type CompactionOutcome } from "./runtime/compaction.js";
 import { clearCurrentSessionExecutionAuth, setCurrentSessionExecutionAuth } from "./runtime/session-execution-auth.js";
 import { resolveSpaceFileVisibility } from "./runtime/cross-space-query-access.js";
 import { normalizeGenerationPolicy } from "@cohub/protocol/generation";
@@ -294,8 +296,8 @@ async function runWithRoundAutoCompaction<T>(
           abortSignal: signal ?? input.abortSignal,
           force,
         }).catch((error) => {
-          // Force path must surface failure so we don't empty-retry the same overflow.
-          if (force) throw error;
+          // Recovery failures are fatal for both threshold and forced compaction.
+          if (force || error instanceof CompactionStateRecoveryError) throw error;
           logger.warn(`[Agent] auto-compact check failed sessionId=${handle.sessionId}:`, error);
           return { compacted: false, reason: "error" } as const;
         });
@@ -343,6 +345,7 @@ async function appendAndPersistUserMessage(input: {
     sessionId: input.sessionId,
     userMessageId: input.user.userMessageId,
     turnId: input.user.turnId,
+    agentSessionEntryId: entryId,
     content,
     meta: input.meta,
     startedAt,
@@ -596,6 +599,7 @@ async function runDirectShellCommandTurn(input: {
       turnId: user.turnId,
       startedAt: toolStartedAt,
       completedAt,
+      thinkingLevel: handle.session.agent.state.thinkingLevel,
     });
 
     input.turnMetrics.toolCallCount += 1;
@@ -612,13 +616,21 @@ async function prepareHandle(input: {
   sessionId: string;
   actorUserId: string;
   requestedModel?: { provider: string; id: string };
+  requestedThinkingLevel?: string | null;
 }) {
-  const modelRegistry = await getModelRegistryForUser(input.actorUserId);
+  const [modelRegistry, imageToTextConfig] = await Promise.all([
+    getModelRegistryForUser(input.actorUserId),
+    loadImageToTextConfig(input.actorUserId).catch((error) => {
+      logger.warn("[ImageToText] config unavailable; continuing without fallback", error);
+      return null;
+    }),
+  ]);
   const handle = await loadOrCreateSessionHandle({
     spaceId: input.spaceId,
     sessionId: input.sessionId,
     userId: input.actorUserId,
     modelRegistry,
+    imageToTextConfig,
     tools,
     model: input.requestedModel,
     sessionHandles,
@@ -628,7 +640,9 @@ async function prepareHandle(input: {
     userId: input.actorUserId,
     spaceOwnerUserId: handle.spaceOwnerUserId,
     modelRegistry,
+    imageToTextConfig,
     requestedModel: input.requestedModel,
+    requestedThinkingLevel: input.requestedThinkingLevel,
   });
 
   return handle;
@@ -640,6 +654,12 @@ function resolveRequestedModel(ownerMeta: Record<string, unknown>) {
   return provider && model ? { provider, id: model } : undefined;
 }
 
+function resolveRequestedThinkingLevel(ownerMeta: Record<string, unknown>): string | null | undefined {
+  if (typeof ownerMeta.requestedThinkingLevel !== "string") return undefined;
+  const trimmed = ownerMeta.requestedThinkingLevel.trim();
+  return trimmed || null;
+}
+
 function resolveActorUserId(ownerMeta: Record<string, unknown>) {
   return typeof ownerMeta.userId === "string" && ownerMeta.userId.trim() ? ownerMeta.userId.trim() : null;
 }
@@ -648,13 +668,33 @@ function resolvePromptAccessMode(ownerMeta: Record<string, unknown>): PromptAcce
   return ownerMeta.accessMode === "read_only" ? "read_only" : "full_access";
 }
 
+function resolveContextHookEnv(ownerMeta: Record<string, unknown>) {
+  const context = ownerMeta.context && typeof ownerMeta.context === "object" && !Array.isArray(ownerMeta.context)
+    ? ownerMeta.context as Record<string, unknown>
+    : null;
+  if (context?.kind !== "space_hook") return null;
+  const env = context.env;
+  if (!env || typeof env !== "object" || Array.isArray(env)) return null;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.startsWith("COHUB_HOOK_")) continue;
+    if (typeof value !== "string" || !value.trim()) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function resolvePromptEnv(ownerMeta: Record<string, unknown>) {
+  let userEnv: Record<string, string> | null = null;
   try {
-    return parsePromptEnv(ownerMeta.env);
+    userEnv = parsePromptEnv(ownerMeta.env);
   } catch (error) {
     logger.warn(`[Agent] ignoring invalid prompt env: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
   }
+  const hookEnv = resolveContextHookEnv(ownerMeta);
+  if (!userEnv && !hookEnv) return null;
+  // System hook keys win over user prompt.env.
+  return { ...(userEnv ?? {}), ...(hookEnv ?? {}) };
 }
 
 function resolveBatchAccessMode(batch: { turns: Array<{ meta: unknown }> }): PromptAccessMode {
@@ -841,6 +881,7 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
         sessionId: data.sessionId,
         actorUserId,
         requestedModel: resolveRequestedModel(ownerMeta),
+        requestedThinkingLevel: resolveRequestedThinkingLevel(ownerMeta),
       });
       const activeHandle = handle;
       try {
@@ -852,6 +893,10 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
 
       if (accessMode === "full_access") warmupSandboxConnection(data.spaceId);
 
+      const executionModel = {
+        provider: activeHandle.session.agent.state.model.provider,
+        id: activeHandle.session.agent.state.model.id,
+      };
       const rawTurnUserMessages: TurnUserMessage[] = buildUserMessagesForBatch(batch)
         .filter((item) => Boolean(item.userMessageId))
         .map((item) => ({
@@ -925,8 +970,8 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
           turnSeq: batch.ownerTurn.sequence,
           userMessageId: directShellItem.userMessageId,
           requestId,
-          modelProvider: activeHandle.session.agent.state.model.provider,
-          modelId: activeHandle.session.agent.state.model.id,
+          modelProvider: executionModel.provider,
+          modelId: executionModel.id,
           isResumedSession: activeHandle.sessionManager.buildSessionContext().messages.length > 0,
         }, async (turnSpan) => {
           await runWithToolExecutionContext({
@@ -936,6 +981,7 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
             turnSeq: batch.ownerTurn.sequence,
             anchorUserMessageId: directShellItem.userMessageId,
             llmRound: 0,
+            model: executionModel,
             actorUserId,
             executionToken,
             executionScopes,
@@ -994,8 +1040,8 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
         turnSeq: batch.ownerTurn.sequence,
         userMessageId: ownerUserMessageId,
         requestId,
-        modelProvider: activeHandle.session.agent.state.model.provider,
-        modelId: activeHandle.session.agent.state.model.id,
+        modelProvider: executionModel.provider,
+        modelId: executionModel.id,
         isResumedSession: activeHandle.sessionManager.buildSessionContext().messages.length > 0,
       }, async (turnSpan) => {
         await runWithToolExecutionContext({
@@ -1005,6 +1051,7 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
           turnSeq: batch.ownerTurn.sequence,
           anchorUserMessageId: ownerUserMessageId,
           llmRound: 0,
+          model: executionModel,
           actorUserId,
           executionToken,
           executionScopes,
@@ -1031,8 +1078,13 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
               onCompacted: (compactOutcome) => {
                 turnSpan.addEvent("agent.auto_compact", {
                   "agent.compaction.tokens_before": compactOutcome.tokensBefore,
+                  "agent.compaction.estimated_tokens_after": compactOutcome.estimatedTokensAfter,
                   "agent.compaction.summary_length": compactOutcome.summary.length,
-                  "agent.compaction.compact_sequence": compactOutcome.compactSequence,
+                  "agent.compaction.duration_ms": compactOutcome.durationMs,
+                  "agent.compaction.attempt_count": compactOutcome.attemptCount,
+                  ...(compactOutcome.compactSequence != null
+                    ? { "agent.compaction.compact_sequence": compactOutcome.compactSequence }
+                    : {}),
                 });
               },
             }, async () => {
@@ -1113,6 +1165,9 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
         });
         drainAfterRelease = { spaceId: data.spaceId, sessionId: data.sessionId, reason: "turn_failed" };
       }
+      if (error instanceof ModelUnavailableError) {
+        throw new UnrecoverableError(error.message);
+      }
       throw error;
     } finally {
       if (activeTurn) clearActiveAbortController(activeTurn.id, activeTurn.controller);
@@ -1141,7 +1196,15 @@ export async function processAgentTurnJob(job: Job<AgentTurnJobData>) {
             removePendingUserMessage(handle, userMessageId);
           }
         }
-        await settleSessionHandle(handle, terminalHandled ? "strict" : "best_effort");
+        if (caughtError instanceof CompactionStateRecoveryError) {
+          sessionHandles.delete(handle.sessionKey);
+          clearCurrentSessionExecutionAuth(handle.sessionId);
+          await handle.persistenceChain.catch(() => undefined);
+          await handle.sessionManager.close().catch(() => undefined);
+          handle.session.dispose();
+        } else {
+          await settleSessionHandle(handle, terminalHandled ? "strict" : "best_effort");
+        }
       }
       if (claimedBatch) clearRetryState(data);
       await lock.release();

@@ -4,6 +4,7 @@ import type { WebSocket } from "ws";
 import { createLogger } from "@cohub/infra/logging";
 import { gatewayConfig } from "../config.js";
 import { redisCommandClient, REALTIME_OUTBOUND_CHANNEL } from "../redis.js";
+import { enqueueSpaceHookFromEvent } from "../space-hooks.js";
 import { authorizeLocalSandbox, reportLocalSandboxStatus } from "../api-client.js";
 
 const logger = createLogger({ serviceName: "cohub-gateway" });
@@ -95,16 +96,28 @@ async function publishRelayWatcherEvent(spaceId: string, frameType: string, payl
     return;
   }
 
+  // Publish realtime for UI and enqueue hooks concurrently.
+  const id = randomUUID();
+  const timestamp = Date.now();
   const message = JSON.stringify({
-    id: randomUUID(),
-    timestamp: Date.now(),
+    id,
+    timestamp,
     domain: "space",
     type,
     spaceId,
     sessionId: null,
     payload: eventPayload,
   });
-  await redisCommandClient.publish(REALTIME_OUTBOUND_CHANNEL, message);
+  await Promise.all([
+    redisCommandClient.publish(REALTIME_OUTBOUND_CHANNEL, message),
+    enqueueSpaceHookFromEvent({
+      id,
+      type,
+      timestamp,
+      spaceId,
+      payload: eventPayload,
+    }),
+  ]);
 }
 
 // ── Control channel (local runner ⇒ gateway) ───────────────────────────────
@@ -133,7 +146,7 @@ export async function handleRelayControlConnection(socket: WebSocket, request: I
     if (frame.type === "register") {
       const spaceId = typeof frame.spaceId === "string" ? frame.spaceId.trim() : "";
       if (!spaceId) {
-        socket.send(JSON.stringify({ type: "error", message: "spaceId is required" }));
+        socket.send(JSON.stringify({ type: "error", status: 400, message: "spaceId is required" }));
         closeSocket(socket, 4400, "spaceId is required");
         return;
       }
@@ -142,8 +155,8 @@ export async function handleRelayControlConnection(socket: WebSocket, request: I
         return { ok: false as const, status: 500, message: "authorization failed" };
       });
       if (!auth.ok) {
-        socket.send(JSON.stringify({ type: "error", message: auth.message }));
-        closeSocket(socket, 4403, "forbidden");
+        socket.send(JSON.stringify({ type: "error", status: auth.status, message: auth.message }));
+        closeSocket(socket, auth.status >= 500 ? 1011 : 4403, auth.status >= 500 ? "authorization unavailable" : "forbidden");
         return;
       }
 

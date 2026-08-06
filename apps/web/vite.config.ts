@@ -18,87 +18,18 @@ function shikiPackageChunkName(id: string) {
 	return null;
 }
 
-const protocolDir = fileURLToPath(
-	new URL("../../packages/protocol/src", import.meta.url),
-);
-const sdkDir = fileURLToPath(
-	new URL("../../packages/sdk/src", import.meta.url),
+const docsProductDir = fileURLToPath(
+	new URL("../../docs/product", import.meta.url),
 );
 
 export default defineConfig({
 	resolve: {
+		// Workspace package aliases (@cohub/protocol, @neta-art/cohub) live in
+		// svelte.config.js `kit.alias`, which SvelteKit injects into Vite for us.
 		alias: [
-			// protocol subpaths — more specific patterns MUST come before bare package name
 			{
-				find: /^@cohub\/protocol\/core$/,
-				replacement: `${protocolDir}/core/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/model$/,
-				replacement: `${protocolDir}/model/session.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/realtime\/types$/,
-				replacement: `${protocolDir}/realtime/types.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/realtime\/schema$/,
-				replacement: `${protocolDir}/realtime/schema.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/realtime$/,
-				replacement: `${protocolDir}/realtime/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/gateway\/types$/,
-				replacement: `${protocolDir}/gateway/types.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/gateway$/,
-				replacement: `${protocolDir}/gateway/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/task$/,
-				replacement: `${protocolDir}/task/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/fs$/,
-				replacement: `${protocolDir}/fs/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/ports$/,
-				replacement: `${protocolDir}/ports/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/generation$/,
-				replacement: `${protocolDir}/generation/index.ts`,
-			},
-			{
-				find: /^@cohub\/protocol\/platform\/default-space-mods$/,
-				replacement: `${protocolDir}/platform/default-space-mods.ts`,
-			},
-			// protocol bare import — must be last to avoid prefix-matching subpaths
-			{
-				find: /^@cohub\/protocol$/,
-				replacement: `${protocolDir}/index.ts`,
-			},
-			// sdk subpaths — more specific patterns first
-			{
-				find: /^@neta-art\/cohub\/http$/,
-				replacement: `${sdkDir}/http.ts`,
-			},
-			{
-				find: /^@neta-art\/cohub\/websocket$/,
-				replacement: `${sdkDir}/websocket.ts`,
-			},
-			{
-				find: /^@neta-art\/cohub\/debugger$/,
-				replacement: `${sdkDir}/debugger.ts`,
-			},
-			// sdk bare import — must be last
-			{
-				find: /^@neta-art\/cohub$/,
-				replacement: `${sdkDir}/index.ts`,
+				find: /^\$docs-product\/(.*)$/,
+				replacement: `${docsProductDir}/$1`,
 			},
 		],
 	},
@@ -110,6 +41,10 @@ export default defineConfig({
 	},
 	server: {
 		allowedHosts: true,
+		// Product docs live outside apps/web; allow Vite to read them in dev.
+		fs: {
+			allow: [docsProductDir],
+		},
 	},
 	build: {
 		chunkSizeWarningLimit: 1200,

@@ -38,7 +38,6 @@ type Props = {
 	allowViewport?: boolean;
 	/** When false, only the overlay UI is rendered (no scissors chrome button). */
 	showTrigger?: boolean;
-	buttonClass?: string;
 	onAttached?: () => void;
 };
 
@@ -47,7 +46,6 @@ let {
 	target = null,
 	allowViewport = false,
 	showTrigger = true,
-	buttonClass = "preview-icon-btn",
 	onAttached,
 }: Props = $props();
 
@@ -452,7 +450,7 @@ onDestroy(() => {
 {#if showTrigger}
 	<button
 		type="button"
-		class={buttonClass}
+		class="preview-mark-trigger"
 		title={triggerTitle}
 		aria-label={triggerAriaLabel}
 		disabled={!canStart || phase === "capturing" || busy}
@@ -564,6 +562,37 @@ onDestroy(() => {
 {/if}
 
 <style>
+	/* Self-contained chrome button: parent scoped classes cannot reach
+	   across the component boundary, so alignment must not depend on them. */
+	.preview-mark-trigger {
+		display: inline-flex;
+		width: 32px;
+		height: 32px;
+		flex-shrink: 0;
+		align-items: center;
+		justify-content: center;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--text-tertiary);
+		cursor: pointer;
+		transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+	}
+
+	.preview-mark-trigger:hover:not(:disabled) {
+		background: var(--bg-hover);
+		color: var(--text-secondary);
+	}
+
+	.preview-mark-trigger:active:not(:disabled) {
+		transform: scale(0.96);
+	}
+
+	.preview-mark-trigger:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
 	.mark-soft-notice {
 		position: fixed;
 		bottom: max(20px, env(safe-area-inset-bottom, 0px));

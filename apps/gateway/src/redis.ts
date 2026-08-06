@@ -13,7 +13,7 @@ logger.info("[Redis] Connecting to Redis", { redis: summarizeRedisUrl(redisUrl) 
 /**
  * Shared command client for short-lived, non-blocking Redis commands only.
  */
-export const redisCommandClient = new Redis(redisUrl);
+export const redisCommandClient = new Redis(redisUrl, { disableClientInfo: true });
 
 redisCommandClient.on("connect", () => {
   logger.info("[Redis] Command client connected successfully");

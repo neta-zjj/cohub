@@ -13,5 +13,3 @@ assert.equal(
   "CRITICAL_MOUNT_IO",
   "definitive mount transport failures should still be classified",
 );
-
-console.log("api sandbox recovery classification checks passed");

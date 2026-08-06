@@ -1,0 +1,1 @@
+DROP TABLE "v2"."space_marks" CASCADE;

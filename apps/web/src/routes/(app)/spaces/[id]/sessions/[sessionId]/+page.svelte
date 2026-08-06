@@ -1,17 +1,1 @@
-<script lang="ts">
-import SpaceWorkspacePage from "$lib/features/space/SpaceWorkspacePage.svelte";
-
-const props = $props<{
-	data: {
-		spaceId: string;
-		view: "session";
-		sessionId?: string | null;
-		filePath?: string | null;
-		previewKind?: "file" | "canvas" | "port" | null;
-		previewKey?: string | null;
-		turnSequence?: string | null;
-	};
-}>();
-</script>
-
-<SpaceWorkspacePage data={props.data} />
+<!-- UI lives in sessions/+layout.svelte so previews survive child-route navigations. -->

@@ -7,6 +7,7 @@ const SPACE_STYLE_ACTIVE_ATTR = "data-cohub-space-style-active";
 const SPACE_STYLE_SPACE_ATTR = "data-space-id";
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRYABLE_ERROR_DELAY_MS = 1200;
+export const SPACE_STYLE_CHANGED_EVENT = "cohub:space-style-changed";
 
 type CachedSpaceStyle =
 	| { type: "inline"; content: string }
@@ -64,13 +65,23 @@ function clearRetryTimer() {
 	retryTimer = null;
 }
 
-function removeSpaceStyleNodes() {
+function notifySpaceStyleChanged(spaceId: string | null) {
+	if (typeof window === "undefined") return;
+	window.dispatchEvent(
+		new CustomEvent(SPACE_STYLE_CHANGED_EVENT, {
+			detail: { spaceId },
+		}),
+	);
+}
+
+function removeSpaceStyleNodes(notify = false) {
 	if (typeof document === "undefined") return;
 	for (const node of document.querySelectorAll(`[${SPACE_STYLE_NODE_ATTR}]`)) {
 		node.remove();
 	}
 	document.documentElement.removeAttribute(SPACE_STYLE_ACTIVE_ATTR);
 	document.documentElement.removeAttribute(SPACE_STYLE_SPACE_ATTR);
+	if (notify) notifySpaceStyleChanged(null);
 }
 
 function markActiveSpaceStyle(spaceId: string) {
@@ -88,6 +99,13 @@ function installLinkedStyle(spaceId: string, href: string, version: number) {
 	link.setAttribute(SPACE_STYLE_SPACE_ATTR, spaceId);
 	document.head.append(link);
 	markActiveSpaceStyle(spaceId);
+	// A linked stylesheet may not have applied when it is appended. Notify once
+	// more after load so board snapshots never cache the pre-style colors.
+	link.addEventListener("load", () => {
+		if (activeVersion === version && activeSpaceId === spaceId)
+			notifySpaceStyleChanged(spaceId);
+	});
+	notifySpaceStyleChanged(spaceId);
 }
 
 function installInlineStyle(spaceId: string, content: string, version: number) {
@@ -99,6 +117,7 @@ function installInlineStyle(spaceId: string, content: string, version: number) {
 	style.setAttribute(SPACE_STYLE_SPACE_ATTR, spaceId);
 	document.head.append(style);
 	markActiveSpaceStyle(spaceId);
+	notifySpaceStyleChanged(spaceId);
 }
 
 function installCachedSpaceStyle(spaceId: string, version: number) {
@@ -159,7 +178,7 @@ async function loadSpaceStyle(
 		if (activeVersion !== options.version || activeSpaceId !== spaceId) return;
 		if (error instanceof HttpError && error.status === 404) {
 			clearCachedSpaceStyle(spaceId);
-			removeSpaceStyleNodes();
+			removeSpaceStyleNodes(true);
 			return;
 		}
 		const isRetryableHttpError =
@@ -182,7 +201,7 @@ export function activateSpaceStyle(spaceId: string) {
 	clearRetryTimer();
 	activeSpaceId = spaceId;
 	activeVersion += 1;
-	removeSpaceStyleNodes();
+	removeSpaceStyleNodes(true);
 	installCachedSpaceStyle(spaceId, activeVersion);
 	void loadSpaceStyle(spaceId, { version: activeVersion });
 }
@@ -200,7 +219,7 @@ export function deactivateSpaceStyle(spaceId?: string) {
 	clearRetryTimer();
 	activeSpaceId = null;
 	activeVersion += 1;
-	removeSpaceStyleNodes();
+	removeSpaceStyleNodes(true);
 }
 
 export function isSpaceStylePath(path: string | null | undefined) {

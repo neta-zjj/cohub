@@ -115,10 +115,15 @@ function createMermaidRenderHost() {
 	return host;
 }
 
-function cleanupMermaidArtifacts(renderId: string, host?: HTMLElement | null) {
-	document.getElementById(renderId)?.remove();
-	document.getElementById(`d${renderId}`)?.remove();
-	document.getElementById(`i${renderId}`)?.remove();
+function cleanupMermaidArtifacts(
+	renderId: string,
+	host?: HTMLElement | null,
+	preserveRoot?: HTMLElement | null,
+) {
+	for (const id of [renderId, `d${renderId}`, `i${renderId}`]) {
+		const artifact = document.getElementById(id);
+		if (artifact && !preserveRoot?.contains(artifact)) artifact.remove();
+	}
 	host?.remove();
 }
 
@@ -505,7 +510,7 @@ export async function renderMermaidDiagrams(root: HTMLElement) {
 				});
 				markMermaidUnavailable(element, error);
 			} finally {
-				cleanupMermaidArtifacts(renderId, host);
+				cleanupMermaidArtifacts(renderId, host, element);
 			}
 		}),
 	);

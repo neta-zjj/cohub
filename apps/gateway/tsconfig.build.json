@@ -28,6 +28,15 @@
       "@cohub/identity": [
         "../../packages/identity/dist/index.d.ts"
       ],
+      "@cohub/infra/bullmq": [
+        "../../packages/infra/dist/bullmq/index.d.ts"
+      ],
+      "@cohub/infra/space-hooks": [
+        "../../packages/infra/dist/space-hooks/index.d.ts"
+      ],
+      "@cohub/infra/logging": [
+        "../../packages/infra/dist/logging/index.d.ts"
+      ],
       "@cohub/infra/tracing": [
         "../../packages/infra/dist/tracing/index.d.ts"
       ],

@@ -1,10 +1,17 @@
 <script lang="ts">
 import { Loader2, Settings } from "lucide-svelte";
 import ModelSelector from "$lib/components/ModelSelector.svelte";
-import { getModelDisplayName } from "$lib/model-catalog";
+import {
+	getModelDisplayName,
+	type ModelThinkingLevel,
+} from "$lib/model-catalog";
 import { modelsCatalogStore } from "$lib/stores/models-catalog.svelte";
 
-type ModelRef = { provider: string; id: string };
+type ModelRef = {
+	provider: string;
+	id: string;
+	thinkingLevel?: ModelThinkingLevel | null;
+};
 
 type Props = {
 	model: ModelRef | null;
@@ -37,7 +44,11 @@ function openSelector() {
 	selectorOpen = true;
 }
 
-function handleSelect(next: ModelRef) {
+function handleSelect(next: {
+	provider: string;
+	id: string;
+	thinkingLevel?: ModelThinkingLevel;
+}) {
 	selectorOpen = false;
 	onSelect(next);
 }
@@ -88,4 +99,5 @@ function clearModel() {
 	onSelect={handleSelect}
 	models={modelsCatalog ?? []}
 	currentModel={model}
+	currentThinkingLevel={model?.thinkingLevel ?? null}
 />

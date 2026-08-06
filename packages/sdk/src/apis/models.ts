@@ -1,5 +1,9 @@
 import type { HttpTransport } from "../transport.js";
-import type { ModelCatalogEntry, ListGenerationModelsResponse } from "../types.js";
+import type {
+  ListGenerationModelsResponse,
+  ModelCatalogEntry,
+  ModelStatusResponse,
+} from "../types.js";
 
 export const MULTIMODAL_MODEL_TYPE = "multimodal";
 
@@ -18,5 +22,9 @@ export class ModelsApi {
     return this.transport.request<ListGenerationModelsResponse>(
       `/api/models?modelType=${MULTIMODAL_MODEL_TYPE}`,
     );
+  }
+
+  async status(): Promise<ModelStatusResponse> {
+    return this.transport.request<ModelStatusResponse>("/api/models/status");
   }
 }

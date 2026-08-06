@@ -1,14 +1,21 @@
-import { access, readdir, readFile, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { access, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { SpaceModListItem } from "@cohub/core/space-mods";
 import {
+  bindModSkillsConfig,
+  loadSkillsFromDirectory,
+  mergeSkillsConfigs,
+  type Skill,
+  type SkillScope,
+} from "@cohub/infra/config-runtime/skills";
+import {
   getAgentPlatformAgentPath,
+  getAgentModSnapshotPath,
   getAgentPlatformSkillsPath,
   getAgentUserAgentsPath,
   getAgentUserConfigPath,
   getAgentUserSkillsPath,
   getAgentWorkspaceAgentsPath,
-  getAgentWorkspacePath,
   getAgentWorkspaceSkillsPath,
   SANDBOX_PLATFORM_SKILLS_PATH,
   SANDBOX_USER_CONFIG_PATH,
@@ -21,16 +28,6 @@ const FALLBACK_SYSTEM_PROMPT = "You are a helpful assistant.";
 
 type LoadedContextFile = {
   sandboxPath: string;
-  content: string;
-};
-
-type LoadedSkill = {
-  name: string;
-  description: string;
-  filePath: string;
-  sandboxFilePath: string;
-  baseDir: string;
-  sandboxBaseDir: string;
   content: string;
 };
 
@@ -60,45 +57,6 @@ async function readTextIfExists(path: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
-}
-
-function extractFrontmatter(markdown: string): { attributes: Record<string, string>; body: string } {
-  const match = markdown.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!match) return { attributes: {}, body: markdown };
-  const raw = match[1] ?? "";
-  const attributes: Record<string, string> = {};
-  const lines = raw.split(/\r?\n/);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line === undefined) continue;
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    let value = line.slice(idx + 1).trim();
-
-    // Handle YAML block scalars: folded (`>`) and literal (`|`)
-    // Collection of indented continuation lines following a block scalar indicator
-    if (key && (value === ">" || value === "|")) {
-      const blockType = value as ">" | "|";
-      const parts: string[] = [];
-      while (i + 1 < lines.length) {
-        const nextLine = lines[i + 1];
-        if (nextLine === undefined) break;
-        // Block scalar continuation lines must be indented (start with a space)
-        if (nextLine.length === 0 || nextLine[0] !== " ") break;
-        i++;
-        parts.push(nextLine.trim());
-      }
-      if (parts.length > 0) {
-        // Folded (`>`): join with spaces; literal (`|`): join with newlines
-        value = blockType === ">" ? parts.join(" ") : parts.join("\n");
-      }
-    }
-
-    if (key) attributes[key] = value;
-  }
-  return { attributes, body: markdown.slice(match[0].length) };
 }
 
 async function loadFirstExisting(paths: string[]): Promise<string | undefined> {
@@ -133,97 +91,78 @@ async function loadContextFilesFromRoot(root: string, sandboxRoot: string): Prom
 async function loadSkillsFromDir(input: {
   agentDir: string;
   sandboxDir: string;
-}): Promise<LoadedSkill[]> {
+  scope: SkillScope;
+}): Promise<Skill[]> {
   if (!(await pathExists(input.agentDir))) return [];
-
-  const results: LoadedSkill[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    let entries: string[] = [];
-    try {
-      entries = await readdir(dir);
-    } catch {
-      return;
-    }
-
-    for (const name of entries) {
-      if (name.startsWith(".")) continue;
-      const full = join(dir, name);
-      let stats: Awaited<ReturnType<typeof stat>>;
-      try {
-        stats = await stat(full);
-      } catch {
-        continue;
-      }
-
-      if (!stats.isDirectory()) continue;
-
-      const skillFile = join(full, "SKILL.md");
-      const content = await readTextIfExists(skillFile);
-      if (content) {
-        const { attributes } = extractFrontmatter(content);
-        const relativePath = skillFile.slice(input.agentDir.length + 1).replaceAll("\\", "/");
-        const relativeDir = full.slice(input.agentDir.length + 1).replaceAll("\\", "/");
-        results.push({
-          name: attributes.name?.trim() || basename(full),
-          description: attributes.description?.trim() || "",
-          filePath: skillFile,
-          sandboxFilePath: `${input.sandboxDir}/${relativePath}`,
-          baseDir: full,
-          sandboxBaseDir: `${input.sandboxDir}/${relativeDir}`,
-          content,
-        });
-        continue;
-      }
-
-      await walk(full);
-    }
-  };
-
-  await walk(input.agentDir);
-  return results.sort((a, b) => a.name.localeCompare(b.name));
+  const { content } = await loadSkillsFromDirectory({
+    dir: input.agentDir,
+    sandboxDir: input.sandboxDir,
+    scope: input.scope,
+  });
+  return content.skills;
 }
 
-async function loadMergedSkills(cwd: string, userId?: string | null, spaceMods: SpaceModListItem[] = [], options: { includeUserSkills?: boolean } = {}): Promise<LoadedSkill[]> {
-  const modSkillGroups = await Promise.all(spaceMods.map((mod) => loadSkillsFromDir({
-    agentDir: join(getAgentWorkspacePath(mod.modSpaceId), ".agents", "skills"),
+async function loadModSkills(mod: SpaceModListItem): Promise<Skill[]> {
+  const skillsDir = join(getAgentModSnapshotPath(mod.modSpaceId), ".agents", "skills");
+  const skills = await loadSkillsFromDir({
+    agentDir: skillsDir,
     sandboxDir: `${mod.mountPath}/.agents/skills`,
-  })));
+    scope: "mod",
+  });
+  return bindModSkillsConfig(
+    { skills },
+    {
+      skillsDir,
+      sandboxDir: `${mod.mountPath}/.agents/skills`,
+      modSpaceId: mod.modSpaceId,
+      mountSlug: mod.mountSlug,
+    },
+  ).skills;
+}
+
+async function loadMergedSkills(cwd: string, userId?: string | null, spaceMods: SpaceModListItem[] = [], options: { includeUserSkills?: boolean } = {}): Promise<Skill[]> {
+  const modSkillGroups = await Promise.all(spaceMods.map(loadModSkills));
 
   const [platformSkills, userSkills, workspaceSkills] = await Promise.all([
     loadSkillsFromDir({
       agentDir: getAgentPlatformSkillsPath(),
       sandboxDir: SANDBOX_PLATFORM_SKILLS_PATH,
+      scope: "platform",
     }),
     userId && options.includeUserSkills !== false
       ? loadSkillsFromDir({
           agentDir: getAgentUserSkillsPath(userId),
           sandboxDir: SANDBOX_USER_SKILLS_PATH,
+          scope: "user",
         })
       : Promise.resolve([]),
     loadSkillsFromDir({
       agentDir: getAgentWorkspaceSkillsPath(cwd),
       sandboxDir: SANDBOX_WORKSPACE_SKILLS_PATH,
+      scope: "project",
     }),
   ]);
 
-  const merged = new Map<string, LoadedSkill>();
-  for (const skill of platformSkills) merged.set(skill.name, skill);
-  for (const skills of modSkillGroups) {
-    for (const skill of skills) merged.set(skill.name, skill);
-  }
-  for (const skill of userSkills) merged.set(skill.name, skill);
-  for (const skill of workspaceSkills) merged.set(skill.name, skill);
-  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Priority (later overrides earlier): platform < mods < user < workspace
+  return mergeSkillsConfigs(
+    { skills: platformSkills },
+    ...modSkillGroups.map((skills) => ({ skills })),
+    { skills: userSkills },
+    { skills: workspaceSkills },
+  ).skills;
 }
 
-function formatSkillsForPrompt(skills: LoadedSkill[]): string {
-  if (skills.length === 0) return "";
+function formatSkillsForPrompt(skills: Skill[]): string {
+  // Skills with disableModelInvocation are hidden from the model; they remain
+  // invocable explicitly via `/skill:name`.
+  const visible = skills.filter((skill) => !skill.disableModelInvocation);
+  if (visible.length === 0) return "";
 
   let out = "The following skills provide specialized instructions for specific tasks.\n";
   out += "Use the read tool to load a skill's file when the task matches its description.\n";
   out += "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n";
   out += "<available_skills>\n";
-  for (const skill of skills) {
+  for (const skill of visible) {
     out += "  <skill>\n";
     out += `    <name>${skill.name}</name>\n`;
     out += `    <description>${skill.description}</description>\n`;
@@ -255,14 +194,14 @@ export async function buildCohubSystemPrompt(options: BuildCohubSystemPromptOpti
 
   const appendSystemPrompts = (await Promise.all([
     readTextIfExists(join(getAgentPlatformAgentPath(), "APPEND_SYSTEM.md")),
-    ...spaceMods.map((mod) => readTextIfExists(join(getAgentWorkspacePath(mod.modSpaceId), ".cohub", "APPEND_SYSTEM.md"))),
+    ...spaceMods.map((mod) => readTextIfExists(join(getAgentModSnapshotPath(mod.modSpaceId), ".cohub", "APPEND_SYSTEM.md"))),
     ...(userAgentDir ? [readTextIfExists(join(userAgentDir, "APPEND_SYSTEM.md"))] : []),
     readTextIfExists(join(workspaceAgentDir, "APPEND_SYSTEM.md")),
   ])).filter((value): value is string => Boolean(value));
 
   const [userContextFiles, modContextGroups, projectContextFiles, skills] = await Promise.all([
     userId ? loadContextFilesFromRoot(getAgentUserConfigPath(userId), SANDBOX_USER_CONFIG_PATH) : Promise.resolve([]),
-    Promise.all(spaceMods.map((mod) => loadContextFilesFromRoot(getAgentWorkspacePath(mod.modSpaceId), mod.mountPath))),
+    Promise.all(spaceMods.map((mod) => loadContextFilesFromRoot(getAgentModSnapshotPath(mod.modSpaceId), mod.mountPath))),
     loadContextFilesFromRoot(cwd, SANDBOX_WORKSPACE_PATH),
     selectedTools.includes("read") ? loadMergedSkills(cwd, userId, spaceMods, { includeUserSkills }) : Promise.resolve([]),
   ]);

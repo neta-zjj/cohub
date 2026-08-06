@@ -36,9 +36,15 @@ For example:
 /username/works-guide-test-2026-06-19/w/works-guide-file
 ```
 
+Query parameters and the URL fragment on a public Work link are forwarded to
+embedded web and port Works. This supports shareable application state such as
+`?view=timeline#today`. Parameters in the `cohub_*` namespace are reserved for
+the Cohub host and are available only through their documented SDK APIs. Do not
+put secrets or access tokens in a Work URL.
+
 ## Publish From the UI
 
-Prepare something publishable in a Space: an HTML file (must end in `.html` or `.htm`), a directory containing `index.html` with relative assets, or a running dev server on a supported public sandbox port.
+Prepare something publishable in a Space: an HTML page, a `.board` file, any other single file, a directory containing `index.html` with relative assets, or a running dev server on a supported public sandbox port.
 
 Open the file, directory, or port preview, then click `Publish`. The dialog asks for a Work slug (and a username or space slug if missing). Under `Work can`, select permissions the Work receives directly. Under `Viewers can allow`, select permissions the Work may ask each viewer to grant later.
 
@@ -60,9 +66,11 @@ Editing a target changes the source used by the next version. The public page ch
 
 ## Targets and Limits
 
-File Works only accept HTML files. The published HTML asset must be between 1 byte and 5 MB.
+File Works accept any single file up to 1 GiB. An HTML page (`.html` / `.htm`) is published as a web page. A `.board` file is published as an interactive read-only Board, together with the assets it references. Any other file is published for native preview (Markdown, code, image, video, audio, PDF) with a download fallback.
 
-Directory Works must contain `index.html`. The published directory must contain 1 to 1000 files and total 1 byte to 100 MB.
+A Board publish captures the Board's own state plus the workspace files it actually references — images, videos, file-card covers, and effect or clip assets. Files a Board does not reference are never published, and file cards show the preview captured at publish time rather than the whole target file.
+
+Directory Works must contain `index.html`. The published directory must contain 1 to 1000 files and total 1 byte to 1 GiB.
 
 Port Works use the sandbox public endpoint for the port. The port must be one of the supported Cohub public sandbox ports.
 
@@ -180,13 +188,13 @@ if (checkoutState.orderId) {
 }
 ```
 
-The example app in `docs/work-capability-lab/` demonstrates runtime context, token inspection, file reads, session reads, viewer authorization, prompt calls, account-level data access, and a minimal commerce flow from inside a published Work.
+The example app in `docs/examples/work-capability-lab/` demonstrates runtime context, token inspection, file reads, session reads, viewer authorization, prompt calls, account-level data access, and a minimal commerce flow from inside a published Work.
 
 For a focused commerce example, see:
 
 - `docs/work-commerce-guide.md`
-- `docs/work-capability-lab/commerce-demo.md`
-- `docs/work-capability-lab/commerce-demo.html`
+- `docs/examples/work-capability-lab/commerce-demo.md`
+- `docs/examples/work-capability-lab/commerce-demo.html`
 
 ## Publish Through the API or SDK
 
@@ -266,9 +274,9 @@ This guide was verified in a clean Space on 2026-06-19. File and directory Works
 
 If the public link cannot be formed, check that the user has a username and the Space has a slug.
 
-If a file Work fails, check that the target is an HTML file between 1 byte and 5 MB.
+If a file Work fails, check that the target is between 1 byte and 1 GiB. If a Board Work fails, check that the `.board` file is valid and references at most 1000 assets totalling at most 1 GiB.
 
-If a directory Work fails, check that the directory contains `index.html`, has 1 to 1000 files, and is under 100 MB.
+If a directory Work fails, check that the directory contains `index.html`, has 1 to 1000 files, and totals at most 1 GiB.
 
 If a Work opens but cannot use Cohub APIs, check that it is running inside a published Work iframe — static asset URLs and local previews do not provide the Work runtime. If it is, check its `workScopes` and the viewer-granted scopes shown in `cohub.context()`.
 

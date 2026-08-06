@@ -5,7 +5,9 @@ declare global {
 		// interface Error {}
 		// interface Locals {}
 		// interface PageData {}
-		// interface PageState {}
+		interface PageState {
+			workspacePreview?: string | null;
+		}
 		// interface Platform {}
 	}
 }

@@ -9,6 +9,7 @@ import {
   PublicAssetValidationError,
   type CreatePublicAssetUploadInput,
 } from "../public-asset-storage.js";
+import { UserUploadConfigError } from "../user-upload-storage.js";
 
 
 const logger = createLogger({ serviceName: "cohub-api" });
@@ -21,6 +22,9 @@ router.post("/uploads", async (c) => {
   if (!body || typeof body !== "object") return c.json({ message: "invalid body" }, 400);
   if (body.purpose !== "user_avatar" && body.purpose !== "space_avatar" && body.purpose !== "chat_attachment") {
     return c.json({ message: "invalid public asset purpose" }, 400);
+  }
+  if (body.uploadProtocol != null && body.uploadProtocol !== "s3_post_v1" && body.uploadProtocol !== "presigned_put_v1") {
+    return c.json({ message: "invalid upload protocol" }, 400);
   }
 
   if (body.purpose === "space_avatar") {
@@ -35,6 +39,7 @@ router.post("/uploads", async (c) => {
   try {
     const plan = createPublicAssetUploadPlan({
       purpose: body.purpose,
+      uploadProtocol: body.uploadProtocol,
       userUuid: user.uuid,
       spaceId: body.spaceId,
       sessionId: body.sessionId,
@@ -47,7 +52,7 @@ router.post("/uploads", async (c) => {
       const status = error.message.startsWith("too many") ? 429 : 400;
       return c.json({ message: error.message }, status as never);
     }
-    if (error instanceof PublicAssetConfigError) {
+    if (error instanceof PublicAssetConfigError || error instanceof UserUploadConfigError) {
       logger.error("[public-assets] upload storage is not configured", error.message);
       return c.json({ message: "public asset storage is not configured" }, 500);
     }

@@ -1,3 +1,11 @@
+import {
+	alignPreviewNavigation,
+	beginPreviewNavigation,
+	createPreviewNavigationState,
+	isCurrentPreviewNavigation,
+	type PreviewNavigationSource,
+	previewRefsEqual,
+} from "./preview-navigation";
 import type {
 	WorkspacePreviewKind,
 	WorkspacePreviewRef,
@@ -12,7 +20,7 @@ type FileTabLike = {
 	draft: string;
 };
 
-type CanvasTabLike = {
+type BoardTabLike = {
 	path: string;
 	saving: boolean;
 };
@@ -25,8 +33,8 @@ type PortTabLike = {
 type PreviewWorkspaceOptions = {
 	getFileTabs: () => FileTabLike[];
 	getActiveFilePath: () => string | null;
-	getCanvasTabs: () => CanvasTabLike[];
-	getActiveCanvasPath: () => string | null;
+	getBoardTabs: () => BoardTabLike[];
+	getActiveBoardPath: () => string | null;
 	getPortTabs: () => PortTabLike[];
 	getActivePort: () => string | null;
 	openFile: (
@@ -36,9 +44,9 @@ type PreviewWorkspaceOptions = {
 	activateFile: (path: string) => void;
 	closeFile: (path?: string | null, skipConfirm?: boolean) => void;
 	goBackFile: () => Promise<string | null>;
-	openCanvas: (path: string) => Promise<void>;
-	activateCanvas: (path: string) => void;
-	closeCanvas: (path?: string | null) => void;
+	openBoard: (path: string) => Promise<void>;
+	activateBoard: (path: string) => void;
+	closeBoard: (path?: string | null) => void;
 	openPort: (
 		port: string,
 		url: string,
@@ -74,16 +82,25 @@ function isDirtyFileTab(tab: FileTabLike) {
 }
 
 /**
- * Single active-tab coordinator over file/canvas/port domain controllers.
+ * Single active-tab coordinator over file/board/port domain controllers.
  * Owns: active kind, access order, budget, URL sync, open/activate/close.
- * Does not own: file drafts, canvas docs, port endpoints (domain controllers do).
+ * Does not own: file drafts, board docs, port endpoints (domain controllers do).
  */
 export function createPreviewWorkspaceController(
 	options: PreviewWorkspaceOptions,
 ) {
 	let activeKind = $state<PreviewTabKind | null>(null);
 	let accessedAt = $state<Record<string, number>>({});
+	let navigation = $state(createPreviewNavigationState());
 	const weightLimit = options.weightLimit ?? DEFAULT_WEIGHT_LIMIT;
+
+	function beginNavigation(
+		ref: WorkspacePreviewRef | null,
+		source: PreviewNavigationSource,
+	) {
+		navigation = beginPreviewNavigation(navigation, ref, source);
+		return navigation.transitionId;
+	}
 
 	function tabId(kind: PreviewTabKind, key: string) {
 		return `${kind}:${key}`;
@@ -98,9 +115,9 @@ export function createPreviewWorkspaceController(
 			const path = options.getActiveFilePath();
 			return path ? { kind: "file", key: path } : null;
 		}
-		if (activeKind === "canvas") {
-			const path = options.getActiveCanvasPath();
-			return path ? { kind: "canvas", key: path } : null;
+		if (activeKind === "board") {
+			const path = options.getActiveBoardPath();
+			return path ? { kind: "board", key: path } : null;
 		}
 		if (activeKind === "port") {
 			const port = options.getActivePort();
@@ -109,8 +126,8 @@ export function createPreviewWorkspaceController(
 		// Fallback if kind drifted but a surface is still open.
 		const filePath = options.getActiveFilePath();
 		if (filePath) return { kind: "file", key: filePath };
-		const canvasPath = options.getActiveCanvasPath();
-		if (canvasPath) return { kind: "canvas", key: canvasPath };
+		const boardPath = options.getActiveBoardPath();
+		if (boardPath) return { kind: "board", key: boardPath };
 		const port = options.getActivePort();
 		if (port) return { kind: "port", key: port };
 		return null;
@@ -118,11 +135,10 @@ export function createPreviewWorkspaceController(
 
 	function resolveKind(): PreviewTabKind | null {
 		if (activeKind === "port" && options.getActivePort()) return "port";
-		if (activeKind === "canvas" && options.getActiveCanvasPath())
-			return "canvas";
+		if (activeKind === "board" && options.getActiveBoardPath()) return "board";
 		if (activeKind === "file" && options.getActiveFilePath()) return "file";
 		if (options.getActiveFilePath()) return "file";
-		if (options.getActiveCanvasPath()) return "canvas";
+		if (options.getActiveBoardPath()) return "board";
 		if (options.getActivePort()) return "port";
 		return null;
 	}
@@ -135,8 +151,8 @@ export function createPreviewWorkspaceController(
 				weight: isBinaryFileTab(tab) ? 2 : 1,
 				protected: isDirtyFileTab(tab),
 			})),
-			...options.getCanvasTabs().map((tab) => ({
-				kind: "canvas" as const,
+			...options.getBoardTabs().map((tab) => ({
+				kind: "board" as const,
 				key: tab.path,
 				weight: 2,
 				protected: tab.saving,
@@ -161,14 +177,16 @@ export function createPreviewWorkspaceController(
 		for (const tab of removable) {
 			if (total <= weightLimit) break;
 			if (tab.kind === "file") options.closeFile(tab.key, true);
-			else if (tab.kind === "canvas") options.closeCanvas(tab.key);
+			else if (tab.kind === "board") options.closeBoard(tab.key);
 			else options.closePort(tab.key);
 			total -= tab.weight;
 			closed += 1;
 		}
 		if (closed > 0) {
 			activeKind = resolveKind();
-			options.syncUrl(currentRef(), true);
+			const ref = currentRef();
+			navigation = alignPreviewNavigation(navigation, ref);
+			options.syncUrl(ref, true);
 			options.onBudgetCleanup?.();
 		}
 	}
@@ -179,76 +197,93 @@ export function createPreviewWorkspaceController(
 			syncUrl?: boolean;
 			preserveHistory?: boolean;
 			position?: unknown;
+			source?: PreviewNavigationSource;
 		} = {},
 	) {
 		const syncUrl = opts.syncUrl ?? true;
-		// Capture before flipping activeKind so first open pushes history,
-		// subsequent tab switches replace.
 		const hadPreview = Boolean(currentRef());
+		const ref = { kind: "file" as const, key: path };
+		const transitionId = beginNavigation(
+			ref,
+			opts.source ?? (syncUrl ? "user" : "route"),
+		);
 		activeKind = "file";
 		touch("file", path);
-		// Sync URL before awaiting domain I/O. Otherwise the route-hydration
-		// effect can observe a brief no-preview URL while UI already opened
-		// a file and tear the panel down (click → composer focus only).
-		if (syncUrl) {
-			options.syncUrl({ kind: "file", key: path }, hadPreview);
-		}
-		await options.openFile(path, {
+		// Domain open creates its loading tab synchronously. URL sync follows in
+		// the same task, while route reconciliation only observes route changes.
+		const pending = options.openFile(path, {
 			preserveHistory: opts.preserveHistory,
 			position: opts.position,
 		});
+		if (syncUrl) options.syncUrl(ref, hadPreview);
+		await pending;
 		enforceBudget();
-		// Re-assert URL if budget eviction / concurrent open changed active tab.
-		if (syncUrl) {
-			const ref = currentRef();
-			if (ref) options.syncUrl(ref, true);
+		if (syncUrl && isCurrentPreviewNavigation(navigation, transitionId)) {
+			const current = currentRef();
+			if (current) options.syncUrl(current, true);
 		}
 	}
 
-	async function openCanvas(path: string, opts: { syncUrl?: boolean } = {}) {
+	async function openBoard(
+		path: string,
+		opts: {
+			syncUrl?: boolean;
+			source?: PreviewNavigationSource;
+		} = {},
+	) {
 		const syncUrl = opts.syncUrl ?? true;
 		const hadPreview = Boolean(currentRef());
-		activeKind = "canvas";
-		touch("canvas", path);
-		if (syncUrl) {
-			options.syncUrl({ kind: "canvas", key: path }, hadPreview);
-		}
-		await options.openCanvas(path);
+		const ref = { kind: "board" as const, key: path };
+		const transitionId = beginNavigation(
+			ref,
+			opts.source ?? (syncUrl ? "user" : "route"),
+		);
+		activeKind = "board";
+		touch("board", path);
+		const pending = options.openBoard(path);
+		if (syncUrl) options.syncUrl(ref, hadPreview);
+		await pending;
 		enforceBudget();
-		if (syncUrl) {
-			const ref = currentRef();
-			if (ref) options.syncUrl(ref, true);
+		if (syncUrl && isCurrentPreviewNavigation(navigation, transitionId)) {
+			const current = currentRef();
+			if (current) options.syncUrl(current, true);
 		}
 	}
 
 	function openPort(
 		port: string,
 		url: string,
-		opts: { autoOpened?: boolean; syncUrl?: boolean } = {},
+		opts: {
+			autoOpened?: boolean;
+			syncUrl?: boolean;
+			source?: PreviewNavigationSource;
+		} = {},
 	) {
 		if (!isValidPortKey(port)) return;
 		const syncUrl = opts.syncUrl ?? true;
 		const hadPreview = Boolean(currentRef());
+		const ref = { kind: "port" as const, key: port };
+		beginNavigation(ref, opts.source ?? (syncUrl ? "user" : "route"));
 		activeKind = "port";
 		touch("port", port);
-		if (syncUrl) {
-			options.syncUrl({ kind: "port", key: port }, hadPreview);
-		}
 		options.openPort(port, url, { autoOpened: opts.autoOpened });
+		if (syncUrl) options.syncUrl(ref, hadPreview);
 		enforceBudget();
 		if (syncUrl) {
-			const ref = currentRef();
-			if (ref) options.syncUrl(ref, true);
+			const current = currentRef();
+			if (current) options.syncUrl(current, true);
 		}
 	}
 
 	function activate(kind: PreviewTabKind, key: string, syncUrl = true) {
+		const ref = { kind, key };
+		beginNavigation(ref, syncUrl ? "user" : "route");
 		activeKind = kind;
 		touch(kind, key);
 		if (kind === "file") options.activateFile(key);
-		else if (kind === "canvas") options.activateCanvas(key);
+		else if (kind === "board") options.activateBoard(key);
 		else options.activatePort(key);
-		if (syncUrl) options.syncUrl({ kind, key }, true);
+		if (syncUrl) options.syncUrl(ref, true);
 	}
 
 	function close(
@@ -257,10 +292,12 @@ export function createPreviewWorkspaceController(
 		skipConfirm = false,
 	) {
 		if (kind === "file") options.closeFile(key, skipConfirm);
-		else if (kind === "canvas") options.closeCanvas(key);
+		else if (kind === "board") options.closeBoard(key);
 		else options.closePort(key);
 		activeKind = resolveKind();
-		options.syncUrl(currentRef(), true);
+		const ref = currentRef();
+		beginNavigation(ref, "user");
+		options.syncUrl(ref, true);
 	}
 
 	function closeActive() {
@@ -269,53 +306,81 @@ export function createPreviewWorkspaceController(
 		close(ref.kind, ref.key);
 	}
 
-	function closeAll(opts: { syncUrl?: boolean } = {}) {
+	function closeAll(
+		opts: { syncUrl?: boolean; source?: PreviewNavigationSource } = {},
+	) {
 		const syncUrl = opts.syncUrl ?? true;
+		beginNavigation(null, opts.source ?? (syncUrl ? "user" : "route"));
+		activeKind = null;
 		for (const tab of [...options.getFileTabs()]) {
 			options.closeFile(tab.path, true);
 		}
-		for (const tab of [...options.getCanvasTabs()]) {
-			options.closeCanvas(tab.path);
+		for (const tab of [...options.getBoardTabs()]) {
+			options.closeBoard(tab.path);
 		}
 		for (const tab of [...options.getPortTabs()]) {
 			options.closePort(tab.port);
 		}
-		activeKind = null;
 		if (syncUrl) options.syncUrl(null, true);
 	}
 
 	async function goBackFile() {
+		const transitionId = beginNavigation(currentRef(), "user");
 		const previous = await options.goBackFile();
-		if (!previous) return null;
+		if (!previous || !isCurrentPreviewNavigation(navigation, transitionId))
+			return null;
+		const ref = { kind: "file" as const, key: previous };
+		navigation = alignPreviewNavigation(navigation, ref);
 		activeKind = "file";
 		touch("file", previous);
-		options.syncUrl({ kind: "file", key: previous }, true);
+		options.syncUrl(ref, true);
 		return previous;
 	}
 
-	function hydrateFromRoute(ref: WorkspacePreviewRef | null) {
+	function applyRoute(ref: WorkspacePreviewRef | null) {
+		const current = currentRef();
 		if (!ref) {
-			closeAll({ syncUrl: false });
+			if (!current && navigation.desiredRef === null)
+				return { ok: true as const };
+			closeAll({ syncUrl: false, source: "route" });
+			return { ok: true as const };
+		}
+		if (previewRefsEqual(current, ref)) {
+			// A shallow-route acknowledgement must not supersede the user transition
+			// that produced it; only external route changes begin a new transition.
+			if (!previewRefsEqual(navigation.desiredRef, ref))
+				beginNavigation(ref, "route");
+			activeKind = ref.kind;
+			touch(ref.kind, ref.key);
 			return { ok: true as const };
 		}
 		if (ref.kind === "file") {
-			void openFile(ref.key, { syncUrl: false });
+			void openFile(ref.key, { syncUrl: false, source: "route" });
 			return { ok: true as const };
 		}
-		if (ref.kind === "canvas") {
-			void openCanvas(ref.key, { syncUrl: false });
+		if (ref.kind === "board") {
+			void openBoard(ref.key, { syncUrl: false, source: "route" });
 			return { ok: true as const };
 		}
-		// port: only open when a trusted endpoint URL is available
+		// Port routes wait for a trusted endpoint before activating a surface.
 		const url = options.getPortEndpointUrl(ref.key);
-		if (!url)
+		if (!url) {
+			beginNavigation(ref, "route");
 			return { ok: false as const, reason: "port-endpoint-pending" as const };
-		openPort(ref.key, url, { syncUrl: false });
+		}
+		openPort(ref.key, url, { syncUrl: false, source: "route" });
 		return { ok: true as const };
 	}
 
-	function setActiveKind(kind: PreviewTabKind | null) {
-		activeKind = kind;
+	function resetForContext() {
+		beginNavigation(null, "restore");
+		activeKind = null;
+	}
+
+	function syncCurrent() {
+		const ref = currentRef();
+		beginNavigation(ref, "user");
+		options.syncUrl(ref, true);
 	}
 
 	return {
@@ -325,18 +390,22 @@ export function createPreviewWorkspaceController(
 		get activeKindState() {
 			return activeKind;
 		},
-		setActiveKind,
+		get navigation() {
+			return navigation;
+		},
+		resetForContext,
+		syncCurrent,
 		currentRef,
 		touch,
 		openFile,
-		openCanvas,
+		openBoard,
 		openPort,
 		activate,
 		close,
 		closeActive,
 		closeAll,
 		goBackFile,
-		hydrateFromRoute,
+		applyRoute,
 		enforceBudget,
 	};
 }

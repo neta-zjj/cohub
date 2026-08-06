@@ -2,24 +2,74 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "ignoreDeprecations": "6.0",
     "paths": {
-      "@cohub/protocol": ["../protocol/src/index.ts"],
-      "@cohub/protocol/core": ["../protocol/src/core/index.ts"],
-      "@cohub/protocol/fs": ["../protocol/src/fs/index.ts"],
-      "@cohub/protocol/gateway": ["../protocol/src/gateway/index.ts"],
-      "@cohub/protocol/generation": ["../protocol/src/generation/index.ts"],
-      "@cohub/protocol/model": ["../protocol/src/model/session.ts"],
-      "@cohub/protocol/ports": ["../protocol/src/ports/index.ts"],
-      "@cohub/protocol/realtime": ["../protocol/src/realtime/index.ts"],
-      "@cohub/protocol/realtime/types": ["../protocol/src/realtime/types.ts"],
-      "@cohub/protocol/gateway/types": ["../protocol/src/gateway/types.ts"],
-      "@cohub/protocol/task": ["../protocol/src/task/index.ts"],
-      "@neta-art/cohub": ["../sdk/src/index.ts"],
-      "@neta-art/cohub/http": ["../sdk/src/http.ts"],
-      "@neta-art/cohub/websocket": ["../sdk/src/websocket.ts"]
+      "@cohub/protocol": [
+        "../protocol/src/index.ts"
+      ],
+      "@cohub/protocol/core": [
+        "../protocol/src/core/index.ts"
+      ],
+      "@cohub/protocol/fs": [
+        "../protocol/src/fs/index.ts"
+      ],
+      "@cohub/protocol/gateway": [
+        "../protocol/src/gateway/index.ts"
+      ],
+      "@cohub/protocol/generation": [
+        "../protocol/src/generation/index.ts"
+      ],
+      "@cohub/protocol/model": [
+        "../protocol/src/model/session.ts"
+      ],
+      "@cohub/protocol/ports": [
+        "../protocol/src/ports/index.ts"
+      ],
+      "@cohub/protocol/realtime": [
+        "../protocol/src/realtime/index.ts"
+      ],
+      "@cohub/protocol/realtime/types": [
+        "../protocol/src/realtime/types.ts"
+      ],
+      "@cohub/protocol/gateway/types": [
+        "../protocol/src/gateway/types.ts"
+      ],
+      "@cohub/protocol/task": [
+        "../protocol/src/task/index.ts"
+      ],
+      "@neta-art/cohub": [
+        "../sdk/src/index.ts"
+      ],
+      "@neta-art/cohub/http": [
+        "../sdk/src/http.ts"
+      ],
+      "@neta-art/cohub/websocket": [
+        "../sdk/src/websocket.ts"
+      ],
+      "@neta-art/cohub/board": [
+        "../sdk/src/board/index.ts"
+      ],
+      "@neta-art/cohub/board/render": [
+        "../sdk/src/board/render/index.ts"
+      ],
+      "@neta-art/cohub/board/export": [
+        "../sdk/src/board/export/index.ts"
+      ],
+      "@neta-art/cohub/board/headless": [
+        "../sdk/src/board/headless/index.ts"
+      ],
+      "@cohub/protocol/board-document": [
+        "../protocol/src/board-document.ts"
+      ],
+      "@cohub/protocol/board-constants": [
+        "../protocol/src/board-constants.ts"
+      ]
     }
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }
