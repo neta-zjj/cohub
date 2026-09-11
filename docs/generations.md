@@ -176,6 +176,11 @@ cohub generate "a cyberpunk cat in neon rain" \
   --param size=1024x1024 \
   --param quality=high
 
+cohub generate "a ceramic cup isolated on a transparent background" \
+  --model gpt-image-2 \
+  --param background=transparent \
+  --param output_format=png
+
 cohub generate "same character, smiling" \
   --model gpt-image-2 \
   --image ./character.png \
