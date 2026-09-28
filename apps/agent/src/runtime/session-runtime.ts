@@ -11,7 +11,7 @@ import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
 import { getCurrentToolExecutionContext, runWithToolExecutionContext, type ToolExecutionContext } from "../tool-context.js";
 import { isToolFailureDetails } from "./tools/index.js";
-import { applyRequestProfile } from "./request-profile.js";
+import { applyRequestProfile, withAnthropicSessionAffinity } from "./request-profile.js";
 import { mergeHeaders } from "@cohub/infra/config-runtime/models";
 import type { ImageToTextConfig } from "@cohub/infra/config-runtime/model-tasks";
 import { ModelUnavailableError } from "@cohub/core/sessions";
@@ -623,21 +623,25 @@ function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; i
           });
         }
         const models = createModelsFromRegistry(runtime.modelRegistry, model);
-        const requestOptions = applyRequestProfile(model as CohubModel, {
-          ...options,
-          threadId: runtime.threadId,
-          headers: model.provider === "cohub"
-            ? mergeHeaders(streamHeaders, {
-                "x-litellm-track-extra": JSON.stringify({
-                  user_uuid: runtime.userId,
-                  cohub_space_uuid: toolCtx?.spaceId ?? null,
-                  cohub_session_uuid: toolCtx?.sessionId ?? null,
-                  cohub_turn_uuid: toolCtx?.turnId ?? null,
-                  cohub_llm_round: round,
-                }),
-              })
-            : streamHeaders,
-        });
+        const requestOptions = withAnthropicSessionAffinity(
+          model,
+          applyRequestProfile(model as CohubModel, {
+            ...options,
+            threadId: runtime.threadId,
+            headers: model.provider === "cohub"
+              ? mergeHeaders(streamHeaders, {
+                  "x-litellm-track-extra": JSON.stringify({
+                    user_uuid: runtime.userId,
+                    cohub_space_uuid: toolCtx?.spaceId ?? null,
+                    cohub_session_uuid: toolCtx?.sessionId ?? null,
+                    cohub_turn_uuid: toolCtx?.turnId ?? null,
+                    cohub_llm_round: round,
+                  }),
+                })
+              : streamHeaders,
+          }),
+          toolCtx?.sessionId,
+        );
         const stream = streamSimpleWithModels(models, model, requestContext, requestOptions);
 
         return wrapAssistantMessageStream(stream, {

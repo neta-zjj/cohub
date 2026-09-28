@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ModelsConfig } from "@cohub/infra/config-runtime/models";
 import { CohubModelRegistry } from "../runtime/model-registry.js";
-import { applyRequestProfile, type ProfiledModel } from "../runtime/request-profile.js";
+import { applyRequestProfile, withAnthropicSessionAffinity, type ProfiledModel } from "../runtime/request-profile.js";
 
 const config: ModelsConfig = {
   providers: {
@@ -62,3 +62,30 @@ assert.deepEqual(applyRequestProfile(alternateApiModel, { sessionId: "session" }
   "session-id": "session",
   "thread-id": "session",
 });
+
+// Anthropic session affinity: metadata.user_id mirrors the Cohub session uuid so
+// NewAPI's Claude channel-affinity rule can pin the session to one channel.
+const sessionUuid = "0b3cb8da-de75-4f9f-b0b7-9ed54e18fe91";
+assert.deepEqual(
+  withAnthropicSessionAffinity({ api: "anthropic-messages" }, {}, sessionUuid).metadata,
+  { user_id: sessionUuid },
+);
+assert.deepEqual(
+  withAnthropicSessionAffinity({ api: "anthropic-messages" }, { metadata: { trace: "t" } }, sessionUuid).metadata,
+  { trace: "t", user_id: sessionUuid },
+);
+assert.equal(
+  withAnthropicSessionAffinity({ api: "anthropic-messages" }, {}, null).metadata,
+  undefined,
+);
+assert.deepEqual(
+  withAnthropicSessionAffinity({ api: "openai-responses" }, {}, sessionUuid).metadata,
+  undefined,
+);
+assert.deepEqual(
+  withAnthropicSessionAffinity({ api: "anthropic-messages" }, {}, "s".repeat(80)).metadata,
+  { user_id: "s".repeat(64) },
+);
+
+// The codex header profile must not pick up anthropic affinity.
+assert.equal(applyRequestProfile(model, { sessionId: "session" }).metadata, undefined);
