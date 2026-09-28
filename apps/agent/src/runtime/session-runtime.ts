@@ -729,8 +729,6 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
   if (sessionContext.messages.length === 0) {
     options.sessionManager.appendModelChange(model.provider, model.id);
     options.sessionManager.appendThinkingLevelChange(initialThinkingLevel);
-  } else if (sessionContext.thinkingLevel == null) {
-    options.sessionManager.appendThinkingLevelChange(initialThinkingLevel);
   }
 
   const systemPromptStateKeyFor = (userId: string | null, spaceOwnerUserId: string | null, tools: ToolLike[]) => `${userId ?? ""}\0${shouldIncludeUserSkills(userId, spaceOwnerUserId) ? "user-skills" : "no-user-skills"}\0${toolsStateKey(tools)}`;

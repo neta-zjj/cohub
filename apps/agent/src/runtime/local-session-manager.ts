@@ -93,20 +93,23 @@ export type SessionContext = {
   model: { provider: string; modelId: string } | null;
 };
 
-const SESSION_SETTING_ENTRY_TYPES = ["model_change", "thinking_level_change"] as const;
+type SessionSettings = Pick<SessionContext, "thinkingLevel" | "model">;
 
-/** Settings that live before firstKeptEntryId must be copied into the rewritten file. */
-function settingsToCarryForward(branch: SessionEntry[], keptIds: Set<string>): SessionEntry[] {
-  const latest = new Map<string, SessionEntry>();
-  for (const entry of branch) {
-    if (entry.type === "model_change" || entry.type === "thinking_level_change") latest.set(entry.type, entry);
+/** Last-wins scan: model comes from model_change or the latest assistant message. */
+function resolveSessionSettings(entries: SessionEntry[]): SessionSettings {
+  let thinkingLevel: string | null = null;
+  let model: SessionSettings["model"] = null;
+  for (const entry of entries) {
+    if (entry.type === "thinking_level_change") {
+      thinkingLevel = entry.thinkingLevel;
+    } else if (entry.type === "model_change") {
+      model = { provider: entry.provider, modelId: entry.modelId };
+    } else if (entry.type === "message" && entry.message.role === "assistant") {
+      const msg = entry.message as unknown as { provider?: string; model?: string };
+      if (msg.provider && msg.model) model = { provider: msg.provider, modelId: msg.model };
+    }
   }
-  const carried: SessionEntry[] = [];
-  for (const type of SESSION_SETTING_ENTRY_TYPES) {
-    const entry = latest.get(type);
-    if (entry && !keptIds.has(entry.id)) carried.push(entry);
-  }
-  return carried;
+  return { thinkingLevel, model };
 }
 
 function nowIso() {
@@ -450,21 +453,11 @@ export class SessionManager {
   buildSessionContext(): SessionContext {
     const branch = this.getBranch();
 
-    // Scan all entries for the latest settings (model/thinking persist across compaction boundaries).
-    let thinkingLevel: string | null = null;
-    let model: { provider: string; modelId: string } | null = null;
+    // Settings are scanned across the whole branch (they persist across compaction boundaries).
+    const { thinkingLevel, model } = resolveSessionSettings(branch);
     let compaction: CompactionEntry | null = null;
     for (const entry of branch) {
-      if (entry.type === "thinking_level_change") {
-        thinkingLevel = entry.thinkingLevel;
-      } else if (entry.type === "model_change") {
-        model = { provider: entry.provider, modelId: entry.modelId };
-      } else if (entry.type === "message" && entry.message.role === "assistant") {
-        const msg = entry.message as unknown as { provider?: string; model?: string };
-        if (msg.provider && msg.model) model = { provider: msg.provider, modelId: msg.model };
-      } else if (entry.type === "compaction") {
-        compaction = entry;
-      }
+      if (entry.type === "compaction") compaction = entry;
     }
 
     const messages: AgentMessage[] = [];
@@ -654,36 +647,16 @@ export class SessionManager {
     const archivePath = join(archiveDir, archiveName);
     await copyFile(this.sessionFile, archivePath);
 
-    // Rewrite: compaction entry becomes the new root (parentId: null),
-    // followed by carried model/thinking settings, kept entries from
-    // firstKeptEntryId onward, then any entries appended after compaction.
-    // Fix the parentId chain so getBranch() can walk leaf → root uninterrupted.
+    // Rewrite as one linear chain rooted at the compaction entry:
+    // compaction → pinned settings → firstKept … → leaf.
+    // Settings resolved from the dropped prefix are pinned right after the
+    // root, so later kept entries still win and the resolved model/thinking
+    // level is identical before and after the rewrite.
     const compactionEntry = branch[compactionIdx];
     if (compactionEntry?.type !== "compaction") return undefined;
-    const keptBefore = branch.slice(firstKeptIdx, compactionIdx);
-    const keptAfter = branch.slice(compactionIdx + 1);
-    const keptIds = new Set([...keptBefore, ...keptAfter].map((entry) => entry.id));
-    const carried = settingsToCarryForward(branch, keptIds);
-    const middle = [...carried, ...keptBefore];
-
-    // Rebuild chain: compaction → carried settings → firstKept → ... → leaf
-    const rewrittenCompaction: CompactionEntry = { ...compactionEntry, parentId: null };
-    const rewrittenMiddle: SessionEntry[] = middle.map((entry, i) => ({
-      ...entry,
-      parentId: i === 0 ? compactionEntry.id : (middle[i - 1]?.id ?? compactionEntry.id),
-    }));
-    // keptAfter entries already chain to each other; fix the first one's parent
-    // to point to the last entry in the middle chain (or compaction if empty).
-    const rewrittenAfter: SessionEntry[] = keptAfter.length > 0
-      ? keptAfter.map((entry, i) => ({
-          ...entry,
-          parentId: i === 0
-            ? (rewrittenMiddle.at(-1)?.id ?? compactionEntry.id)
-            : (keptAfter[i - 1]?.id ?? null),
-        }))
-      : [];
-
-    const keptEntries = [rewrittenCompaction, ...rewrittenMiddle, ...rewrittenAfter];
+    const pinned = this.createSettingEntries(resolveSessionSettings(branch.slice(0, firstKeptIdx)));
+    const chain = [compactionEntry, ...pinned, ...branch.slice(firstKeptIdx, compactionIdx), ...branch.slice(compactionIdx + 1)];
+    const keptEntries: SessionEntry[] = chain.map((entry, i) => ({ ...entry, parentId: chain[i - 1]?.id ?? null }));
 
     // Snapshot state so we can roll back if the file rewrite fails.
     const savedHeader = this.header;
@@ -709,6 +682,20 @@ export class SessionManager {
       throw flushError;
     }
     return `archives/${archiveName}`;
+  }
+
+  /** Detached setting entries for a rewritten file; the caller re-chains parentId. */
+  private createSettingEntries({ model, thinkingLevel }: SessionSettings): SessionEntry[] {
+    const timestamp = nowIso();
+    const entries: SessionEntry[] = [];
+    const taken = { has: (id: string) => this.byId.has(id) || entries.some((entry) => entry.id === id) };
+    if (model) {
+      entries.push({ type: "model_change", id: generateEntryId(taken), parentId: null, timestamp, provider: model.provider, modelId: model.modelId });
+    }
+    if (thinkingLevel) {
+      entries.push({ type: "thinking_level_change", id: generateEntryId(taken), parentId: null, timestamp, thinkingLevel });
+    }
+    return entries;
   }
 
   private nextArchiveNumber(): number {

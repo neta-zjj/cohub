@@ -309,6 +309,27 @@ try {
   const secondCompactId = settingsCompact.appendCompaction("summarized-again", laterKept, 50);
   await settingsCompact.archiveAndRewrite(secondCompactId, laterKept);
   assert.equal(settingsCompact.buildSessionContext().thinkingLevel, "low");
+  // Pinned settings replace, never accumulate, across repeated rewrites.
+  const settingTypes = settingsCompact.getBranchEntries().map((entry) => entry.type).filter((type) => type !== "message");
+  assert.deepEqual(settingTypes, ["compaction", "model_change", "thinking_level_change"]);
+
+  // The model may be known only from an assistant message (e.g. files whose
+  // model_change was dropped by an older rewrite). The rewrite must keep the
+  // resolved model, not regress to an older model_change.
+  const assistantModel = SessionManager.create(root, sessionsDir);
+  assistantModel.newSession({ id: "assistant-model" });
+  assistantModel.setSessionFile(join(sessionsDir, "assistant-model.jsonl"));
+  assistantModel.appendModelChange("cohub", "old-model");
+  assistantModel.appendMessage({ role: "user", content: [{ type: "text", text: "u1" }], timestamp: Date.now() } as never);
+  assistantModel.appendMessage({ role: "assistant", provider: "cohub", model: "new-model", content: [{ type: "text", text: "a1" }], timestamp: Date.now() } as never);
+  const assistantModelKept = assistantModel.appendMessage({ role: "user", content: [{ type: "text", text: "u2" }], timestamp: Date.now() } as never);
+  const beforeRewrite = assistantModel.buildSessionContext();
+  const assistantModelCompactId = assistantModel.appendCompaction("s", assistantModelKept, 10);
+  await assistantModel.archiveAndRewrite(assistantModelCompactId, assistantModelKept);
+  const afterRewrite = assistantModel.buildSessionContext();
+  assert.deepEqual(afterRewrite.model, { provider: "cohub", modelId: "new-model" });
+  assert.deepEqual({ model: afterRewrite.model, thinkingLevel: afterRewrite.thinkingLevel }, { model: beforeRewrite.model, thinkingLevel: beforeRewrite.thinkingLevel });
+  assert.equal(afterRewrite.thinkingLevel, null);
 
   const unrecorded = SessionManager.create(root, sessionsDir);
   unrecorded.newSession({ id: "unrecorded" });
