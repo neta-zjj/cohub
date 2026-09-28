@@ -1,11 +1,12 @@
-import type { Agent, AgentEvent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Agent, AgentEvent, AgentMessage, AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import { Agent as PiAgent } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
 import { context, trace, type Span } from "@opentelemetry/api";
 import { logger } from "../logger.js";
 import { sendOutput } from "../redis.js";
 import type { SessionManager } from "./local-session-manager.js";
 import type { CohubModel, CohubModelRegistry } from "./model-registry.js";
+import { normalizeThinkingLevel, resolveInitialThinkingLevel, resolveThinkingLevelForModel } from "./thinking-level.js";
 import { createModelsFromRegistry, streamSimpleWithModels } from "./pi-models-adapter.js";
 import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
@@ -60,19 +61,6 @@ const COMPACTION_SUMMARY_PREFIX = "The conversation history before this point wa
 const COMPACTION_SUMMARY_SUFFIX = "\n</summary>";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-
-function normalizeThinkingLevel(level: string | null | undefined): ThinkingLevel | undefined {
-  return level && THINKING_LEVELS.has(level as ThinkingLevel) ? level as ThinkingLevel : undefined;
-}
-
-function resolveThinkingLevelForModel(model: CohubModel, requested?: string | null): ThinkingLevel {
-  const fallback = normalizeThinkingLevel(model.defaultThinkingLevel) ?? (model.reasoning ? "high" : "off");
-  const level = normalizeThinkingLevel(requested) ?? fallback;
-  if (!model.reasoning) return "off";
-  return clampThinkingLevel(model, level) as ThinkingLevel;
-}
-
 const COHUB_RETRYABLE_ERROR_OVERRIDE_PATTERN = /\b400\b.*(?:upstream(?:_error)?:?\s*upstream request failed|upstream response failed.*(?:bad_response_status_code|stage["']?\s*[:=]\s*["']?upstream_response))/i;
 const COHUB_NON_RETRYABLE_ERROR_PATTERN = /insufficient[_ ](?:user[_ ])?quota|quota exceeded|out of budget|billing|余额不足|额度不足|invalid (?:request|url)|content[_ ]filter|request (?:is )?too large|payload too large/i;
 const COHUB_MODEL_UNAVAILABLE_PATTERN = /model (?:is )?(?:(?:not )?available|unavailable)|requested model is not available/i;
@@ -219,6 +207,8 @@ export type CreateCohubAgentSessionOptions = {
   spaceMods?: SpaceModListItem[];
   imageToTextConfig?: ImageToTextConfig | null;
   model?: Model<Api>;
+  /** Latest thinking level the user explicitly selected; read only when the session file lost its record. */
+  loadSelectedThinkingLevel?: () => Promise<string | null>;
 };
 
 function extractTextFromToolResultContent(content: unknown): string {
@@ -724,12 +714,17 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
     throw new Error("No model available. Check platform models.json");
   }
 
-  const initialThinkingLevel = resolveThinkingLevelForModel(model, sessionContext.thinkingLevel);
+  const resumed = sessionContext.messages.length > 0;
+  const initialThinkingLevel = await resolveInitialThinkingLevel(model, {
+    recorded: sessionContext.thinkingLevel,
+    resumed,
+    loadSelected: options.loadSelectedThinkingLevel,
+  });
 
-  if (sessionContext.messages.length === 0) {
-    options.sessionManager.appendModelChange(model.provider, model.id);
-    options.sessionManager.appendThinkingLevelChange(initialThinkingLevel);
-  }
+  if (!resumed) options.sessionManager.appendModelChange(model.provider, model.id);
+  // Record the level whenever the file has none (new session or lost record),
+  // so later loads and compactions carry it instead of resolving it again.
+  if (!normalizeThinkingLevel(sessionContext.thinkingLevel)) options.sessionManager.appendThinkingLevelChange(initialThinkingLevel);
 
   const systemPromptStateKeyFor = (userId: string | null, spaceOwnerUserId: string | null, tools: ToolLike[]) => `${userId ?? ""}\0${shouldIncludeUserSkills(userId, spaceOwnerUserId) ? "user-skills" : "no-user-skills"}\0${toolsStateKey(tools)}`;
 
