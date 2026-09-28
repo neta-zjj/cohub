@@ -27,7 +27,7 @@ import { createCohubAgentSession, type CohubAgentSession } from "./runtime/sessi
 import type { AgentTurnAbortEvent } from "./abort.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ContextProjectionOptions } from "@cohub/protocol";
-import { loadRuntimeContext } from "./runtime/context-store.js";
+import { loadRequestedThinkingLevel, loadRuntimeContext } from "./runtime/context-store.js";
 import { appendTerminalGenerationMessages } from "./generation-session-sync.js";
 import { syncCloudContext } from "./runtime/cloud-context.js";
 import { hydrateContextImages } from "./runtime/context-images.js";
@@ -1173,6 +1173,10 @@ export async function loadOrCreateSessionHandle(input: {
     tools: input.tools,
     spaceMods,
     ...(resolvedModel ? { model: resolvedModel } : {}),
+    loadSelectedThinkingLevel: () => loadRequestedThinkingLevel({ sessionId: input.sessionId, beforeSequence: input.beforeTurnSequence ?? undefined }).catch((error: unknown) => {
+      logger.warn(`[Session] failed to load selected thinking level sessionId=${input.sessionId}; using the lowest supported level`, error);
+      return null;
+    }),
   });
 
   await session.reload();
