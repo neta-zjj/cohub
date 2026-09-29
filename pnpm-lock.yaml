@@ -5,6 +5,15 @@ settings:
   excludeLinksFromLockfile: false
   injectWorkspacePackages: true
 
+catalogs:
+  default:
+    '@earendil-works/pi-agent-core':
+      specifier: 0.81.1
+      version: 0.81.1
+    '@earendil-works/pi-ai':
+      specifier: 0.81.1
+      version: 0.81.1
+
 overrides:
   ioredis: ^6.0.0
 
@@ -64,10 +73,10 @@ importers:
         specifier: workspace:*
         version: link:../../packages/sandbox-controller
       '@earendil-works/pi-agent-core':
-        specifier: 0.81.1
+        specifier: 'catalog:'
         version: 0.81.1(ws@8.21.3)(zod@4.5.4)
       '@earendil-works/pi-ai':
-        specifier: 0.81.1
+        specifier: 'catalog:'
         version: 0.81.1(ws@8.21.3)(zod@4.5.4)
       '@opentelemetry/api':
         specifier: ^1.9.1
@@ -170,7 +179,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/sandbox-controller
       '@earendil-works/pi-ai':
-        specifier: 0.81.1
+        specifier: 'catalog:'
         version: 0.81.1(ws@8.21.3)(zod@4.5.4)
       '@hono/node-server':
         specifier: 2.1.1
@@ -564,7 +573,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/sandbox-controller
       '@earendil-works/pi-ai':
-        specifier: 0.81.1
+        specifier: 'catalog:'
         version: 0.81.1(ws@8.21.3)(zod@4.5.4)
       '@kubernetes/client-node':
         specifier: ^2.0.0
@@ -816,7 +825,7 @@ importers:
         specifier: workspace:*
         version: link:../protocol
       '@earendil-works/pi-ai':
-        specifier: 0.81.1
+        specifier: 'catalog:'
         version: 0.81.1(ws@8.21.3)(zod@4.5.4)
     devDependencies:
       '@types/node':
@@ -7138,7 +7147,7 @@ snapshots:
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3
       '@smithy/fetch-http-handler': 5.7.2
-      '@smithy/node-http-handler': 4.7.3
+      '@smithy/node-http-handler': 4.11.3
       '@smithy/types': 4.17.2
       tslib: 2.8.1
 
