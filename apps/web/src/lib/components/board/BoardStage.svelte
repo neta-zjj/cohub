@@ -7,6 +7,7 @@ import type {
 } from "@neta-art/cohub/board";
 import {
 	type BoardShapeColors,
+	type BoardViewport,
 	featuredTaskArtifact,
 	isStrokeCorner,
 	pickBoardColor,
@@ -71,7 +72,10 @@ import {
 import { resizeCursorForHandle } from "$lib/board/core/selection-transform";
 import type { BoardEditor } from "$lib/board/editor.svelte";
 import type { BoardRuntimeData } from "$lib/board/runtime/board-runtime";
-import { createBoardAnimationRuntime } from "$lib/board/runtime/pixi-animation";
+import {
+	type BoardPlaybackView,
+	createBoardAnimationRuntime,
+} from "$lib/board/runtime/pixi-animation";
 import { pointerDropZone } from "$lib/drag/pointer-drag.svelte";
 import {
 	type BoardDropItem,
@@ -184,13 +188,23 @@ let surface = $state<{ width: number; height: number }>({
 	width: 0,
 	height: 0,
 });
+let playbackView = $state.raw<BoardPlaybackView | null>(null);
+const NO_VIEWPORTS: readonly BoardViewport[] = [];
+const viewCamera = $derived(playbackView?.camera ?? editor.camera);
+// Snap playback zoom to half-octaves so cards re-sync per step, not per frame.
+const renderZoom = $derived(
+	playbackView
+		? 2 ** (Math.round(Math.log2(playbackView.camera.zoom) * 2) / 2)
+		: editor.camera.zoom,
+);
+const playbackAhead = $derived(playbackView?.ahead ?? NO_VIEWPORTS);
 
 // Keep the previous rect object while the snapped rect is unchanged.
 let lastCullRect: Rect | null = null;
 const cullRect = $derived.by<Rect | null>(() => {
 	if (surface.width === 0 || surface.height === 0) return null;
 	const next = stableCullRect(
-		visibleWorldRect(editor.camera, surface.width, surface.height),
+		visibleWorldRect(viewCamera, surface.width, surface.height),
 	);
 	const last = lastCullRect;
 	if (
@@ -307,10 +321,24 @@ function getPalette(): BoardRenderPalette {
 // document size.
 $effect(() => {
 	previewVersion;
-	for (const item of itemsNearViewport()) {
-		if (assets.assetKey(item)) assets.requestItem(item);
+	requestPreviews(visibleIds ?? []);
+});
+
+// Preload where playback's camera is heading.
+$effect(() => {
+	if (surface.width === 0 || surface.height === 0) return;
+	for (const view of playbackAhead) {
+		const rect = visibleWorldRect(view, surface.width, surface.height);
+		requestPreviews(editor.idsInRect(stableCullRect(rect)));
 	}
 });
+
+function requestPreviews(ids: Iterable<string>) {
+	for (const id of ids) {
+		const item = editor.itemById(id);
+		if (item && assets.assetKey(item)) assets.requestItem(item);
+	}
+}
 
 // Adopt intrinsic image sizes once their textures resolve, so a frame created
 // without dimension metadata stops letterboxing. The editor records the size on
@@ -405,7 +433,7 @@ function buildContext(
 		colors: resolveTheme().colors,
 		colorScheme,
 		rendererType: app?.renderer.type === RendererType.CANVAS ? "canvas" : "gpu",
-		zoom: editor.camera.zoom,
+		zoom: renderZoom,
 		assetKey: assets.assetKey,
 		getTexture: (key) => assets.getTexture(key),
 		hasError: (key) => assets.hasError(key),
@@ -556,7 +584,7 @@ function syncStage() {
 		assetVersion,
 		previewVersion,
 		resolveTheme().key,
-		textZoomBucket(editor.camera.zoom),
+		textZoomBucket(renderZoom),
 	].join("|");
 
 	animationRuntime?.prepareSceneSync();
@@ -1364,6 +1392,13 @@ onMount(async () => {
 			height: app?.screen.height ?? 0,
 		}),
 		getAccentColor: () => getPalette().brand,
+		getInkColor: (item) => {
+			const theme = resolveTheme();
+			return pickBoardColor(theme.colors, item.color, theme.colorScheme).stroke;
+		},
+		onView: (view) => {
+			playbackView = view;
+		},
 		render: () => {
 			if (active) app?.render();
 		},

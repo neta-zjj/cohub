@@ -6,6 +6,7 @@ import type {
 } from "@neta-art/cohub";
 import type {
 	BoardCameraFocusParams,
+	BoardDrawItem,
 	BoardItem,
 	BoardViewport,
 } from "@neta-art/cohub/board";
@@ -78,7 +79,15 @@ type RuntimeOptions = {
 	} | null;
 	getScreen: () => { width: number; height: number };
 	getAccentColor: () => number;
+	getInkColor: (item: BoardDrawItem) => number;
+	onView?: (view: BoardPlaybackView | null) => void;
 	render: () => void;
+};
+
+/** Camera playback shows, and the focus targets it is heading to. */
+export type BoardPlaybackView = {
+	camera: BoardViewport;
+	ahead: readonly BoardViewport[];
 };
 
 type ParticleResource = {
@@ -102,6 +111,13 @@ type RevealResource = {
 
 const finite = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);
+
+const sameViewports = (
+	left: readonly BoardViewport[],
+	right: readonly BoardViewport[],
+) =>
+	left.length === right.length &&
+	left.every((viewport, index) => viewport === right[index]);
 
 function poseOf(node: Container): BasePose {
 	return {
@@ -165,25 +181,37 @@ export function prepareCameraFocusClips(
 	return result;
 }
 
+function focusClipIndexAt(
+	clips: PreparedCameraFocusClip[],
+	position: number,
+): number {
+	let low = 0;
+	let high = clips.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if ((clips[middle]?.clip.start ?? Number.POSITIVE_INFINITY) <= position)
+			low = middle + 1;
+		else high = middle;
+	}
+	return low - 1;
+}
+
+/** The current focus clip and the next one. */
+export function upcomingCameraFocusClips(
+	clips: PreparedCameraFocusClip[],
+	position: number,
+): PreparedCameraFocusClip[] {
+	const index = focusClipIndexAt(clips, position);
+	return clips.slice(Math.max(0, index), index + 2);
+}
+
 export function resolveCameraFocusPose(input: {
 	clips: PreparedCameraFocusClip[];
 	position: number;
 	base: BoardViewport;
 	resolveTarget: (entry: PreparedCameraFocusClip) => BoardViewport | null;
 }): AnimationPose | null {
-	if (input.clips.length === 0) return null;
-	let low = 0;
-	let high = input.clips.length;
-	while (low < high) {
-		const middle = (low + high) >>> 1;
-		if (
-			(input.clips[middle]?.clip.start ?? Number.POSITIVE_INFINITY) <=
-			input.position
-		)
-			low = middle + 1;
-		else high = middle;
-	}
-	const index = low - 1;
+	const index = focusClipIndexAt(input.clips, input.position);
 	if (index < 0) return null;
 	const entry = input.clips[index];
 	if (!entry) return null;
@@ -462,6 +490,7 @@ export function createBoardAnimationRuntime(options: RuntimeOptions) {
 		{ startedAt: number; params: EntranceMotionParams; seed: string }
 	>();
 	let worldPose: BasePose | null = null;
+	let reportedView: BoardPlaybackView | null = null;
 	let frameId = 0;
 	let sharedPlayback: BoardPlaybackSnapshot | null = null;
 	let autoplayKey: string | null = null;
@@ -864,7 +893,6 @@ export function createBoardAnimationRuntime(options: RuntimeOptions) {
 			if (!geometry || !(original instanceof Container)) return false;
 			const shader = createRevealShader();
 			const mesh = new Mesh({ geometry, shader, texture: Texture.WHITE });
-			mesh.tint = options.getAccentColor();
 			entry.container.addChild(mesh);
 			const created: RevealResource = {
 				mesh,
@@ -877,10 +905,10 @@ export function createBoardAnimationRuntime(options: RuntimeOptions) {
 			resource = created;
 		}
 		resource.original.renderable = false;
-		resource.mesh.visible = true;
+		resource.mesh.visible = progress > 0;
 		resource.mesh.tint = finite(clip.params.color)
 			? clip.params.color
-			: options.getAccentColor();
+			: options.getInkColor(entry.item);
 		resource.shader.resources.revealUniforms.uniforms.uProgress = progress;
 		return true;
 	}
@@ -955,6 +983,39 @@ export function createBoardAnimationRuntime(options: RuntimeOptions) {
 		return false;
 	}
 
+	function focusTarget(
+		compositionId: string,
+		entry: PreparedCameraFocusClip,
+	): BoardViewport | null {
+		const screen = options.getScreen();
+		const geometryVersion = options.getGeometryVersion?.();
+		const key = `${compositionId}:${entry.clip.id}`;
+		const cached =
+			geometryVersion === undefined ? null : cameraFocusTargetCache.get(key);
+		if (
+			cached &&
+			cached.geometryVersion === geometryVersion &&
+			cached.width === screen.width &&
+			cached.height === screen.height
+		) {
+			return cached.target;
+		}
+		const target = cameraForFocus(
+			entry.params,
+			(id) => options.getItem?.(id)?.frame ?? options.getNode(id)?.item.frame,
+			screen,
+		);
+		if (geometryVersion !== undefined) {
+			cameraFocusTargetCache.set(key, {
+				geometryVersion,
+				width: screen.width,
+				height: screen.height,
+				target,
+			});
+		}
+		return target;
+	}
+
 	function cameraFocusPose(
 		compositionId: string,
 		position: number,
@@ -964,39 +1025,48 @@ export function createBoardAnimationRuntime(options: RuntimeOptions) {
 			clips: cameraFocusBySequence.get(compositionId) ?? [],
 			position,
 			base: { x: base.x, y: base.y, zoom: base.scaleX },
-			resolveTarget(entry) {
-				const screen = options.getScreen();
-				const geometryVersion = options.getGeometryVersion?.();
-				const key = `${compositionId}:${entry.clip.id}`;
-				const cached =
-					geometryVersion === undefined
-						? null
-						: cameraFocusTargetCache.get(key);
-				if (
-					cached &&
-					cached.geometryVersion === geometryVersion &&
-					cached.width === screen.width &&
-					cached.height === screen.height
-				) {
-					return cached.target;
-				}
-				const target = cameraForFocus(
-					entry.params,
-					(id) =>
-						options.getItem?.(id)?.frame ?? options.getNode(id)?.item.frame,
-					screen,
-				);
-				if (geometryVersion !== undefined) {
-					cameraFocusTargetCache.set(key, {
-						geometryVersion,
-						width: screen.width,
-						height: screen.height,
-						target,
-					});
-				}
-				return target;
-			},
+			resolveTarget: (entry) => focusTarget(compositionId, entry),
 		});
+	}
+
+	function reportView(
+		world: Container,
+		compositionId: string | null,
+		position: number,
+	) {
+		const base = worldPose;
+		const moved =
+			base !== null &&
+			(world.x !== base.x ||
+				world.y !== base.y ||
+				world.scale.x !== base.scaleX);
+		let next: BoardPlaybackView | null = null;
+		if (moved) {
+			const ahead = compositionId
+				? upcomingCameraFocusClips(
+						cameraFocusBySequence.get(compositionId) ?? [],
+						position,
+					).flatMap((entry) => focusTarget(compositionId, entry) ?? [])
+				: [];
+			const previous = reportedView?.ahead ?? [];
+			next = {
+				camera: { x: world.x, y: world.y, zoom: world.scale.x },
+				ahead: sameViewports(previous, ahead) ? previous : ahead,
+			};
+		}
+		const last = reportedView;
+		if (
+			last === next ||
+			(last &&
+				next &&
+				last.ahead === next.ahead &&
+				last.camera.x === next.camera.x &&
+				last.camera.y === next.camera.y &&
+				last.camera.zoom === next.camera.zoom)
+		)
+			return;
+		reportedView = next;
+		options.onView?.(next);
 	}
 
 	function renderFrame(now: number, commitRender = true): boolean {
@@ -1094,6 +1164,11 @@ export function createBoardAnimationRuntime(options: RuntimeOptions) {
 			if (entry) applyPose(entry.container, entry.base, pose);
 		}
 		applyPose(world, worldPose, cameraPose);
+		reportView(
+			world,
+			sequence && evaluationTime !== null ? sequence.id : null,
+			evaluationTime ?? 0,
+		);
 		for (const job of jobs) job();
 		if (commitRender) options.render();
 
