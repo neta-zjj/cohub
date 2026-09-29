@@ -6,6 +6,11 @@ import test from "node:test";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { ModelsConfig } from "@cohub/infra/config-runtime/models";
+import {
+  CLAUDE_CODE_BETA,
+  CLAUDE_CODE_SYSTEM_IDENTITY,
+  CLAUDE_CODE_VERSION,
+} from "@cohub/model-runtime/claude-code-identity";
 import { SessionManager } from "../runtime/local-session-manager.js";
 import { CohubModelRegistry } from "../runtime/model-registry.js";
 
@@ -100,4 +105,42 @@ test("agent requests carry the system prompt and tools, also after the transcrip
   const roles = sessionManager.getBranchEntries().flatMap((entry) => entry.type === "message" ? [entry.message.role] : []);
   assert.deepEqual(roles, ["user", "assistant", "user", "assistant"]);
   session.dispose();
+});
+
+test("Claude models identify as Claude Code with API key auth", async () => {
+  requests.length = 0;
+  const { session } = await createSession("claude-opus-5-5");
+  await session.prompt("hello");
+  session.dispose();
+
+  const [request] = requests;
+  assert.ok(request);
+  const [identity, prompt] = systemTexts(request);
+  assert.equal(identity, CLAUDE_CODE_SYSTEM_IDENTITY);
+  assert.ok(prompt && prompt.length > 0, "Cohub system prompt follows the identity");
+  assert.equal(request.headers.get("user-agent"), `claude-cli/${CLAUDE_CODE_VERSION}`);
+  assert.equal(request.headers.get("x-app"), "cli");
+  assert.equal(request.headers.get("x-api-key"), "test-key");
+  assert.equal(request.headers.get("authorization"), null);
+  const betas = request.headers.get("anthropic-beta")?.split(",") ?? [];
+  assert.equal(betas[0], CLAUDE_CODE_BETA);
+  assert.ok(!betas.includes("oauth-2025-04-20"), "no OAuth beta without an OAuth token");
+  // Tool names are Cohub's own: pi only maps Claude Code tool names back for OAuth tokens.
+  assert.deepEqual(toolNames(request), ["echo"]);
+});
+
+test("non-Claude models keep their own identity", async () => {
+  requests.length = 0;
+  const { session } = await createSession("glm-5");
+  await session.prompt("hello");
+  session.dispose();
+
+  const [request] = requests;
+  assert.ok(request);
+  assert.ok(!request.headers.get("user-agent")?.startsWith("claude-cli/"));
+  assert.equal(request.headers.get("x-app"), null);
+  assert.ok(!(request.headers.get("anthropic-beta") ?? "").includes(CLAUDE_CODE_BETA));
+  const texts = systemTexts(request);
+  assert.equal(texts.length, 1);
+  assert.notEqual(texts[0], CLAUDE_CODE_SYSTEM_IDENTITY);
 });
