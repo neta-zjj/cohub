@@ -34,20 +34,31 @@ const config: ModelsConfig = {
 
 type CapturedRequest = { headers: Headers; body: Record<string, unknown> };
 
-const SSE_TEXT_REPLY = [
-  { type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model: "m", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
-  { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-  { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
-  { type: "content_block_stop", index: 0 },
-  { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
-  { type: "message_stop" },
-].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+function sse(block: Record<string, unknown>, delta: Record<string, unknown>, stopReason: string): string {
+  return [
+    { type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model: "m", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+    { type: "content_block_start", index: 0, content_block: block },
+    { type: "content_block_delta", index: 0, delta },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+}
+
+const SSE_TEXT_REPLY = sse({ type: "text", text: "" }, { type: "text_delta", text: "ok" }, "end_turn");
+const SSE_TOOL_CALL_REPLY = sse(
+  { type: "tool_use", id: "toolu_1", name: "echo", input: {} },
+  { type: "input_json_delta", partial_json: JSON.stringify({ text: "x" }) },
+  "tool_use",
+);
 
 const requests: CapturedRequest[] = [];
+/** Replies served before falling back to a plain text reply. */
+const replies: string[] = [];
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (_input, init) => {
   requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
-  return new Response(SSE_TEXT_REPLY, { status: 200, headers: { "content-type": "text/event-stream" } });
+  return new Response(replies.shift() ?? SSE_TEXT_REPLY, { status: 200, headers: { "content-type": "text/event-stream" } });
 };
 
 const root = await mkdtemp(join(tmpdir(), "cohub-agent-request-"));
@@ -56,13 +67,17 @@ test.after(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const echoTool: AgentTool = {
-  name: "echo",
-  label: "Echo",
-  description: "Echo the input",
-  parameters: Type.Object({ text: Type.String() }),
-  execute: async () => ({ content: [{ type: "text", text: "echo" }], details: undefined }),
-};
+function textTool(name: string): AgentTool {
+  return {
+    name,
+    label: name,
+    description: `${name} the input`,
+    parameters: Type.Object({ text: Type.String() }),
+    execute: async () => ({ content: [{ type: "text", text: name }], details: undefined }),
+  };
+}
+
+const echoTool = textTool("echo");
 
 async function createSession(modelId: string) {
   const modelRegistry = new CohubModelRegistry({ configs: [config] });
@@ -104,6 +119,35 @@ test("agent requests carry the system prompt and tools, also after the transcrip
   // Pi's transcript system messages stay out of the session file.
   const roles = sessionManager.getBranchEntries().flatMap((entry) => entry.type === "message" ? [entry.message.role] : []);
   assert.deepEqual(roles, ["user", "assistant", "user", "assistant"]);
+  session.dispose();
+});
+
+test("every round of a tool loop carries the system prompt and current tools", async () => {
+  requests.length = 0;
+  replies.push(SSE_TOOL_CALL_REPLY);
+  const { session, sessionManager } = await createSession("claude-opus-5-5");
+
+  await session.prompt("use the tool");
+  assert.equal(requests.length, 2);
+  const [call, followUp] = requests;
+  assert.ok(call && followUp);
+  assert.equal(systemTexts(followUp).at(-1), systemTexts(call).at(-1));
+  for (const request of requests) assert.deepEqual(toolNames(request), ["echo"]);
+  const messages = followUp.body.messages;
+  assert.ok(Array.isArray(messages));
+  const toolResultIds = messages.flatMap((message: { content?: unknown }) =>
+    Array.isArray(message.content)
+      ? message.content.flatMap((block: { type?: string; tool_use_id?: string }) => block.type === "tool_result" ? [block.tool_use_id] : [])
+      : []);
+  assert.deepEqual(toolResultIds, ["toolu_1"]);
+
+  // Tool changes reach the next request without a transcript system message.
+  await session.configureTools([echoTool, textTool("shout")]);
+  await session.prompt("again");
+  assert.deepEqual(toolNames(requests.at(-1)), ["echo", "shout"]);
+
+  const roles = sessionManager.getBranchEntries().flatMap((entry) => entry.type === "message" ? [entry.message.role] : []);
+  assert.deepEqual(roles, ["user", "assistant", "toolResult", "assistant", "user", "assistant"]);
   session.dispose();
 });
 

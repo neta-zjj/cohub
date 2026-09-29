@@ -557,6 +557,8 @@ type StreamRuntime = {
  * (no system messages) on every round and after compaction. The prompt and
  * tools are Cohub runtime state, so they are declared here, at the one exit
  * every agent request passes, instead of being kept alive in the transcript.
+ * `toLlmMessages` already drops pi's transcript system messages; the filter
+ * guarantees the declared prompt and tools are the only ones sent.
  */
 function toRequestContext(ctx: TranscriptContext, runtime: StreamRuntime): Context {
   return {

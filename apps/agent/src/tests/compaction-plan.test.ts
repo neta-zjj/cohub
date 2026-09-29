@@ -127,6 +127,37 @@ test("a pre-rewrite layout keeps the range from firstKeptEntryId", () => {
   assert.equal(firstKeptEntryId, recent);
 });
 
+test("compacting a pre-rewrite layout inside its kept range keeps only the new summary", async () => {
+  // The projection puts the legacy kept range after its compaction, so the new
+  // cut can land before the legacy compaction entry in the file.
+  const manager = createSession("legacy-inside-kept");
+  appendUser(manager, long("dropped"));
+  const firstKept = appendUser(manager, long("kept-a"));
+  appendAssistant(manager, long("kept-b"));
+  appendUser(manager, "kept-c");
+  manager.appendCompaction("legacy summary", firstKept, 100);
+  appendAssistant(manager, "after");
+  appendUser(manager, "recent");
+  appendAssistant(manager, "done");
+
+  const { preparation, firstKeptEntryId } = plan(manager, settings);
+  assert.ok(firstKeptEntryId);
+  assert.ok(getCompactionSummaryMessageCount(preparation) > 0);
+  const legacyIdx = manager.getBranchEntries().findIndex((entry) => entry.type === "compaction");
+  const cutIdx = manager.getBranchEntries().findIndex((entry) => entry.id === firstKeptEntryId);
+  assert.ok(cutIdx < legacyIdx, "the cut lands before the legacy compaction");
+
+  const compactionId = manager.appendCompaction("new summary", firstKeptEntryId, 100);
+  assert.ok(await manager.archiveAndRewrite(compactionId, firstKeptEntryId));
+  const compactions = manager.getBranchEntries().filter((entry) => entry.type === "compaction");
+  assert.deepEqual(compactions.map((entry) => entry.id), [compactionId]);
+  const [summary, ...rest] = manager.buildSessionContext().messages;
+  assert.ok(summary?.role === "compactionSummary");
+  assert.equal(summary.summary, "new summary");
+  assert.ok(!JSON.stringify(rest).includes("kept-a"), "summarized entries leave the context");
+  assert.ok(JSON.stringify(rest).includes("done"));
+});
+
 test("first kept entry is resolved by message identity", () => {
   const manager = createSession("identity");
   const user = appendUser(manager, "hello");

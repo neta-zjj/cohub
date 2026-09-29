@@ -127,10 +127,8 @@ function entryToContextMessage(entry: SessionEntry): AgentMessage | undefined {
  * and pre-rewrite (compaction appended after its kept range).
  */
 function resolveCompactedBranch(branch: SessionEntry[]): { compaction: CompactionEntry | null; kept: SessionEntry[] } {
-  let compactionIdx = -1;
-  for (let i = branch.length - 1; i >= 0 && compactionIdx < 0; i--) {
-    if (branch[i]?.type === "compaction") compactionIdx = i;
-  }
+  let compactionIdx = branch.length - 1;
+  while (compactionIdx >= 0 && branch[compactionIdx]?.type !== "compaction") compactionIdx--;
   const compaction = branch[compactionIdx];
   if (compaction?.type !== "compaction") return { compaction: null, kept: branch };
 
@@ -676,10 +674,15 @@ export class SessionManager {
     // Settings resolved from the dropped prefix are pinned right after the
     // root, so later kept entries still win and the resolved model/thinking
     // level is identical before and after the rewrite.
+    // Older compactions inside the kept range are dropped: a pre-rewrite file
+    // keeps entries before its compaction, so the new cut can land there, and a
+    // later-positioned old compaction would otherwise shadow the new summary.
+    // The new compaction's details already accumulate the old ones.
     const compactionEntry = branch[compactionIdx];
     if (compactionEntry?.type !== "compaction") return undefined;
     const pinned = this.createSettingEntries(resolveSessionSettings(branch.slice(0, firstKeptIdx)));
-    const chain = [compactionEntry, ...pinned, ...branch.slice(firstKeptIdx, compactionIdx), ...branch.slice(compactionIdx + 1)];
+    const kept = branch.slice(firstKeptIdx, compactionIdx).filter((entry) => entry.type !== "compaction");
+    const chain = [compactionEntry, ...pinned, ...kept, ...branch.slice(compactionIdx + 1)];
     const keptEntries: SessionEntry[] = chain.map((entry, i) => ({ ...entry, parentId: chain[i - 1]?.id ?? null }));
 
     // Snapshot state so we can roll back if the file rewrite fails.
