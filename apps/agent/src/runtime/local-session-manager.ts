@@ -2,7 +2,7 @@ import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { access, copyFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, Entry as PiEntry, JsonValue } from "@earendil-works/pi-agent-core";
 import { createLogger } from "@cohub/infra/logging";
 
 
@@ -52,7 +52,7 @@ export type CompactionEntry = SessionEntryBase & {
   summary: string;
   firstKeptEntryId: string;
   tokensBefore: number;
-  details?: unknown;
+  details?: JsonValue;
   fromHook?: boolean;
 };
 
@@ -110,6 +110,40 @@ function resolveSessionSettings(entries: SessionEntry[]): SessionSettings {
     }
   }
   return { thinkingLevel, model };
+}
+
+/** The message an entry contributes to model context; settings, custom and compaction entries contribute none. */
+function entryToContextMessage(entry: SessionEntry): AgentMessage | undefined {
+  if (entry.type === "message") return entry.message;
+  if (entry.type === "custom_message") {
+    return { role: "user", content: entry.content as never, timestamp: Date.now() } as AgentMessage;
+  }
+  return undefined;
+}
+
+/**
+ * The latest compaction and the entries it keeps, in context order. Covers both
+ * file layouts: rewritten (compaction is the root, everything after it is kept)
+ * and pre-rewrite (compaction appended after its kept range).
+ */
+function resolveCompactedBranch(branch: SessionEntry[]): { compaction: CompactionEntry | null; kept: SessionEntry[] } {
+  let compactionIdx = -1;
+  for (let i = branch.length - 1; i >= 0 && compactionIdx < 0; i--) {
+    if (branch[i]?.type === "compaction") compactionIdx = i;
+  }
+  const compaction = branch[compactionIdx];
+  if (compaction?.type !== "compaction") return { compaction: null, kept: branch };
+
+  const after = branch.slice(compactionIdx + 1);
+  if (compactionIdx === 0) return { compaction, kept: after };
+
+  const firstKeptIdx = branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+  if (firstKeptIdx < 0 || firstKeptIdx >= compactionIdx) {
+    // Fall back to every pre-compaction entry rather than silently dropping context.
+    logger.warn(`[SessionManager] firstKeptEntryId ${compaction.firstKeptEntryId} not found before compaction; including all pre-compaction entries`);
+    return { compaction, kept: [...branch.slice(0, compactionIdx), ...after] };
+  }
+  return { compaction, kept: [...branch.slice(firstKeptIdx, compactionIdx), ...after] };
 }
 
 function nowIso() {
@@ -455,72 +489,62 @@ export class SessionManager {
 
     // Settings are scanned across the whole branch (they persist across compaction boundaries).
     const { thinkingLevel, model } = resolveSessionSettings(branch);
-    let compaction: CompactionEntry | null = null;
-    for (const entry of branch) {
-      if (entry.type === "compaction") compaction = entry;
-    }
+    const { compaction, kept } = resolveCompactedBranch(branch);
 
     const messages: AgentMessage[] = [];
-    const appendMessage = (entry: SessionEntry) => {
-      if (entry.type === "message") {
-        messages.push(entry.message);
-      } else if (entry.type === "custom_message") {
-        messages.push({ role: "user", content: entry.content as never, timestamp: Date.now() } as AgentMessage);
-      }
-    };
-
     if (compaction) {
-      // Prepend a compactionSummary message, then only entries from firstKeptEntryId onward.
       messages.push({
         role: "compactionSummary",
         summary: compaction.summary,
         tokensBefore: compaction.tokensBefore,
         timestamp: new Date(compaction.timestamp).getTime(),
       } as AgentMessage);
-
-      const compactionIdx = branch.findIndex((e) => e.id === compaction?.id);
-      const firstKeptIdx = branch.findIndex((e) => e.id === compaction.firstKeptEntryId);
-
-      if (compactionIdx === 0) {
-        // Post-rewrite layout: compaction is root, all other entries are kept.
-        // No filtering needed — the file was already trimmed by archiveAndRewrite.
-        for (let i = 1; i < branch.length; i++) {
-          const entry = branch[i];
-          if (entry) appendMessage(entry);
-        }
-      } else if (firstKeptIdx < 0 || firstKeptIdx >= compactionIdx) {
-        // Pre-rewrite layout (compaction at end) but firstKeptEntryId not found
-        // before compaction — fallback to avoid silent data loss.
-        logger.warn(`[SessionManager] firstKeptEntryId ${compaction.firstKeptEntryId} not found before compaction; including all pre-compaction entries`);
-        for (let i = 0; i < compactionIdx; i++) {
-          const entry = branch[i];
-          if (entry) appendMessage(entry);
-        }
-      } else {
-        // Pre-rewrite layout: include entries from firstKeptEntryId to compaction.
-        let foundFirstKept = false;
-        for (let i = 0; i < compactionIdx; i++) {
-          const entry = branch[i];
-          if (!entry) continue;
-          if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
-          if (foundFirstKept) appendMessage(entry);
-        }
-      }
-      if (compactionIdx > 0) {
-        // Post-compaction entries only in pre-rewrite layouts. When the
-        // compaction entry is the root, the post-rewrite loop above already
-        // appended every kept entry once — appending again would duplicate
-        // the entire context in every request.
-        for (let i = compactionIdx + 1; i < branch.length; i++) {
-          const entry = branch[i];
-          if (entry) appendMessage(entry);
-        }
-      }
-    } else {
-      for (const entry of branch) appendMessage(entry);
+    }
+    for (const entry of kept) {
+      const message = entryToContextMessage(entry);
+      if (message) messages.push(message);
     }
 
     return { messages, thinkingLevel, model };
+  }
+
+  /**
+   * The branch projected onto pi's compaction input: context-bearing entries
+   * only, with the kept entries following the latest compaction. Pi only knows
+   * message/compaction/branch_summary/custom entries and reads the retained tail
+   * from the compaction itself; here the kept entries follow it, so the tail is
+   * empty. The session file format is unchanged.
+   */
+  getCompactionEntries(): PiEntry[] {
+    const { compaction, kept } = resolveCompactedBranch(this.getBranch());
+    const entries: PiEntry[] = [];
+    if (compaction) {
+      entries.push({
+        type: "compaction",
+        id: compaction.id,
+        parentId: compaction.parentId,
+        seq: 0,
+        timestamp: Date.parse(compaction.timestamp),
+        summary: compaction.summary,
+        tokensBefore: compaction.tokensBefore,
+        retainedTail: [],
+        details: compaction.details,
+        fromHook: compaction.fromHook ?? false,
+      });
+    }
+    for (const entry of kept) {
+      const message = entryToContextMessage(entry);
+      if (!message) continue;
+      entries.push({
+        type: "message",
+        id: entry.id,
+        parentId: entry.parentId,
+        seq: entries.length,
+        timestamp: Date.parse(entry.timestamp),
+        message,
+      });
+    }
+    return entries;
   }
 
   hasUserMessage(userMessageId: string): boolean {
@@ -566,7 +590,7 @@ export class SessionManager {
     return entry.id;
   }
 
-  appendCompaction(summary: string, firstKeptEntryId: string, tokensBefore: number, details?: unknown, fromHook?: boolean): string {
+  appendCompaction(summary: string, firstKeptEntryId: string, tokensBefore: number, details?: JsonValue, fromHook?: boolean): string {
     const entry: CompactionEntry = {
       type: "compaction",
       id: generateEntryId(this.byId),
