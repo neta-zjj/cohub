@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Api, Model, ProviderHeaders, ProviderStreams, StreamOptions } from "@earendil-works/pi-ai";
 
 /**
@@ -12,11 +13,11 @@ export const CLAUDE_CODE_SYSTEM_IDENTITY = "You are Claude Code, Anthropic's off
 export const CLAUDE_CODE_BETA = "claude-code-20250219";
 
 const CLAUDE_CODE_HEADERS: Record<string, string> = {
-  "User-Agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
+  "User-Agent": `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`,
   "x-app": "cli",
 };
 
-type ClaudeCodeOverrides = Pick<StreamOptions, "headers" | "onPayload">;
+type ClaudeCodeOverrides = Pick<StreamOptions, "headers" | "metadata" | "onPayload">;
 
 export function usesClaudeCodeProfile(model: Model<Api>): boolean {
   return "requestProfile" in model && model.requestProfile === CLAUDE_CODE_REQUEST_PROFILE;
@@ -29,6 +30,35 @@ function hasHeader(sources: ReadonlyArray<ProviderHeaders | undefined>, name: st
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export type ClaudeCodeUserId = {
+  device_id: string;
+  account_uuid: string;
+  session_id: string;
+};
+
+/** API-key Claude Code metadata: a stable credential-scoped device and request session. */
+export function createClaudeCodeUserId(apiKey: string, sessionId: string): string {
+  const deviceId = createHash("sha256")
+    .update("cohub-claude-code-device\0")
+    .update(apiKey)
+    .digest("hex");
+  const value: ClaudeCodeUserId = {
+    device_id: deviceId,
+    account_uuid: "",
+    session_id: sessionId,
+  };
+  return JSON.stringify(value);
+}
+
+function withClaudeCodeMetadata(
+  metadata: StreamOptions["metadata"],
+  apiKey: string | undefined,
+  sessionId: string | undefined,
+): StreamOptions["metadata"] {
+  if (typeof metadata?.user_id === "string" || !apiKey || !sessionId) return metadata;
+  return { ...metadata, user_id: createClaudeCodeUserId(apiKey, sessionId) };
 }
 
 /** Lead the system prompt with the Claude Code identity and declare the Claude Code beta. */
@@ -63,6 +93,7 @@ export function claudeCodeOverrides(model: Model<Api>, options: StreamOptions | 
   const onPayload = options?.onPayload;
   return {
     headers: { ...identityHeaders, ...options?.headers },
+    metadata: withClaudeCodeMetadata(options?.metadata, options?.apiKey, options?.sessionId),
     onPayload: async (payload, payloadModel) => {
       const next = onPayload ? ((await onPayload(payload, payloadModel)) ?? payload) : payload;
       return withClaudeCodePayload(next, { beta });

@@ -143,6 +143,7 @@ function extractAssistantText(content: unknown): string {
 async function describeImage(input: {
   config: ImageToTextConfig;
   image: ImageContent;
+  sessionId: string;
   signal?: AbortSignal;
 }): Promise<{ description: ImageDescription; usage: CompletionUsage | null }> {
   const model = toRuntimeModel(input.config);
@@ -160,6 +161,7 @@ async function describeImage(input: {
     }],
   }, {
     apiKey: registry.getApiKey(model.provider),
+    sessionId: input.sessionId,
     headers: model.headers,
     maxTokens: 1_200,
     reasoning,
@@ -199,6 +201,7 @@ export async function prepareCompletionImagesForModel(input: {
   messages: CompletionMessage[];
   targetModel: RuntimeLlmModel;
   config: ImageToTextConfig | null;
+  sessionId: string;
   signal?: AbortSignal;
 }): Promise<PreparedImageToTextMessages> {
   const messages = structuredClone(input.messages);
@@ -227,7 +230,12 @@ export async function prepareCompletionImagesForModel(input: {
     if (!image) return;
     const startedAt = Date.now();
     try {
-      const result = await describeImage({ config: input.config as ImageToTextConfig, image, signal: input.signal });
+      const result = await describeImage({
+        config: input.config as ImageToTextConfig,
+        image,
+        sessionId: input.sessionId,
+        signal: input.signal,
+      });
       const message = messages[item.messageIndex];
       if (message) message.content[item.blockIndex] = withDescription(item.block, result.description);
       calls.push({

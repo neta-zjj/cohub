@@ -162,8 +162,18 @@ test("claude-code profile requests identify as Claude Code with API key auth", a
   const [identity, prompt] = systemTexts(request);
   assert.equal(identity, CLAUDE_CODE_SYSTEM_IDENTITY);
   assert.ok(prompt && prompt.length > 0, "Cohub system prompt follows the identity");
-  assert.equal(request.headers.get("user-agent"), `claude-cli/${CLAUDE_CODE_VERSION}`);
+  assert.equal(request.headers.get("user-agent"), `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`);
   assert.equal(request.headers.get("x-app"), "cli");
+  const metadata = request.body.metadata as { user_id?: string } | undefined;
+  assert.ok(metadata?.user_id);
+  const userId = JSON.parse(metadata.user_id) as {
+    device_id: string;
+    account_uuid: string;
+    session_id: string;
+  };
+  assert.match(userId.device_id, /^[0-9a-f]{64}$/);
+  assert.equal(userId.account_uuid, "");
+  assert.equal(userId.session_id, "session-claude-opus-5-5");
   assert.equal(request.headers.get("x-api-key"), "test-key");
   assert.equal(request.headers.get("authorization"), null);
   const betas = request.headers.get("anthropic-beta")?.split(",") ?? [];
