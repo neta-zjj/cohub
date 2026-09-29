@@ -6,6 +6,7 @@ import type {
   BoardSummary,
 } from "@neta-art/cohub";
 import type { BoardExportRegion } from "@neta-art/cohub/board";
+import type { BoardHeadlessExportFormat } from "@neta-art/cohub/board/headless";
 import type { Command } from "commander";
 import {
   BOARD_CREATE_INPUT_MAX_BYTES,
@@ -14,7 +15,6 @@ import {
   resolveBoardId,
   writeBoardOutput,
 } from "../board-command-support.js";
-import { BOARD_EXPORT_FORMATS, formatFromPath, runBoardExport } from "../board-export.js";
 import { registerBoardDomainCommands } from "./board-domain.js";
 import { createClient, createRealtimeClient } from "../client.js";
 import { error, handleHttp, json as outJson, jsonRequested, ok, table } from "../output.js";
@@ -162,13 +162,23 @@ function parseExportRegion(options: ExportOptions): BoardExportRegion {
   return { kind: "all" };
 }
 
-function parseExportFormat(options: ExportOptions, outPath: string) {
+const BOARD_EXPORT_FORMATS: BoardHeadlessExportFormat[] = ["png", "jpeg", "webp"];
+
+/** Infer the output format from the file extension, defaulting to PNG. */
+function formatFromPath(path: string): BoardHeadlessExportFormat {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "jpeg";
+  if (lower.endsWith(".webp")) return "webp";
+  return "png";
+}
+
+function parseExportFormat(options: ExportOptions, outPath: string): BoardHeadlessExportFormat {
   if (!options.format) return formatFromPath(outPath);
   const format = options.format.toLowerCase();
-  if (!BOARD_EXPORT_FORMATS.includes(format as (typeof BOARD_EXPORT_FORMATS)[number])) {
+  if (!BOARD_EXPORT_FORMATS.includes(format as BoardHeadlessExportFormat)) {
     throw new Error(`Unknown format "${options.format}"; use ${BOARD_EXPORT_FORMATS.join(", ")}`);
   }
-  return format as (typeof BOARD_EXPORT_FORMATS)[number];
+  return format as BoardHeadlessExportFormat;
 }
 
 function parseColorMode(value: string | undefined): "dark" | "light" {
@@ -202,6 +212,7 @@ function registerExportCommand(boards: Command): void {
       try {
         const out = options.out;
         if (!out) throw new Error("--out is required");
+        const { runBoardExport } = await import("../board-export.js");
         const result = await runBoardExport({
           spaceId: await resolveSpace(boards),
           target: board,

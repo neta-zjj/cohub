@@ -11,66 +11,53 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { BoardDocument, BoardExportRegion, BoardItem } from "@neta-art/cohub/board";
+import type {
+  BoardHeadlessExportFormat,
+  BoardHeadlessFont,
+  BoardHeadlessRenderer,
+  BoardHeadlessTexture,
+} from "@neta-art/cohub/board/headless";
 import {
   boardAuthoringSnapshotToDocument,
   boardImageKeySource,
-  type BoardDocument,
-  type BoardExportRegion,
-  type BoardItem,
+  createBoardHeadlessRenderer,
+  exportBoardImageBytes,
   imageAssetKey,
   planBoardExport,
   selectBoardExportAssets,
-} from "@neta-art/cohub/board";
-import {
-  type BoardHeadlessExportFormat,
-  type BoardHeadlessFont,
-  type BoardHeadlessRenderer,
-  type BoardHeadlessTexture,
-  createBoardHeadlessRenderer,
-  exportBoardImageBytes,
-} from "@neta-art/cohub/board/headless";
+} from "./board-kernel.js";
 import { resolveBoardId } from "./board-command-support.js";
+import { BOARD_EXPORT_FONTS, type BoardExportFont } from "./board-fonts.js";
 import { createClient } from "./client.js";
 import { downloadPublicImage } from "./safe-remote-image.js";
-
-export const BOARD_EXPORT_FORMATS: BoardHeadlessExportFormat[] = ["png", "jpeg", "webp"];
-
-/** Infer the output format from the file extension, defaulting to PNG. */
-export function formatFromPath(path: string): BoardHeadlessExportFormat {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "jpeg";
-  if (lower.endsWith(".webp")) return "webp";
-  return "png";
-}
 
 /**
  * Geist, as shipped to the browser.
  *
  * The board asks for the "Geist" family; registering the exact same font files
  * the web app loads is what makes CLI output match the editor rather than
- * substituting whatever sans-serif the host happens to have. Resolution is
- * best-effort: if the font package is not installed the export still succeeds,
- * falling back through the font stack.
+ * substituting whatever sans-serif the host happens to have. A source checkout
+ * falls back to the dev packages.
  */
 export function resolveBundledFonts(): BoardHeadlessFont[] {
   const require = createRequire(import.meta.url);
-  const fonts: BoardHeadlessFont[] = [];
-  const candidates: Array<{ pkg: string; file: string; family: string }> = [
-    { pkg: "@fontsource/geist", file: "geist-latin-500-normal.woff2", family: "Geist" },
-    { pkg: "@fontsource/geist", file: "geist-latin-400-normal.woff2", family: "Geist" },
-    { pkg: "@fontsource/geist", file: "geist-latin-600-normal.woff2", family: "Geist" },
-    { pkg: "@fontsource/geist-mono", file: "geist-mono-latin-400-normal.woff2", family: "Geist Mono" },
-  ];
-  for (const candidate of candidates) {
+  const bundled = fileURLToPath(new URL("./fonts/", import.meta.url));
+  const locate = ({ pkg, file }: BoardExportFont): string | null => {
+    const copied = join(bundled, file);
+    if (existsSync(copied)) return copied;
     try {
-      const root = dirname(require.resolve(`${candidate.pkg}/package.json`));
-      const path = join(root, "files", candidate.file);
-      if (existsSync(path)) fonts.push({ path, family: candidate.family });
+      const path = join(dirname(require.resolve(`${pkg}/package.json`)), "files", file);
+      return existsSync(path) ? path : null;
     } catch {
-      // Font package absent; the stack's system fallbacks cover it.
+      return null;
     }
-  }
-  return fonts;
+  };
+  return BOARD_EXPORT_FONTS.flatMap((font) => {
+    const path = locate(font);
+    return path ? [{ path, family: font.family }] : [];
+  });
 }
 
 export type BoardExportSource = {

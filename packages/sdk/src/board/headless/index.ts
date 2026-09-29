@@ -14,7 +14,23 @@
 
 import type { BoardDocument } from "@cohub/protocol/board-document";
 import { BOARD_TEXT_FONT_FAMILY } from "@cohub/protocol/board-constants";
-import type { Adapter, ICanvas, Renderer, Texture } from "pixi.js";
+import {
+  type Adapter,
+  CanvasGraphicsContextSystem,
+  CanvasGraphicsPipe,
+  CanvasRenderer,
+  CanvasRendererTextSystem,
+  CanvasTextPipe,
+  CanvasTextSystem,
+  DOMAdapter,
+  extensions,
+  GraphicsContextSystem,
+  GraphicsPipe,
+  type ICanvas,
+  ImageSource,
+  type Renderer,
+  Texture,
+} from "pixi.js";
 import { installBoardTextMeasurement } from "../render/text-measurement.js";
 import {
   type BoardExportOptions,
@@ -28,8 +44,26 @@ export type HeadlessCanvasModule = {
   GlobalFonts: {
     registerFromPath: (path: string, name?: string) => unknown;
     has: (name: string) => boolean;
+    setAlias?: (fontName: string, alias: string) => boolean;
   };
 };
+
+const SYSTEM_UI_FAMILIES = [
+  "Noto Sans",
+  "DejaVu Sans",
+  "Liberation Sans",
+  "FreeSans",
+  "Helvetica Neue",
+  "Arial",
+  "Segoe UI",
+];
+
+/** Skia only falls back through named families, so give `system-ui` a real one, as a browser would. */
+function aliasSystemUi(fonts: HeadlessCanvasModule["GlobalFonts"]): void {
+  if (!fonts.setAlias || fonts.has("system-ui")) return;
+  const family = SYSTEM_UI_FAMILIES.find((name) => fonts.has(name));
+  if (family) fonts.setAlias(family, "system-ui");
+}
 
 export type BoardHeadlessFont = {
   /** Absolute path to a font file (woff2, ttf and otf all work). */
@@ -135,21 +169,6 @@ export async function createBoardHeadlessRenderer(
   options: BoardHeadlessRendererOptions = {},
 ): Promise<BoardHeadlessRenderer> {
   const canvasModule = options.canvasModule ?? (await loadCanvasModule());
-  const {
-    CanvasGraphicsContextSystem,
-    CanvasGraphicsPipe,
-    CanvasRenderer,
-    CanvasRendererTextSystem,
-    CanvasTextPipe,
-    CanvasTextSystem,
-    DOMAdapter,
-    extensions,
-    GraphicsContextSystem,
-    GraphicsPipe,
-    ImageSource,
-    Texture,
-  } = await import("pixi.js");
-
   // Pixi's environment auto-detection would load its browser bundle here (its
   // test always passes), which registers DOM pipes and fails on `document`. So
   // `skipExtensionImports` is set below and the canvas-safe pipes for the shapes
@@ -169,6 +188,7 @@ export async function createBoardHeadlessRenderer(
   for (const font of options.fonts ?? []) {
     canvasModule.GlobalFonts.registerFromPath(font.path, font.family ?? BOARD_TEXT_FONT_FAMILY);
   }
+  aliasSystemUi(canvasModule.GlobalFonts);
 
   function createCanvas(width = 1, height = 1) {
     const canvas = canvasModule.createCanvas(
