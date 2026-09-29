@@ -4,6 +4,17 @@ All notable changes to Cohub are documented in this file.
 
 <!-- Generated from apps/web/src/lib/changelog/entries.json. Do not edit. -->
 
+## v2.60 — 2026-09-29
+
+- **Desktop open fail-fast**: `cohub desktop open` now fails fast when the desktop that started the chat is gone — the target tab accepts a command before running it, so one nobody accepts within 10 seconds (closed, asleep, or offline) settles as `no_active_client` instead of waiting out the timeout, and a tab that wakes later never opens it. A plain open waits up to 30 seconds by default while an App `--call` still waits up to 10 minutes; the SDK adds `desktop.accept()`, `defaultDesktopCommandTimeoutMs()`, and the accept/open timeout constants.
+- **Claude Code identity for proxied Claude requests**: the agent upgrades `@earendil-works/pi-ai` to 0.87.1 and adds a `requestProfile` that identifies Claude requests as Claude Code — the official CLI system identity, the Claude Code beta header, and API-key auth — with provider request-context tests pinning the exact payloads.
+- **Lighter, faster CLI**: the Board renderer and PixiJS are bundled into a lazily loaded `boards export` module and sharp loads only for image uploads, shrinking the install from about 156 MB to 70 MB and starting every command about 0.2 s faster. Self-update asks the registry first and reinstalls only for a newer release (recorded in `~/.cache/cohub-cli/self-update.json`) instead of reinstalling every 6 hours and briefly removing the `cohub` bin, and `boards export` renders with Geist like the web app, falling back to a host sans for glyphs Geist lacks.
+
+### Bug Fixes
+
+- **Agent thinking level survives compaction**: compaction no longer drops the resolved model and thinking level with the archived prefix — `resolveSessionSettings()` is shared by the load and rewrite paths and the rewritten file is rebuilt as one linear `parentId` chain, so a session keeps its model and level; a session with no recorded level restores it from the session file, then the user's latest explicit selection, then the model's lowest level, and writes it back so later loads and compactions carry it.
+- **Generation side panel shows media only**: `toGenerationTaskView()` projects media outputs only, so revised prompts and text-only refusals stay in the raw result instead of listing as text tiles; `GenerationOutputType` drops `"text"` and completed tasks without media are left out of the feed.
+
 ## v2.59 — 2026-09-25
 
 - **Apps platform**: trusted Apps published or installed in the Shell Space now receive Host consent and run without an authorization dialog, declared file handlers register in `.cohub/apps.json` with per-file windows and "Open with", and the new `cohub.app.runtime` protocol plus SDK `client.app.window`, `onBeforeClose`, `onDrop`, `onLaunch`, appearance sync, and locale wiring let Apps own their window, follow the host, and receive dropped or opened Cohub resources.
