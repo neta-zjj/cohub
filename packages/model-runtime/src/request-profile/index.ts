@@ -1,6 +1,13 @@
-import type { Api, Model, ProviderStreams, StreamOptions } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessageEventStream,
+  Model,
+  ProviderStreams,
+  StreamOptions,
+  TranscriptContext,
+} from "@earendil-works/pi-ai";
 import type { ModelRequestProfile } from "@cohub/infra/config-runtime/models";
-import { claudeCodeOverrides } from "./claude-code.js";
+import { claudeCodeOverrides, restoreClaudeCodeToolNames } from "./claude-code.js";
 import { codexOverrides } from "./codex.js";
 
 export type ProfiledModel = Model<Api> & { requestProfile?: ModelRequestProfile };
@@ -16,9 +23,20 @@ export type RequestProfileOverrides = Pick<StreamOptions, "headers" | "onPayload
 /** Makes a request look like the client a model's upstream expects. Explicitly configured headers always win. */
 export type RequestProfile = (model: Model<Api>, options: ProfileStreamOptions) => RequestProfileOverrides;
 
+/** Maps what a profile's upstream returns back onto what Cohub declared. */
+export type ResponseProfile = (
+  model: Model<Api>,
+  context: TranscriptContext,
+  stream: AssistantMessageEventStream,
+) => AssistantMessageEventStream;
+
 const PROFILES: Record<ModelRequestProfile, RequestProfile> = {
   codex: codexOverrides,
   "claude-code": claudeCodeOverrides,
+};
+
+const RESPONSE_PROFILES: Partial<Record<ModelRequestProfile, ResponseProfile>> = {
+  "claude-code": restoreClaudeCodeToolNames,
 };
 
 export function applyRequestProfile<T extends ProfileStreamOptions>(
@@ -31,10 +49,22 @@ export function applyRequestProfile<T extends ProfileStreamOptions>(
   return { ...streamOptions, ...overrides } as ReturnType<typeof applyRequestProfile<T>>;
 }
 
+export function applyResponseProfile(
+  model: Model<Api>,
+  context: TranscriptContext,
+  stream: AssistantMessageEventStream,
+): AssistantMessageEventStream {
+  const name = (model as ProfiledModel).requestProfile;
+  const profile = name ? RESPONSE_PROFILES[name] : undefined;
+  return profile ? profile(model, context, stream) : stream;
+}
+
 export function withRequestProfiles(streams: ProviderStreams): ProviderStreams {
   return {
     ...streams,
-    stream: (model, context, options) => streams.stream(model, context, applyRequestProfile(model, options)),
-    streamSimple: (model, context, options) => streams.streamSimple(model, context, applyRequestProfile(model, options)),
+    stream: (model, context, options) =>
+      applyResponseProfile(model, context, streams.stream(model, context, applyRequestProfile(model, options))),
+    streamSimple: (model, context, options) =>
+      applyResponseProfile(model, context, streams.streamSimple(model, context, applyRequestProfile(model, options))),
   };
 }
