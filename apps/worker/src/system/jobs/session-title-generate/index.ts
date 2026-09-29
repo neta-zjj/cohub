@@ -75,7 +75,11 @@ function extractAssistantText(content: unknown): string {
   }).join("").trim();
 }
 
-async function completeTask(task: ModelTaskConfig, content: Array<{ type: "text"; text: string } | ImageContent>) {
+async function completeTask(
+  task: ModelTaskConfig,
+  content: Array<{ type: "text"; text: string } | ImageContent>,
+  sessionId: string,
+) {
   const model = toRuntimeModel(task.model);
   const registry = createTaskRegistry(task, model);
   const models = createModelsFromRegistry(registry, model);
@@ -84,6 +88,7 @@ async function completeTask(task: ModelTaskConfig, content: Array<{ type: "text"
     messages: [{ role: "user", content, timestamp: Date.now() }],
   }, {
     apiKey: registry.getApiKey(model.provider),
+    sessionId,
     headers: model.headers,
     maxTokens: 256,
     timeoutMs: 30_000,
@@ -101,6 +106,7 @@ async function generateTitle(input: {
   task: ModelTaskConfig;
   imageToText?: ModelTaskConfig;
   content: ContentBlock[];
+  sessionId: string;
 }) {
   const titleModel = toRuntimeModel(input.task.model);
   const supportsImages = titleModel.input.includes("image");
@@ -114,13 +120,13 @@ async function generateTitle(input: {
       const description = await completeTask(input.imageToText, [
         { type: "text", text: "Describe the images." },
         ...images,
-      ]);
+      ], input.sessionId);
       content.push({ type: "text", text: description.text });
       imageUsage = description.usage;
     }
   }
   if (content.length === 0) return null;
-  const title = await completeTask(input.task, content);
+  const title = await completeTask(input.task, content, input.sessionId);
   return {
     rawOutput: title.text,
     title: normalizeSessionTitle(title.text),
@@ -150,6 +156,7 @@ export async function runSessionTitleGenerateJob(data: SessionTitleGenerateJobDa
     task: titleTask,
     imageToText: config.imageToText,
     content: context.message.content as ContentBlock[],
+    sessionId: data.sessionId,
   });
   if (!generated?.title) return { ok: true, skipped: "empty_content" };
 

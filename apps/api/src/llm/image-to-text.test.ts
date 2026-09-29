@@ -48,7 +48,7 @@ function messagesWithStoredDescription() {
 test("text-only completion reuses stored descriptions without changing canonical images", async () => {
   const messages = messagesWithStoredDescription();
   const original = structuredClone(messages);
-  const prepared = await prepareCompletionImagesForModel({ messages, targetModel: textModel, config });
+  const prepared = await prepareCompletionImagesForModel({ messages, targetModel: textModel, config, sessionId: "completion-1" });
 
   assert.deepEqual(messages, original);
   assert.equal(prepared.calls.length, 0);
@@ -60,7 +60,7 @@ test("text-only completion reuses stored descriptions without changing canonical
 
 test("vision completion stays on the original provider path", async () => {
   const messages = messagesWithStoredDescription();
-  const prepared = await prepareCompletionImagesForModel({ messages, targetModel: visionModel, config });
+  const prepared = await prepareCompletionImagesForModel({ messages, targetModel: visionModel, config, sessionId: "completion-1" });
   assert.deepEqual(prepared.messages, messages);
   assert.deepEqual(prepared.projectedMessages, messages);
   assert.notStrictEqual(prepared.messages, messages);

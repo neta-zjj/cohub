@@ -7,7 +7,7 @@
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.280",
+      "user-agent": "claude-cli/2.1.280 (external, cli)",
       "x-api-key": "sk-test",
       "x-app": "cli",
       "x-stainless-lang": "js",
@@ -112,6 +112,9 @@
       },
       "output_config": {
         "effort": "high"
+      },
+      "metadata": {
+        "user_id": "{\"device_id\":\"62d6ceb80cfdf7c45e008b93698a8238243694716afb8a03f62df12ef268a646\",\"account_uuid\":\"\",\"session_id\":\"session-1\"}"
       }
     }
   },

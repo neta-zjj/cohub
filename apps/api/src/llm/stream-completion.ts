@@ -230,6 +230,7 @@ export async function* streamCompletionEvents(input: RunCompletionInput): AsyncG
     messages: input.messages,
     targetModel: input.model,
     config: input.imageToTextConfig ?? null,
+    sessionId: input.completionId,
     signal: input.signal,
   });
   const { systemFromMessages, remaining } = extractSystemMessagesPrompt(prepared.projectedMessages);
@@ -261,6 +262,7 @@ export async function* streamCompletionEvents(input: RunCompletionInput): AsyncG
       messages: piMessages,
     }, {
       apiKey,
+      sessionId: input.completionId,
       headers: input.model.provider === "cohub"
         ? {
             ...(headers ?? {}),

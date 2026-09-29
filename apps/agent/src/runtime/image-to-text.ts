@@ -111,6 +111,7 @@ function extractAssistantText(content: unknown): string {
 async function describeImage(input: {
   config: ImageToTextConfig;
   image: ImageContent;
+  sessionId: string;
   signal?: AbortSignal;
 }): Promise<StoredImageDescription> {
   const model = toRuntimeModel(input.config);
@@ -128,6 +129,7 @@ async function describeImage(input: {
     }],
   }, {
     apiKey: registry.getApiKey(model.provider),
+    sessionId: input.sessionId,
     headers: model.headers,
     maxTokens: 1_200,
     reasoning,
@@ -317,7 +319,12 @@ export async function prepareAgentImagesForModel(input: {
     const startedAt = Date.now();
     let description: StoredImageDescription;
     try {
-      description = await describeImage({ config: input.config as ImageToTextConfig, image: image.image, signal: input.signal });
+      description = await describeImage({
+        config: input.config as ImageToTextConfig,
+        image: image.image,
+        sessionId: input.sessionId,
+        signal: input.signal,
+      });
     } catch (error) {
       calls.push({
         sourceKey: image.sourceKey,
