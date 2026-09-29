@@ -214,6 +214,8 @@
       "authorization": "Bearer sk-test",
       "content-type": "application/json",
       "originator": "codex_cli_rs",
+      "session-id": "session-1",
+      "thread-id": "session-1",
       "user-agent": "codex_cli_rs/test",
       "x-client-request-id": "session-1",
       "x-stainless-lang": "js",

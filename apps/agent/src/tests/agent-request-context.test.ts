@@ -10,7 +10,7 @@ import {
   CLAUDE_CODE_BETA,
   CLAUDE_CODE_SYSTEM_IDENTITY,
   CLAUDE_CODE_VERSION,
-} from "@cohub/model-runtime/claude-code-identity";
+} from "@cohub/model-runtime/request-profile/claude-code";
 import { SessionManager } from "../runtime/local-session-manager.js";
 import { CohubModelRegistry } from "../runtime/model-registry.js";
 

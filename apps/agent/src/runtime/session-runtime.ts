@@ -12,7 +12,6 @@ import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
 import { getCurrentToolExecutionContext, runWithToolExecutionContext, type ToolExecutionContext } from "../tool-context.js";
 import { isToolFailureDetails } from "./tools/index.js";
-import { applyRequestProfile } from "./request-profile.js";
 import { mergeHeaders } from "@cohub/infra/config-runtime/models";
 import type { ImageToTextConfig } from "@cohub/infra/config-runtime/model-tasks";
 import { ModelUnavailableError } from "@cohub/core/sessions";
@@ -641,7 +640,7 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
           });
         }
         const models = createModelsFromRegistry(runtime.modelRegistry, model);
-        const requestOptions = applyRequestProfile(model as CohubModel, {
+        const requestOptions = {
           ...options,
           threadId: runtime.threadId,
           headers: model.provider === "cohub"
@@ -655,7 +654,7 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
                 }),
               })
             : streamHeaders,
-        });
+        };
         const stream = streamSimpleWithModels(models, model, requestContext, requestOptions);
 
         return wrapAssistantMessageStream(stream, {

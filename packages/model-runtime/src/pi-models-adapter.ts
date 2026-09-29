@@ -17,7 +17,7 @@ import { openAICodexResponsesApi } from "@earendil-works/pi-ai/api/openai-codex-
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { piMessagesApi } from "@earendil-works/pi-ai/api/pi-messages.lazy";
-import { withClaudeCodeIdentity } from "./claude-code-identity.js";
+import { withRequestProfiles } from "./request-profile/index.js";
 
 /** Auth + catalog surface shared by completion registries. */
 export type PiModelAuthSource = {
@@ -26,8 +26,8 @@ export type PiModelAuthSource = {
   getHeaders(provider: string, modelId?: string): Record<string, string> | undefined;
 };
 
-const API_STREAMS: Partial<Record<Api, ProviderStreams>> = {
-  "anthropic-messages": withClaudeCodeIdentity(anthropicMessagesApi()),
+const PI_API_STREAMS = {
+  "anthropic-messages": anthropicMessagesApi(),
   "azure-openai-responses": azureOpenAIResponsesApi(),
   "bedrock-converse-stream": bedrockConverseStreamApi(),
   "google-generative-ai": googleGenerativeAIApi(),
@@ -37,7 +37,11 @@ const API_STREAMS: Partial<Record<Api, ProviderStreams>> = {
   "openai-completions": openAICompletionsApi(),
   "openai-responses": openAIResponsesApi(),
   "pi-messages": piMessagesApi(),
-};
+} satisfies Partial<Record<Api, ProviderStreams>>;
+
+const API_STREAMS: Partial<Record<Api, ProviderStreams>> = Object.fromEntries(
+  Object.entries(PI_API_STREAMS).map(([api, streams]) => [api, withRequestProfiles(streams)]),
+);
 
 type ModelsCacheEntry = {
   signature: string;
@@ -156,7 +160,7 @@ export function streamSimpleWithModels(
   models: Models,
   model: Model<Api>,
   context: Parameters<Models["streamSimple"]>[1],
-  options?: SimpleStreamOptions,
+  options?: SimpleStreamOptions & { threadId?: string },
 ) {
   return models.streamSimple(model, context, options);
 }
