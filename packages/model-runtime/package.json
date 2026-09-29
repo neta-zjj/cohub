@@ -15,6 +15,10 @@
     "./pi-models-adapter": {
       "types": "./dist/pi-models-adapter.d.ts",
       "default": "./dist/pi-models-adapter.js"
+    },
+    "./claude-code-identity": {
+      "types": "./dist/claude-code-identity.d.ts",
+      "default": "./dist/claude-code-identity.js"
     }
   },
   "scripts": {
@@ -23,7 +27,7 @@
   },
   "dependencies": {
     "@cohub/protocol": "workspace:*",
-    "@earendil-works/pi-ai": "0.81.1"
+    "@earendil-works/pi-ai": "catalog:"
   },
   "devDependencies": {
     "@types/node": "26.4.0",

@@ -17,6 +17,7 @@ import { openAICodexResponsesApi } from "@earendil-works/pi-ai/api/openai-codex-
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { piMessagesApi } from "@earendil-works/pi-ai/api/pi-messages.lazy";
+import { withClaudeCodeIdentity } from "./claude-code-identity.js";
 
 /** Auth + catalog surface shared by completion registries. */
 export type PiModelAuthSource = {
@@ -26,7 +27,7 @@ export type PiModelAuthSource = {
 };
 
 const API_STREAMS: Partial<Record<Api, ProviderStreams>> = {
-  "anthropic-messages": anthropicMessagesApi(),
+  "anthropic-messages": withClaudeCodeIdentity(anthropicMessagesApi()),
   "azure-openai-responses": azureOpenAIResponsesApi(),
   "bedrock-converse-stream": bedrockConverseStreamApi(),
   "google-generative-ai": googleGenerativeAIApi(),

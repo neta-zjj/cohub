@@ -1,6 +1,6 @@
 import type { Agent, AgentEvent, AgentMessage, AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import { Agent as PiAgent } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TranscriptContext, isContextOverflow, isRetryableAssistantError, toToolDeclaration, type AssistantMessage } from "@earendil-works/pi-ai";
 import { context, trace, type Span } from "@opentelemetry/api";
 import { logger } from "../logger.js";
 import { sendOutput } from "../redis.js";
@@ -541,11 +541,39 @@ function attachImageToTextCalls(message: AssistantMessage, calls: Awaited<Return
   record.meta = { ...meta, imageToText: { schemaVersion: 1, calls } };
 }
 
-function createStreamFn(getRuntime: () => { modelRegistry: CohubModelRegistry; imageToTextConfig: ImageToTextConfig | null; sessionManager: SessionManager; userId: string | null; threadId: string }): StreamFn {
+type StreamRuntime = {
+  modelRegistry: CohubModelRegistry;
+  imageToTextConfig: ImageToTextConfig | null;
+  sessionManager: SessionManager;
+  userId: string | null;
+  threadId: string;
+  systemPrompt: string;
+  tools: ToolLike[];
+};
+
+/**
+ * Pi (0.86+) carries the system prompt and tool declarations as transcript
+ * system messages, while Cohub rebuilds the transcript from its session file
+ * (no system messages) on every round and after compaction. The prompt and
+ * tools are Cohub runtime state, so they are declared here, at the one exit
+ * every agent request passes, instead of being kept alive in the transcript.
+ * `toLlmMessages` already drops pi's transcript system messages; the filter
+ * guarantees the declared prompt and tools are the only ones sent.
+ */
+function toRequestContext(ctx: TranscriptContext, runtime: StreamRuntime): Context {
+  return {
+    systemPrompt: runtime.systemPrompt,
+    tools: runtime.tools.map(toToolDeclaration),
+    messages: ctx.messages.filter((message) => message.role !== "system"),
+  };
+}
+
+function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
   const tracer = getAgentTracer();
 
-  return async (model: Model<Api>, ctx: Context, options?: SimpleStreamOptions) => {
+  return async (model: Model<Api>, transcript: TranscriptContext, options?: SimpleStreamOptions) => {
     const runtime = getRuntime();
+    const ctx = toRequestContext(transcript, runtime);
     const toolCtx = getCurrentToolExecutionContext();
     const round = (toolCtx?.llmRound ?? 0) + 1;
     if (toolCtx) {
@@ -700,14 +728,17 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
   let runtimeModelRegistry = options.modelRegistry;
   let runtimeImageToTextConfig = options.imageToTextConfig ?? null;
   let runtimeTools = options.tools;
+  let runtimeSystemPrompt = "";
   let systemPromptStateKey: string | null = null;
   const sessionAffinity = options.sessionManager.getSessionAffinity();
-  const getRuntime = () => ({
+  const getRuntime = (): StreamRuntime => ({
     modelRegistry: runtimeModelRegistry,
     imageToTextConfig: runtimeImageToTextConfig,
     sessionManager: options.sessionManager,
     userId: runtimeUserId,
     threadId: sessionAffinity.threadId,
+    systemPrompt: runtimeSystemPrompt,
+    tools: runtimeTools,
   });
   const model = options.model ?? (sessionContext.model ? runtimeModelRegistry.find(sessionContext.model.provider, sessionContext.model.modelId) : undefined) ?? runtimeModelRegistry.getDefault();
   if (!model) {
@@ -741,12 +772,11 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
     });
   };
 
-  const systemPrompt = await buildSystemPromptForTools(runtimeTools);
+  runtimeSystemPrompt = await buildSystemPromptForTools(runtimeTools);
   systemPromptStateKey = systemPromptStateKeyFor(runtimeUserId, runtimeSpaceOwnerUserId, runtimeTools);
 
   const agent = new PiAgent({
     initialState: {
-      systemPrompt,
       model,
       thinkingLevel: initialThinkingLevel,
       tools: runtimeTools as never,
@@ -775,7 +805,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
     }
     const nextSystemPrompt = await buildSystemPromptForTools(tools);
     runtimeTools = tools;
-    agent.state.systemPrompt = nextSystemPrompt;
+    runtimeSystemPrompt = nextSystemPrompt;
     systemPromptStateKey = nextKey;
     agent.state.tools = tools as never;
   };
@@ -1000,7 +1030,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
 
       const nextKey = systemPromptStateKeyFor(nextUserId, nextSpaceOwnerUserId, runtimeTools);
       const nextSystemPrompt = systemPromptStateKey === nextKey
-        ? agent.state.systemPrompt
+        ? runtimeSystemPrompt
         : await buildSystemPromptForTools(runtimeTools, { userId: nextUserId, spaceOwnerUserId: nextSpaceOwnerUserId });
       const shouldChangeModel = target.provider !== currentModel.provider || target.id !== currentModel.id;
       const hasRequestedThinkingLevel = input.requestedThinkingLevel !== undefined && input.requestedThinkingLevel !== null;
@@ -1014,7 +1044,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
       runtimeSpaceOwnerUserId = nextSpaceOwnerUserId;
       runtimeModelRegistry = input.modelRegistry;
       runtimeImageToTextConfig = input.imageToTextConfig ?? null;
-      agent.state.systemPrompt = nextSystemPrompt;
+      runtimeSystemPrompt = nextSystemPrompt;
       systemPromptStateKey = nextKey;
       const shouldChangeThinkingLevel = nextThinkingLevel !== agent.state.thinkingLevel;
       if (shouldChangeModel) {

@@ -33,7 +33,7 @@
     "@cohub/protocol": "workspace:*",
     "@cohub/sandbox-client": "workspace:*",
     "@cohub/sandbox-controller": "workspace:*",
-    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-ai": "catalog:",
     "@hono/node-server": "2.1.1",
     "@hono/otel": "^1.1.2",
     "@kubernetes/client-node": "^2.0.0",
