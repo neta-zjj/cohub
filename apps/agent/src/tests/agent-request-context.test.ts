@@ -27,7 +27,7 @@ const config: ModelsConfig = {
       api: "anthropic-messages",
       baseUrl: "https://anthropic.test",
       apiKey: "TEST_ANTHROPIC_API_KEY",
-      models: [{ id: "claude-opus-5-5", reasoning: true }, { id: "glm-5", reasoning: true }],
+      models: [{ id: "claude-opus-5-5", reasoning: true, requestProfile: "claude-code" }, { id: "claude-sonnet-5", reasoning: true }],
     },
   },
 };
@@ -151,7 +151,7 @@ test("every round of a tool loop carries the system prompt and current tools", a
   session.dispose();
 });
 
-test("Claude models identify as Claude Code with API key auth", async () => {
+test("claude-code profile requests identify as Claude Code with API key auth", async () => {
   requests.length = 0;
   const { session } = await createSession("claude-opus-5-5");
   await session.prompt("hello");
@@ -173,9 +173,9 @@ test("Claude models identify as Claude Code with API key auth", async () => {
   assert.deepEqual(toolNames(request), ["echo"]);
 });
 
-test("non-Claude models keep their own identity", async () => {
+test("models without the claude-code profile keep their own identity, whatever their id", async () => {
   requests.length = 0;
-  const { session } = await createSession("glm-5");
+  const { session } = await createSession("claude-sonnet-5");
   await session.prompt("hello");
   session.dispose();
 

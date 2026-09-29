@@ -17,7 +17,7 @@ process.env.TEST_SNAPSHOT_API_KEY = "sk-test";
 const provider = { baseUrl: "https://upstream.test/v1", apiKey: "TEST_SNAPSHOT_API_KEY" };
 const config: ModelsConfig = {
   providers: {
-    anthropic: { ...provider, api: "anthropic-messages", models: [{ id: "claude-opus-5-5", reasoning: true, compat: { forceAdaptiveThinking: true } }] },
+    anthropic: { ...provider, api: "anthropic-messages", requestProfile: "claude-code", models: [{ id: "claude-opus-5-5", reasoning: true, compat: { forceAdaptiveThinking: true } }] },
     completions: {
       ...provider,
       api: "openai-completions",

@@ -3,25 +3,31 @@ import test from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   CLAUDE_CODE_BETA,
+  CLAUDE_CODE_REQUEST_PROFILE,
   CLAUDE_CODE_SYSTEM_IDENTITY,
   CLAUDE_CODE_VERSION,
   claudeCodeOverrides,
   withClaudeCodePayload,
 } from "@cohub/model-runtime/claude-code-identity";
 
-function model(id: string, headers?: Record<string, string>): Model<Api> {
+function unprofiledModel(id: string, headers?: Record<string, string>): Model<Api> {
   return { id, provider: "cohub", api: "anthropic-messages", headers } as Model<Api>;
+}
+
+function model(id: string, headers?: Record<string, string>): Model<Api> & { requestProfile: string } {
+  return { ...unprofiledModel(id, headers), requestProfile: CLAUDE_CODE_REQUEST_PROFILE };
 }
 
 const payload = { system: [{ type: "text", text: "cohub prompt" }], betas: ["fine-grained-tool-streaming-2025-05-14"] };
 
-test("Claude models get Claude Code identity headers", () => {
+test("claude-code profile models get Claude Code identity headers", () => {
   const overrides = claudeCodeOverrides(model("claude-opus-5-5"), { headers: { "x-trace": "1" } });
   assert.deepEqual(overrides.headers, { "User-Agent": `claude-cli/${CLAUDE_CODE_VERSION}`, "x-app": "cli", "x-trace": "1" });
 });
 
-test("non-Claude models are untouched", () => {
-  assert.deepEqual(claudeCodeOverrides(model("glm-5"), { headers: { "x-trace": "1" } }), {});
+test("models without the claude-code profile are untouched, whatever their id", () => {
+  assert.deepEqual(claudeCodeOverrides(unprofiledModel("claude-opus-5-5"), { headers: { "x-trace": "1" } }), {});
+  assert.deepEqual(claudeCodeOverrides(unprofiledModel("glm-5"), undefined), {});
 });
 
 test("configured headers win over the identity", () => {

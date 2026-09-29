@@ -33,7 +33,7 @@ function finiteOrZero(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function toRuntimeModel(config: ModelTaskModelConfig): Model<Api> {
+function toRuntimeModel(config: ModelTaskModelConfig): Model<Api> & Pick<ModelTaskModelConfig, "requestProfile"> {
   return {
     id: config.id,
     name: config.name?.trim() || config.id,
@@ -52,6 +52,7 @@ function toRuntimeModel(config: ModelTaskModelConfig): Model<Api> {
     maxTokens: config.maxTokens ?? 16_384,
     headers: config.headers,
     compat: config.compat as Model<Api>["compat"],
+    requestProfile: config.requestProfile,
   };
 }
 

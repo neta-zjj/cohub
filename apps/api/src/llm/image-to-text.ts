@@ -33,7 +33,7 @@ function finiteOrZero(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function toRuntimeModel(config: ImageToTextConfig): Model<Api> {
+function toRuntimeModel(config: ImageToTextConfig): Model<Api> & Pick<ImageToTextConfig["model"], "requestProfile"> {
   const model = config.model;
   return {
     id: model.id,
@@ -53,6 +53,7 @@ function toRuntimeModel(config: ImageToTextConfig): Model<Api> {
     maxTokens: model.maxTokens ?? 2_048,
     headers: model.headers,
     compat: model.compat as Model<Api>["compat"],
+    requestProfile: model.requestProfile,
   };
 }
 

@@ -13,7 +13,7 @@ export type ModelCost = {
 };
 
 export type ModelThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type ModelRequestProfile = "codex";
+export type ModelRequestProfile = "codex" | "claude-code";
 export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
 
 export type ModelDef = {
@@ -52,6 +52,7 @@ export type ModelsConfig = {
 };
 
 const THINKING_LEVELS = new Set<ModelThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const REQUEST_PROFILES = new Set<ModelRequestProfile>(["codex", "claude-code"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -113,7 +114,7 @@ export function isModelDefinition(value: unknown, options: { partial?: boolean }
     && (value.cost === undefined || isModelCost(value.cost, partial))
     && (value.contextWindow === undefined || isPositiveInteger(value.contextWindow))
     && (value.maxTokens === undefined || isPositiveInteger(value.maxTokens))
-    && (value.requestProfile === undefined || value.requestProfile === "codex")
+    && (value.requestProfile === undefined || REQUEST_PROFILES.has(value.requestProfile as ModelRequestProfile))
     && (value.headers === undefined || isStringRecord(value.headers))
     && (value.compat === undefined || isRecord(value.compat));
 }
@@ -123,7 +124,7 @@ function isProviderConfig(value: unknown): value is ProviderConfig {
   return (value.baseUrl === undefined || isHttpUrl(value.baseUrl))
     && (value.apiKey === undefined || isNonEmptyString(value.apiKey))
     && (value.api === undefined || isNonEmptyString(value.api))
-    && (value.requestProfile === undefined || value.requestProfile === "codex")
+    && (value.requestProfile === undefined || REQUEST_PROFILES.has(value.requestProfile as ModelRequestProfile))
     && (value.headers === undefined || isStringRecord(value.headers))
     && (value.compat === undefined || isRecord(value.compat))
     && (value.models === undefined || (Array.isArray(value.models) && value.models.every((model) => isModelDefinition(model))));
