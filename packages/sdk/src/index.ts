@@ -251,11 +251,14 @@ export type {
   AppVersionSource,
 } from "@cohub/protocol";
 export {
+  defaultDesktopCommandTimeoutMs,
   isTerminalDesktopCommandStatus,
   isDesktopCallMethod,
   parseDesktopCommand,
   resolveOpenSurface,
+  DESKTOP_COMMAND_ACCEPT_TIMEOUT_MS,
   DESKTOP_COMMAND_DEFAULT_TIMEOUT_MS,
+  DESKTOP_COMMAND_OPEN_TIMEOUT_MS,
   DESKTOP_COMMAND_MAX_TIMEOUT_MS,
   DESKTOP_COMMAND_PAYLOAD_MAX_BYTES,
   DESKTOP_COMMAND_PENDING_TTL_SECONDS,

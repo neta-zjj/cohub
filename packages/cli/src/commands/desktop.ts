@@ -7,8 +7,10 @@ import {
   type DesktopSurface,
   parseAppRef,
   resolveOpenSurface,
+  DESKTOP_COMMAND_ACCEPT_TIMEOUT_MS,
   DESKTOP_COMMAND_DEFAULT_TIMEOUT_MS,
   DESKTOP_COMMAND_MAX_TIMEOUT_MS,
+  DESKTOP_COMMAND_OPEN_TIMEOUT_MS,
 } from "@neta-art/cohub";
 import type { Command } from "commander";
 import { createClient } from "../client.js";
@@ -109,8 +111,8 @@ function readCallInput(opts: OpenOptions): unknown {
   }
 }
 
-function parseTimeout(value: string | undefined): number {
-  if (!value) return DESKTOP_COMMAND_DEFAULT_TIMEOUT_MS;
+function parseTimeout(value: string | undefined): number | undefined {
+  if (!value) return undefined;
   const parsed = Math.floor(Number(value));
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > DESKTOP_COMMAND_MAX_TIMEOUT_MS) {
     return error(
@@ -257,6 +259,8 @@ Notes:
     scheme is still accepted.
   - A plain target checks the explicit Space or current directory Runtime binding for a file before resolving an app; it does not fall back to Home.
   - Opening a window is idempotent; repeating it re-activates the same tab.
+  - A desktop that does not respond within ${DESKTOP_COMMAND_ACCEPT_TIMEOUT_MS / 1_000} seconds (closed, asleep, or
+    offline) fails fast with no_active_client instead of waiting out the timeout.
   - --as picks the surface: window (a preview tab) or overlay (a transparent
     layer above the workspace). Without it, an App published with
     <meta name="cohub:surface" content="overlay"> opens as an overlay.
@@ -277,7 +281,7 @@ function registerOpen(parent: Command, deprecated: boolean): void {
     .option("--as <surface>", "Surface role for app targets: window (default) or overlay")
     .option(
       "--timeout-ms <ms>",
-      `How long to wait for the desktop (default: ${DESKTOP_COMMAND_DEFAULT_TIMEOUT_MS}; max: ${DESKTOP_COMMAND_MAX_TIMEOUT_MS})`,
+      `How long to wait for the desktop (default: ${DESKTOP_COMMAND_OPEN_TIMEOUT_MS}, or ${DESKTOP_COMMAND_DEFAULT_TIMEOUT_MS} with --call; max: ${DESKTOP_COMMAND_MAX_TIMEOUT_MS})`,
     )
     .option("--json", "Output as JSON")
     .action(async (target: string, opts: OpenOptions, thisCommand: Command) => {
