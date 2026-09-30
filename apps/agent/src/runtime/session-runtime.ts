@@ -46,7 +46,7 @@ export type CohubAgentSession = {
   setModel(model: Model<Api>): Promise<void>;
   configureRuntimeIdentity(input: { userId?: string | null; spaceOwnerUserId?: string | null; modelRegistry: CohubModelRegistry; imageToTextConfig?: ImageToTextConfig | null; requestedModel?: { provider: string; id: string }; requestedThinkingLevel?: string | null }): Promise<void>;
   configureTools(tools: ToolLike[]): Promise<void>;
-  reload(): Promise<void>;
+  reload(messages?: AgentMessage[]): Promise<void>;
   abort(): Promise<void>;
   dispose(): void;
   subscribe(listener: (event: CohubAgentSessionEvent) => void | Promise<void>): () => void;
@@ -1073,8 +1073,9 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
     async configureTools(tools) {
       await configureToolsState(tools);
     },
-    async reload() {
+    async reload(messages) {
       await configureToolsState(options.tools, { force: true });
+      agent.state.messages = messages ?? options.sessionManager.buildSessionContext().messages;
     },
     async abort() {
       retryCancelled = true;

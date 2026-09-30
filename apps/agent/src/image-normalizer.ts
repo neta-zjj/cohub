@@ -54,6 +54,8 @@ export async function normalizeAgentImage(input: NormalizeImageInput): Promise<N
     const height = metadata.height ?? 0;
     if (!width || !height) return null;
     const maxEdge = Math.min(input.maxEdge ?? AGENT_IMAGE_MAX_EDGE, AGENT_IMAGE_MAX_EDGE);
+    const maxBytes = input.maxBytes ?? AGENT_IMAGE_MAX_OUTPUT_BYTES;
+    const outputMaxBytes = Math.min(maxBytes, AGENT_IMAGE_MAX_OUTPUT_BYTES);
     const originalMimeType = IMAGE_MIME_TYPES[metadata.format ?? ""];
     const originalMeta = {
       originalMimeType: input.mimeType ?? null, originalSource: input.originalSource ?? null,
@@ -61,30 +63,39 @@ export async function normalizeAgentImage(input: NormalizeImageInput): Promise<N
       originalWidth: width, originalHeight: height,
       originalSha256: createHash("sha256").update(input.data).digest("hex"),
     };
-    if (originalMimeType && width <= maxEdge && height <= maxEdge && input.data.byteLength <= (input.maxBytes ?? AGENT_IMAGE_MAX_OUTPUT_BYTES)) {
+    if (originalMimeType && width <= maxEdge && height <= maxEdge && input.data.byteLength <= maxBytes) {
+      // Header metadata alone also accepts truncated images. Decode all frames without re-encoding.
+      await sharp(input.data, { animated: true, limitInputPixels: AGENT_IMAGE_MAX_INPUT_PIXELS }).stats();
       return { data: input.data, mimeType: originalMimeType, meta: originalMeta };
     }
+    let resizeEdge = Math.min(maxEdge, Math.max(width, height));
     const pipeline = () => sharp(input.data, { animated: false, limitInputPixels: AGENT_IMAGE_MAX_INPUT_PIXELS })
-      .rotate().resize(maxEdge, maxEdge, { fit: "inside", withoutEnlargement: true });
+      .rotate().resize(resizeEdge, resizeEdge, { fit: "inside", withoutEnlargement: true });
     let mimeType = metadata.format === "jpeg" ? "image/jpeg" : "image/png";
     let output = mimeType === "image/jpeg"
       ? await pipeline().jpeg({ quality: 86 }).toBuffer({ resolveWithObject: true })
       : await pipeline().png().toBuffer({ resolveWithObject: true });
-    if (output.data.byteLength > AGENT_IMAGE_MAX_OUTPUT_BYTES && metadata.hasAlpha) {
+    if (output.data.byteLength > outputMaxBytes && metadata.hasAlpha) {
       output = await pipeline().png({ palette: true, quality: 100 }).toBuffer({ resolveWithObject: true });
     }
-    if (output.data.byteLength > AGENT_IMAGE_MAX_OUTPUT_BYTES && !metadata.hasAlpha) {
+    if (output.data.byteLength > outputMaxBytes && !metadata.hasAlpha) {
       mimeType = "image/jpeg";
       for (const quality of [86, 78, 70, 62]) {
         output = await pipeline().jpeg({ quality }).toBuffer({ resolveWithObject: true });
-        if (output.data.byteLength <= AGENT_IMAGE_MAX_OUTPUT_BYTES) break;
+        if (output.data.byteLength <= outputMaxBytes) break;
       }
     }
-    if (output.data.byteLength > AGENT_IMAGE_MAX_OUTPUT_BYTES) return null;
+    while (output.data.byteLength > outputMaxBytes && resizeEdge > 1) {
+      resizeEdge = Math.max(1, Math.floor(resizeEdge * Math.sqrt(outputMaxBytes / output.data.byteLength) * 0.95));
+      output = mimeType === "image/jpeg"
+        ? await pipeline().jpeg({ quality: 62 }).toBuffer({ resolveWithObject: true })
+        : await pipeline().png({ palette: true, quality: 100 }).toBuffer({ resolveWithObject: true });
+    }
+    if (output.data.byteLength > outputMaxBytes) return null;
     return { data: output.data, mimeType, meta: {
       ...originalMeta, imageNormalized: true, imageFormat: output.info.format,
       normalizedSizeBytes: output.data.byteLength, normalizedWidth: output.info.width,
-      normalizedHeight: output.info.height, normalizedMaxEdge: maxEdge, normalizedMaxBytes: AGENT_IMAGE_MAX_OUTPUT_BYTES,
+      normalizedHeight: output.info.height, normalizedMaxEdge: resizeEdge, normalizedMaxBytes: outputMaxBytes,
     } };
   } catch (error) {
     logger.warn(`[AgentImage] failed to normalize image source=${input.sourceKind} label=${input.label ?? "unknown"}:`, error);

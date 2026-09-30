@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import type { ContentBlock } from "@cohub/protocol/core";
 import { getRemoteImageUrl } from "@cohub/model-runtime/image-content";
-import { AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES, AGENT_IMAGE_MAX_OUTPUT_BYTES, normalizeAgentToolImageContent, normalizeImageContentBlock } from "../image-normalizer.js";
+import { AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES, AGENT_IMAGE_MAX_OUTPUT_BYTES, normalizeAgentImage, normalizeAgentToolImageContent, normalizeImageContentBlock } from "../image-normalizer.js";
 
 const sampleUrl = "https://public.cohub.run/spaces/x/chat/a.png";
 const resizedUrl = "https://public.cohub.run/chat-attachments/resized.png";
@@ -163,4 +164,45 @@ test("cancellation during upload propagates without persisting omission text", a
     readUrlImage: async () => ({ data, mimeType: "image/png" }),
     writeImage: async () => { controller.abort(reason); throw reason; },
   }), (error) => error === reason);
+});
+
+
+test("metadata-readable truncated PNGs are omitted before URL or tool transport", async () => {
+  const original = await sharp(randomBytes(128 * 128 * 3), { raw: { width: 128, height: 128, channels: 3 } }).png().toBuffer();
+  const damaged = original.subarray(0, Math.floor(original.length / 2));
+  assert.equal((await sharp(damaged).metadata()).width, 128);
+  await assert.rejects(sharp(damaged).raw().toBuffer());
+  assert.equal(await normalizeAgentImage({ data: damaged, mimeType: "image/png", sourceKind: "public_asset" }), null);
+  const options = {
+    readUrlImage: async () => ({ data: damaged, mimeType: "image/png" }),
+    writeImage: async () => { throw new Error("Damaged images must never be uploaded"); },
+  };
+  const block = await normalizeImageContentBlock(urlBlock(), options);
+  assert.equal(block.type, "text");
+  assert.equal(block._meta?.reason, "decode_failed");
+  assert.equal((await normalizeAgentToolImageContent({ data: damaged, mimeType: "image/png" }, options)).type, "text");
+});
+
+test("valid original formats remain byte-identical after full decode validation", async () => {
+  const input = sharp(await png(64, 48));
+  for (const data of [await input.clone().png().toBuffer(), await input.clone().jpeg().toBuffer(), await input.clone().gif().toBuffer(), await input.clone().webp().toBuffer()]) {
+    const result = await normalizeAgentImage({ data, sourceKind: "public_asset" });
+    assert(result);
+    assert.equal(result.data, data);
+  }
+});
+
+test("stricter byte limits also constrain encoded transparent derivatives", async () => {
+  const data = await sharp(randomBytes(128 * 128 * 4), { raw: { width: 128, height: 128, channels: 4 } }).png().toBuffer();
+  const maxBytes = 5_000;
+  assert(data.length > maxBytes);
+  const result = await normalizeAgentImage({ data, sourceKind: "public_asset", maxBytes });
+  assert(result);
+  assert(result.data.length <= maxBytes);
+  assert.equal(result.meta.normalizedMaxBytes, maxBytes);
+  const metadata = await sharp(result.data).metadata();
+  assert.equal(metadata.hasAlpha, true);
+  assert(metadata.width && metadata.width < 128);
+  assert(metadata.height && metadata.height < 128);
+  await sharp(result.data).raw().toBuffer();
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import { getRemoteImageUrl, restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
@@ -226,4 +227,37 @@ test("cancellation after a reader returns prevents normalization and caching", a
   let reads = 0;
   await prepareRemoteImagesForModel(context, modelFor("google-generative-ai"), { cacheKey, read: async () => { reads++; return null; } });
   assert.equal(reads, 1);
+});
+
+
+test("Bedrock caps image bytes after provider switching and never reuses oversized Gemini cache entries", async () => {
+  const data = await sharp(randomBytes(1150 * 1150 * 3), { raw: { width: 1150, height: 1150, channels: 3 } }).png().toBuffer();
+  assert(data.length > 3_750_000 && data.length < 4 * 1024 * 1024);
+  const input: Context = { messages: [{ role: "user", content: [marker], timestamp: 0 }] };
+  const original = structuredClone(input);
+  const cacheKey = {};
+  let reads = 0;
+  const options = { cacheKey, read: async () => { reads++; return { data, mimeType: "image/png" }; } };
+  const google = await prepareRemoteImagesForModel(input, modelFor("google-generative-ai"), options);
+  const googleContent = google.messages[0]?.content;
+  assert(Array.isArray(googleContent) && googleContent[0]?.type === "image");
+  assert.deepEqual(Buffer.from(googleContent[0].data, "base64"), data);
+  const bedrockModel = modelFor("bedrock-converse-stream");
+  const prepared = await prepareRemoteImagesForModel(input, bedrockModel, options);
+  const content = prepared.messages[0]?.content;
+  assert(Array.isArray(content) && content[0]?.type === "image");
+  const bytes = Buffer.from(content[0].data, "base64");
+  assert(bytes.length <= 3_750_000);
+  await sharp(bytes).raw().toBuffer();
+  assert.deepEqual(await prepareRemoteImagesForModel(input, bedrockModel, options), prepared);
+  assert.equal(reads, 2, "Bedrock reuses only its own compliant request representation");
+  const payload = await capturePayload(bedrockModel, prepared);
+  assert(payload && typeof payload === "object" && "messages" in payload && Array.isArray(payload.messages));
+  const sent = payload.messages[0].content.find((part: { image?: unknown }) => part.image)?.image;
+  assert.deepEqual(Buffer.from(sent.source.bytes), bytes);
+  assert.equal(sent.format, content[0].mimeType.slice("image/".length));
+  assert.deepEqual(await prepareRemoteImagesForModel(input, modelFor("google-generative-ai"), options), google);
+  assert.equal(reads, 3);
+  assert.deepEqual(input, original);
+  clearRemoteImageCache(cacheKey);
 });
