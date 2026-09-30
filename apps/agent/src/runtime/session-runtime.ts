@@ -9,7 +9,7 @@ import type { CohubModel, CohubModelRegistry } from "./model-registry.js";
 import { normalizeThinkingLevel, resolveInitialThinkingLevel, resolveThinkingLevelForModel } from "./thinking-level.js";
 import { createModelsFromRegistry, streamSimpleWithModels } from "./pi-models-adapter.js";
 import { isUrlMarkerImage, restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
-import { prepareRemoteImagesForModel } from "./image-transport.js";
+import { clearRemoteImageCache, prepareRemoteImagesForModel } from "./image-transport.js";
 import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
 import { getCurrentToolExecutionContext, runWithToolExecutionContext, type ToolExecutionContext } from "../tool-context.js";
@@ -619,10 +619,11 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
           executionTurnId: toolCtx?.turnId,
           signal: options?.signal,
         }).catch((error) => {
+          options?.signal?.throwIfAborted();
           logger.warn("[ImageToText] context preparation failed; continuing with original images", error);
           return { context: ctx, calls: [] };
         });
-        const imageContext = await prepareRemoteImagesForModel(prepared.context, model, { cacheKey: runtime.sessionManager });
+        const imageContext = await prepareRemoteImagesForModel(prepared.context, model, { cacheKey: runtime.sessionManager, signal: options?.signal });
         const requestContext: Context = {
           ...imageContext,
           messages: applyLlmRequestSizeGuard(structuredClone(imageContext.messages)) as Context["messages"],
@@ -1090,6 +1091,7 @@ export async function createCohubAgentSession(options: CreateCohubAgentSessionOp
       retryAttempt = 0;
       retryInProgress = false;
       agent.abort();
+      clearRemoteImageCache(options.sessionManager);
     },
     subscribe(listener) {
       return agent.subscribe((event: AgentEvent) => {

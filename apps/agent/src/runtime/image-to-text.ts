@@ -128,7 +128,7 @@ async function describeImage(input: {
       content: [{ type: "text", text: "Describe this image." }, input.image],
       timestamp: Date.now(),
     }],
-  }, model);
+  }, model, { signal: input.signal });
   const content = context.messages[0]?.content;
   if (!Array.isArray(content) || !content.some((block) => block.type === "image")) {
     throw new Error("Image could not be loaded for description");
@@ -292,6 +292,7 @@ export async function prepareAgentImagesForModel(input: {
   executionTurnId?: string | null;
   signal?: AbortSignal;
 }): Promise<{ context: Context; calls: AgentImageToTextCall[] }> {
+  input.signal?.throwIfAborted();
   if (!input.config || input.targetModel.input.includes("image")) {
     return { context: input.context, calls: [] };
   }
@@ -321,12 +322,15 @@ export async function prepareAgentImagesForModel(input: {
   attemptedByTurn.set(input.sessionManager, { turnId: executionTurnId, sourceKeys: attempted });
   const pending = images.filter((image) => !descriptions.has(image.sourceKey) && !attempted.has(image.sourceKey));
   await mapWithConcurrency(pending, DESCRIPTION_CONCURRENCY, async (image) => {
+    input.signal?.throwIfAborted();
     attempted.add(image.sourceKey);
     const startedAt = Date.now();
     let description: StoredImageDescription;
     try {
       description = await describeImage({ config: input.config as ImageToTextConfig, image: image.image, signal: input.signal });
+      input.signal?.throwIfAborted();
     } catch (error) {
+      input.signal?.throwIfAborted();
       calls.push({
         sourceKey: image.sourceKey,
         provider: input.config?.model.provider ?? "unknown",
@@ -373,5 +377,6 @@ export async function prepareAgentImagesForModel(input: {
     });
   });
 
+  input.signal?.throwIfAborted();
   return { context: projectDescribedImages(input.context, images, descriptions), calls };
 }

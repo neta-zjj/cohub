@@ -4,7 +4,7 @@ import sharp from "sharp";
 import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import { restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
 import { createModelsFromRegistry } from "@cohub/model-runtime/pi-models-adapter";
-import { prepareRemoteImagesForModel } from "../runtime/image-transport.js";
+import { clearRemoteImageCache, prepareRemoteImagesForModel } from "../runtime/image-transport.js";
 
 const url = "https://public.cohub.test/chat-attachments/image.png";
 const marker = urlToPiImage(url);
@@ -116,4 +116,77 @@ test("byte-only downloads are bounded across history and preserve block order", 
   assert.equal(reads, 7);
   assert.equal(maximum, 4);
   assert.equal(result.messages[0]?.content.length, 7);
+});
+
+test("switching to URL or text-only models releases cached bytes before returning", async () => {
+  const data = await sharp({ create: { width: 8, height: 8, channels: 3, background: "red" } }).png().toBuffer();
+  const google = modelFor("google-generative-ai");
+  const textModel: Model<Api> = { ...google, input: ["text"] };
+  for (const target of [modelFor("anthropic-messages"), textModel]) {
+    const cacheKey = {};
+    let reads = 0;
+    const options = { cacheKey, read: async () => { reads++; return { data, mimeType: "image/png" }; } };
+    await prepareRemoteImagesForModel(context, google, options);
+    await prepareRemoteImagesForModel(context, target, options);
+    await prepareRemoteImagesForModel(context, google, options);
+    assert.equal(reads, 2, "switching back downloads the released image again");
+    clearRemoteImageCache(cacheKey);
+    await prepareRemoteImagesForModel(context, google, options);
+    assert.equal(reads, 3, "session disposal also releases the cache");
+    clearRemoteImageCache(cacheKey);
+  }
+});
+
+test("an already cancelled request neither downloads images nor returns a provider context", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Turn stopped");
+  controller.abort(reason);
+  for (const api of ["google-generative-ai", "anthropic-messages"] as const) {
+    let reads = 0;
+    await assert.rejects(prepareRemoteImagesForModel(context, modelFor(api), {
+      signal: controller.signal, read: async () => { reads++; return null; },
+    }), (error) => error === reason);
+    assert.equal(reads, 0);
+  }
+});
+
+test("cancellation aborts active downloads, stops queued images, and never caches failure placeholders", async () => {
+  const input: Context = { messages: [{ role: "user", content: Array.from({ length: 7 }, (_, index) => urlToPiImage(`${url}?i=${index}`)), timestamp: 0 }] };
+  const controller = new AbortController();
+  const cacheKey = {};
+  let started = 0, stopped = 0;
+  let markStarted: (() => void) | undefined;
+  const allStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const running = prepareRemoteImagesForModel(input, modelFor("google-generative-ai"), {
+    cacheKey, signal: controller.signal,
+    read: async (_url, signal) => {
+      assert.equal(signal, controller.signal);
+      if (++started === 4) markStarted?.();
+      return new Promise((_, reject) => signal?.addEventListener("abort", () => { stopped++; reject(signal.reason); }, { once: true }));
+    },
+  });
+  await allStarted;
+  const reason = new Error("Turn stopped");
+  controller.abort(reason);
+  await assert.rejects(running, (error) => error === reason);
+  assert.equal(started, 4, "queued images must not start");
+  assert.equal(stopped, 4);
+  let retried = 0;
+  await prepareRemoteImagesForModel(input, modelFor("google-generative-ai"), {
+    cacheKey, read: async () => { retried++; return null; },
+  });
+  assert.equal(retried, 7, "a later turn can retry every cancelled image");
+});
+
+test("cancellation after a reader returns prevents normalization and caching", async () => {
+  const controller = new AbortController();
+  const cacheKey = {};
+  const reason = new Error("Turn stopped during download");
+  await assert.rejects(prepareRemoteImagesForModel(context, modelFor("google-generative-ai"), {
+    cacheKey, signal: controller.signal,
+    read: async () => { controller.abort(reason); return { data: Buffer.from("unused"), mimeType: "image/png" }; },
+  }), (error) => error === reason);
+  let reads = 0;
+  await prepareRemoteImagesForModel(context, modelFor("google-generative-ai"), { cacheKey, read: async () => { reads++; return null; } });
+  assert.equal(reads, 1);
 });

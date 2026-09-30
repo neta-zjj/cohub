@@ -173,3 +173,30 @@ test("a text-only model receives a new URL image description via Responses and r
   assert.deepEqual(second.context.messages, first.context.messages);
   assert.equal(message.content[0]?.mimeType, "application/x-cohub-image-url");
 });
+
+test("stopping an image description propagates cancellation without persisting a failed description", async (t) => {
+  const { prepareAgentImagesForModel } = await import("../runtime/image-to-text.js");
+  const controller = new AbortController();
+  const manager = SessionManager.create("/workspace", "/tmp");
+  const message = { role: "user" as const, content: [urlToPiImage("https://assets.test/a.png")], timestamp: 0, meta: { messageId: "cancel-description" } };
+  manager.appendMessage(message, { id: "cancel-description" });
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
+    const signal = init?.signal;
+    assert(signal);
+    markStarted?.();
+    return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  });
+  const pending = prepareAgentImagesForModel({
+    context: { messages: [message] }, targetModel: textModel,
+    config: { ...config, model: { ...config.model, apiKey: "test-api-key" } },
+    sessionManager: manager, sessionId: "cancel-description", executionTurnId: "cancel", signal: controller.signal,
+  });
+  await started;
+  const reason = new Error("Stopped description");
+  controller.abort(reason);
+  await assert.rejects(pending, (error) => error === reason);
+  assert.equal(manager.getCustomEntries("image_description.v1").length, 0);
+  assert.equal(message.content[0]?.type, "image");
+});
