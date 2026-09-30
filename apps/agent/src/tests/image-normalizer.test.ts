@@ -2,97 +2,165 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import sharp from "sharp";
 import type { ContentBlock } from "@cohub/protocol/core";
-import {
-  AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES,
-  AGENT_IMAGE_URL_PASSTHROUGH_MAX_EDGE,
-  normalizeImageContentBlock,
-} from "../image-normalizer.js";
-
-process.env.DATABASE_URL ??= "postgres://localhost/cohub_test";
-process.env.APP_ENCRYPTION_KEY ??= "test-key";
-process.env.SESSIONS_NAMESPACE ??= "test";
+import { getRemoteImageUrl } from "@cohub/model-runtime/image-content";
+import { AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES, AGENT_IMAGE_MAX_OUTPUT_BYTES, normalizeAgentToolImageContent, normalizeImageContentBlock } from "../image-normalizer.js";
 
 const sampleUrl = "https://public.cohub.run/spaces/x/chat/a.png";
+const resizedUrl = "https://public.cohub.run/chat-attachments/resized.png";
+const png = (width: number, height: number) => sharp({ create: { width, height, channels: 3, background: { r: 12, g: 34, b: 56 } } }).png().toBuffer();
+const urlBlock = (): Extract<ContentBlock, { type: "image" }> => ({ type: "image", source: { type: "url", url: sampleUrl } });
 
-async function png(width: number, height: number): Promise<Buffer> {
-  return sharp({
-    create: { width, height, channels: 3, background: { r: 12, g: 34, b: 56 } },
-  }).png().toBuffer();
-}
+test("eligible URL images stay URLs without redundant encoding or upload", async () => {
+  for (const width of [64, 2048]) {
+    const data = await png(width, 48);
+    const block = await normalizeImageContentBlock(urlBlock(), {
+      readUrlImage: async () => ({ data, mimeType: "image/png" }),
+      writeImage: async () => { throw new Error("Unexpected upload"); },
+    });
+    assert.equal(block.type, "image");
+    assert.deepEqual(block.source, { type: "url", url: sampleUrl });
+    assert.equal(block._meta?.imageUrlPassthrough, true);
+    assert.equal(block._meta?.originalWidth, width);
+  }
+});
 
-function urlBlock(url = sampleUrl): Extract<ContentBlock, { type: "image" }> {
-  return { type: "image", source: { type: "url", url } };
-}
+test("an approved URL is not downloaded or uploaded again on later passes", async () => {
+  let reads = 0, uploads = 0;
+  const data = await png(3000, 40);
+  const options = {
+    readUrlImage: async () => { reads++; return { data, mimeType: "image/png" }; },
+    writeImage: async () => { uploads++; return resizedUrl; },
+  };
+  const first = await normalizeImageContentBlock(urlBlock(), options);
+  assert.equal(first.type, "image");
+  assert.deepEqual(await normalizeImageContentBlock(first, options), first);
+  assert.equal(reads, 1);
+  assert.equal(uploads, 1);
+});
 
-test("a URL image within the size and dimension caps stays a URL block", async () => {
-  const bytes = await png(64, 48);
+test("oversized landscape URL images resize to 2048px and upload bytes", async () => {
+  const data = await png(4096, 2048);
   const block = await normalizeImageContentBlock(urlBlock(), {
-    readUrlImage: async () => ({ data: bytes, mimeType: "image/png" }),
+    readUrlImage: async () => ({ data, mimeType: "image/png" }),
+    writeImage: async (image) => {
+      assert(Buffer.isBuffer(image.data));
+      const metadata = await sharp(image.data).metadata();
+      assert.equal(metadata.width, 2048);
+      assert.equal(metadata.height, 1024);
+      assert.equal(image.mimeType, "image/png");
+      return resizedUrl;
+    },
   });
-
   assert.equal(block.type, "image");
-  assert.deepEqual(block.source, { type: "url", url: sampleUrl });
+  assert.deepEqual(block.source, { type: "url", url: resizedUrl });
   assert.equal(block._meta?.imageUrlPassthrough, true);
   assert.equal(block._meta?.originalUrl, sampleUrl);
-  assert.equal(block._meta?.originalWidth, 64);
-  assert.equal(block._meta?.originalHeight, 48);
 });
 
-test("an already-approved passthrough block is not re-downloaded", async () => {
-  let reads = 0;
-  const bytes = await png(64, 48);
-  const read = async () => { reads += 1; return { data: bytes, mimeType: "image/png" }; };
-  const first = await normalizeImageContentBlock(urlBlock(), { readUrlImage: read });
-  assert.equal(first.type, "image");
-  const second = await normalizeImageContentBlock(first, { readUrlImage: read });
-
-  assert.equal(reads, 1);
-  assert.deepEqual(second, first);
-});
-
-test("an oversized URL image falls back to the inline normalized path", async () => {
-  const bytes = await png(3000, 40);
-  assert.ok(bytes.byteLength < AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES, "fixture should be small in bytes");
-
+test("portrait resizing preserves aspect ratio and transparency", async () => {
+  const data = await sharp({ create: { width: 1000, height: 4000, channels: 4, background: { r: 12, g: 34, b: 56, alpha: 0.5 } } }).png().toBuffer();
   const block = await normalizeImageContentBlock(urlBlock(), {
-    readUrlImage: async () => ({ data: bytes, mimeType: "image/png" }),
+    readUrlImage: async () => ({ data, mimeType: "image/png" }),
+    writeImage: async (image) => {
+      const metadata = await sharp(image.data).metadata();
+      assert.equal(metadata.width, 512);
+      assert.equal(metadata.height, 2048);
+      assert.equal(metadata.hasAlpha, true);
+      return resizedUrl;
+    },
   });
-
   assert.equal(block.type, "image");
-  assert.equal(block.source.type, "base64");
-  assert.equal(block._meta?.imageUrlPassthrough, undefined);
-  assert.equal(block._meta?.originalUrl, sampleUrl);
+  assert.equal(block.source.type, "url");
 });
 
-test("a URL image that fails to load becomes omitted text", async () => {
+test("JPEG resizing keeps JPEG rather than forcing WebP", async () => {
+  const data = await sharp(await png(3000, 20)).jpeg().toBuffer();
   const block = await normalizeImageContentBlock(urlBlock(), {
-    readUrlImage: async () => null,
+    readUrlImage: async () => ({ data, mimeType: "image/jpeg" }),
+    writeImage: async (image) => {
+      assert.equal(image.mimeType, "image/jpeg");
+      assert.equal((await sharp(image.data).metadata()).width, 2048);
+      return resizedUrl;
+    },
   });
+  assert.equal(block.type, "image");
+  assert.equal(block.source.type, "url");
+});
 
+test("the URL byte limit also applies to images whose dimensions already fit", async () => {
+  const data = Buffer.concat([await png(20, 20), Buffer.alloc(AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES)]);
+  const block = await normalizeImageContentBlock(urlBlock(), {
+    readUrlImage: async () => ({ data, mimeType: "image/png" }),
+    writeImage: async (image) => { assert(image.data.byteLength <= AGENT_IMAGE_MAX_OUTPUT_BYTES); return resizedUrl; },
+  });
+  assert.equal(block.type, "image");
+  assert.deepEqual(block.source, { type: "url", url: resizedUrl });
+});
+
+test("small SVG and TIFF images are uploaded as supported PNG files", async () => {
+  const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="red"/></svg>`);
+  const tiff = await sharp(await png(20, 20)).tiff().toBuffer();
+  for (const [data, mimeType] of [[svg, "image/svg+xml"], [tiff, "image/tiff"]] as const) {
+    const block = await normalizeImageContentBlock(urlBlock(), {
+      readUrlImage: async () => ({ data, mimeType }),
+      writeImage: async (image) => {
+        assert.equal((await sharp(image.data).metadata()).format, "png");
+        assert.equal(image.mimeType, "image/png");
+        return resizedUrl;
+      },
+    });
+    assert.equal(block.type, "image");
+    assert.deepEqual(block.source, { type: "url", url: resizedUrl });
+  }
+});
+
+test("base64 ingress and tool images upload bytes and retain URL markers", async () => {
+  const data = await png(32, 24);
+  let uploads = 0;
+  const options = { writeImage: async (image: { data: Buffer; mimeType: string }) => {
+    uploads++;
+    assert.deepEqual(image.data, data);
+    assert.equal(image.mimeType, "image/png");
+    return resizedUrl;
+  } };
+  const block = await normalizeImageContentBlock({ type: "image", source: { type: "base64", media_type: "image/png", data: data.toString("base64") } }, options);
+  assert.equal(block.type, "image");
+  assert.deepEqual(block.source, { type: "url", url: resizedUrl });
+  const toolImage = await normalizeAgentToolImageContent({ data, mimeType: "image/png" }, options);
+  assert.equal(toolImage.type, "image");
+  assert.equal(getRemoteImageUrl(toolImage), resizedUrl);
+  assert.equal(uploads, 2);
+});
+
+test("unavailable URLs become explicit omission text", async () => {
+  const block = await normalizeImageContentBlock(urlBlock(), { readUrlImage: async () => null });
   assert.equal(block.type, "text");
-  assert.equal(block._meta?.imageNormalizationFailed, true);
   assert.equal(block._meta?.reason, "load_failed");
 });
 
-test("an original exceeding the URL byte limit is normalized even when its dimensions fit", async () => {
-  const data = Buffer.concat([await png(20, 20), Buffer.alloc(AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES)]);
-  const block = await normalizeImageContentBlock(urlBlock(), { readUrlImage: async () => ({ data, mimeType: "image/png" }) });
-  assert.equal(block.type, "image");
-  assert.equal(block.source.type, "base64");
-  assert.equal(block.source.media_type, "image/webp");
+test("caller-supplied passthrough metadata cannot skip image validation", async () => {
+  const block = await normalizeImageContentBlock({ ...urlBlock(), _meta: { imageUrlPassthrough: true } }, { readUrlImage: async () => null });
+  assert.equal(block.type, "text");
+  assert.equal(block._meta?.reason, "load_failed");
 });
 
-test("passthrough dimension cap is at or below the provider's many-image limit", () => {
-  assert.ok(AGENT_IMAGE_URL_PASSTHROUGH_MAX_EDGE <= 2000);
+test("upload failure becomes omission text without an inline base64 fallback", async () => {
+  const data = await png(3000, 20);
+  const block = await normalizeImageContentBlock(urlBlock(), {
+    readUrlImage: async () => ({ data, mimeType: "image/png" }),
+    writeImage: async () => { throw new Error("Storage unavailable"); },
+  });
+  assert.equal(block.type, "text");
+  assert.equal(block._meta?.reason, "upload_failed");
 });
 
-test("small SVG and TIFF originals are normalized instead of sent as unsupported remote images", async () => {
-  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="red"/></svg>');
-  const tiff = await sharp(await png(20, 20)).tiff().toBuffer();
-  for (const [data, mimeType] of [[svg, "image/svg+xml"], [tiff, "image/tiff"]] as const) {
-    const block = await normalizeImageContentBlock(urlBlock(), { readUrlImage: async () => ({ data, mimeType }) });
-    assert.equal(block.type, "image");
-    assert.equal(block.source.type, "base64");
-    assert.equal(block.source.media_type, "image/webp");
-  }
+test("cancellation during upload propagates without persisting omission text", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Turn stopped");
+  const data = await png(3000, 20);
+  await assert.rejects(normalizeImageContentBlock(urlBlock(), {
+    signal: controller.signal,
+    readUrlImage: async () => ({ data, mimeType: "image/png" }),
+    writeImage: async () => { controller.abort(reason); throw reason; },
+  }), (error) => error === reason);
 });

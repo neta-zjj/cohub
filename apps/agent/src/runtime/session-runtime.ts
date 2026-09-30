@@ -623,7 +623,7 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
           logger.warn("[ImageToText] context preparation failed; continuing with original images", error);
           return { context: ctx, calls: [] };
         });
-        const imageContext = await prepareRemoteImagesForModel(prepared.context, model, { cacheKey: runtime.sessionManager, signal: options?.signal });
+        const imageContext = await prepareRemoteImagesForModel(prepared.context, model, { cacheKey: runtime.sessionManager, signal: options?.signal, userId: runtime.userId });
         const requestContext: Context = {
           ...imageContext,
           messages: applyLlmRequestSizeGuard(structuredClone(imageContext.messages)) as Context["messages"],

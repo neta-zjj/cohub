@@ -146,11 +146,30 @@ test("resume revalidates persisted passthrough metadata and normalizes oversized
     type: "image", source: { type: "url", url: "https://trusted.test/large.png" }, _meta: { imageUrlPassthrough: true },
   }] }] };
   const data = await png(3000);
-  const hydrated = await hydrateContextImages(context, async () => ({ data, mimeType: "image/png" }));
+  const hydrated = await hydrateContextImages(context, async () => ({ data, mimeType: "image/png" }), {
+    writeImage: async (image) => {
+      assert.equal((await sharp(image.data).metadata()).width, 2048);
+      return "https://trusted.test/resized.png";
+    },
+  });
   const messages = contextToPiMessages(hydrated.messages, { projectImage: contentBlockToPiImage });
   const content = messages[0]?.content;
   assert(Array.isArray(content));
   const image: ImageContent = content[0];
-  assert.equal(image.mimeType, "image/webp");
-  assert.equal(getRemoteImageUrl(image), null);
+  assert.equal(getRemoteImageUrl(image), "https://trusted.test/resized.png");
+});
+
+test("legacy inline history becomes uploaded URLs during recovery without rewriting DB content", async () => {
+  const data = await png();
+  const context: RuntimeContext = { ...history, messages: [{ id: "legacy", turnId: "t", role: "user", content: [{
+    type: "image", source: { type: "base64", media_type: "image/png", data: data.toString("base64") },
+  }] }] };
+  const original = structuredClone(context);
+  const hydrated = await hydrateContextImages(context, async () => { throw new Error("Unexpected download"); }, {
+    writeImage: async (image) => { assert.deepEqual(image.data, data); return "https://trusted.test/migrated.png"; },
+  });
+  assert.deepEqual(context, original);
+  const content = contextToPiMessages(hydrated.messages, { projectImage: contentBlockToPiImage })[0]?.content;
+  assert(Array.isArray(content));
+  assert.equal(getRemoteImageUrl(content[0]), "https://trusted.test/migrated.png");
 });

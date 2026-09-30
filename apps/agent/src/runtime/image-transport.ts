@@ -1,6 +1,7 @@
 import type { Api, Context, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
-import { getRemoteImageUrl, isUrlMarkerImage, supportsRemoteImageUrls } from "@cohub/model-runtime/image-content";
-import { imageOmittedText, normalizeAgentImage } from "../image-normalizer.js";
+import { getRemoteImageUrl, isUrlMarkerImage, supportsRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
+import { imageOmittedText, normalizeAgentImage, type NormalizedImage } from "../image-normalizer.js";
+import { uploadPublicAssetImage } from "../image-upload.js";
 import { readPublicAssetImageUrl } from "../public-asset-storage.js";
 import { RemoteImageCache } from "./image-cache.js";
 
@@ -15,13 +16,21 @@ export function clearRemoteImageCache(owner: object): void {
 export async function prepareRemoteImagesForModel(
   context: Context,
   model: Model<Api>,
-  options: { read?: ReadImage; cacheKey?: object; signal?: AbortSignal } = {},
+  options: { read?: ReadImage; writeImage?: (image: NormalizedImage) => Promise<string>; userId?: string | null; cacheKey?: object; signal?: AbortSignal } = {},
 ): Promise<Context> {
   const signal = options.signal;
   signal?.throwIfAborted();
   const read = options.read ?? readPublicAssetImageUrl;
   const cacheKey = options.cacheKey;
-  if (!model.input.includes("image") || supportsRemoteImageUrls(model.api)) {
+  let imageCount = 0;
+  for (const message of context.messages) {
+    if ((message.role === "user" || message.role === "toolResult") && Array.isArray(message.content)) {
+      imageCount += message.content.filter((block) => block.type === "image").length;
+    }
+  }
+  const maxEdge = model.api === "anthropic-messages" && imageCount > 20 ? 2000 : undefined;
+  const remoteUrls = supportsRemoteImageUrls(model.api);
+  if (!model.input.includes("image") || remoteUrls && !maxEdge) {
     if (cacheKey) clearRemoteImageCache(cacheKey);
     return context;
   }
@@ -36,7 +45,8 @@ export async function prepareRemoteImagesForModel(
     }
   }
   // Match cache lifetime to retained history, so compaction also releases decoded image bytes.
-  if (cacheKey) imageCache.retain(cacheKey, urls);
+  const imageKey = (url: string) => maxEdge ? `${maxEdge}:${url}` : url;
+  if (cacheKey) imageCache.retain(cacheKey, new Set([...urls].map(imageKey)));
 
   const omitted: TextContent = { type: "text", text: imageOmittedText("image could not be loaded or processed") };
   const resolved = new Map<string, ImageContent | TextContent>();
@@ -47,7 +57,7 @@ export async function prepareRemoteImagesForModel(
       signal?.throwIfAborted();
       const url = pending[cursor++];
       if (url === undefined) continue;
-      const cached = cacheKey ? imageCache.get(cacheKey, url) : undefined;
+      const cached = cacheKey ? imageCache.get(cacheKey, imageKey(url)) : undefined;
       if (cached) { resolved.set(url, cached); continue; }
       const image = await read(url, signal).catch(() => {
         signal?.throwIfAborted();
@@ -55,13 +65,25 @@ export async function prepareRemoteImagesForModel(
       });
       signal?.throwIfAborted();
       const normalized = image && await normalizeAgentImage({
-        ...image, sourceKind: "public_asset", originalSource: "url", originalUrl: url,
+        ...image, sourceKind: "public_asset", originalSource: "url", originalUrl: url, maxEdge,
       });
       signal?.throwIfAborted();
       if (normalized) {
-        const image: ImageContent = { type: "image", data: normalized.data, mimeType: normalized.mimeType };
-        if (cacheKey) imageCache.set(cacheKey, url, image);
-        resolved.set(url, image);
+        try {
+          let requestImage: ImageContent;
+          if (remoteUrls) {
+            const remoteUrl = normalized.data === image?.data ? url : await (options.writeImage ?? ((image) => uploadPublicAssetImage(image, options.userId, signal)))(normalized);
+            requestImage = urlToPiImage(remoteUrl);
+          } else {
+            requestImage = { type: "image", data: normalized.data.toString("base64"), mimeType: normalized.mimeType };
+          }
+          signal?.throwIfAborted();
+          if (cacheKey) imageCache.set(cacheKey, imageKey(url), requestImage);
+          resolved.set(url, requestImage);
+        } catch {
+          signal?.throwIfAborted();
+          resolved.set(url, omitted);
+        }
       } else {
         resolved.set(url, omitted);
       }

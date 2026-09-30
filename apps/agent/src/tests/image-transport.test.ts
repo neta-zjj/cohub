@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import sharp from "sharp";
 import type { Api, Context, Model } from "@earendil-works/pi-ai";
-import { restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
+import { getRemoteImageUrl, restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
 import { createModelsFromRegistry } from "@cohub/model-runtime/pi-models-adapter";
 import { clearRemoteImageCache, prepareRemoteImagesForModel } from "../runtime/image-transport.js";
 
@@ -20,6 +20,42 @@ function modelFor(api: Api): Model<Api> {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
 }
+
+test("large Anthropic image batches use uploaded 2000px URLs and keep 2048px history intact", async () => {
+  const input: Context = { messages: [{ role: "user", content: Array.from({ length: 21 }, () => marker), timestamp: 0 }] };
+  const original = structuredClone(input);
+  const data = await sharp({ create: { width: 2048, height: 1024, channels: 3, background: "red" } }).png().toBuffer();
+  let reads = 0, uploads = 0;
+  const cacheKey = {};
+  const options = {
+    cacheKey,
+    read: async () => { reads++; return { data, mimeType: "image/png" }; },
+    writeImage: async (image: { data: Buffer }) => {
+      uploads++;
+      const metadata = await sharp(image.data).metadata();
+      assert.equal(metadata.width, 2000);
+      assert.equal(metadata.height, 1000);
+      return `${url}?edge=2000`;
+    },
+  };
+  const model = modelFor("anthropic-messages");
+  const prepared = await prepareRemoteImagesForModel(input, model, options);
+  assert.deepEqual(input, original);
+  const content = prepared.messages[0]?.content;
+  assert(Array.isArray(content));
+  for (const image of content) {
+    assert.equal(image.type, "image");
+    assert.equal(getRemoteImageUrl(image), `${url}?edge=2000`);
+  }
+  assert.deepEqual(await prepareRemoteImagesForModel(input, model, options), prepared);
+  assert.equal(reads, 1);
+  assert.equal(uploads, 1);
+  const payload = JSON.stringify(await capturePayload(model, prepared));
+  assert(payload.includes(`${url}?edge=2000`));
+  assert(!payload.includes("data:image"));
+  assert(!payload.includes(marker.mimeType));
+  clearRemoteImageCache(cacheKey);
+});
 
 async function capturePayload(model: Model<Api>, input: Context): Promise<unknown> {
   const apiKey = model.api === "openai-codex-responses"
@@ -77,17 +113,18 @@ for (const api of ["google-generative-ai", "google-vertex", "bedrock-converse-st
     const image = user.content[1];
     assert(image?.type === "image");
     const bytes = Buffer.from(image.data, "base64");
-    assert.equal((await sharp(bytes).metadata()).format, "webp");
+    assert.deepEqual(bytes, data);
+    assert.equal((await sharp(bytes).metadata()).format, "png");
     const payload = await capturePayload(model, prepared);
     const serialized = JSON.stringify(payload);
     assert(!serialized.includes(marker.mimeType));
     assert(!serialized.includes(marker.data));
     assert(!serialized.includes(url));
-    if (api.startsWith("google")) assert(serialized.includes(`"mimeType":"image/webp","data":"${image.data}"`));
+    if (api.startsWith("google")) assert(serialized.includes(`"mimeType":"image/png","data":"${image.data}"`));
     else {
       assert(payload && typeof payload === "object" && "messages" in payload && Array.isArray(payload.messages));
       const sent = payload.messages[0].content.find((part: { image?: unknown }) => part.image)?.image;
-      assert.equal(sent.format, "webp");
+      assert.equal(sent.format, "png");
       assert.deepEqual(Buffer.from(sent.source.bytes), bytes);
     }
     assert.equal(await prepareRemoteImagesForModel(context, modelFor("anthropic-messages")), context, "switching back keeps the original remote images");

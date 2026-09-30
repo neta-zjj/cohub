@@ -1107,16 +1107,15 @@ export async function loadOrCreateSessionHandle(input: {
   };
   const durableHead = await loadRuntimeContext({ spaceId: input.spaceId, sessionId: input.sessionId, beforeSequence: input.beforeTurnSequence ?? undefined, headOnly: true });
   const cachedMarker = cachedHandle?.sessionManager.getCustomEntries("cohub.context").at(-1)?.data as { revision?: string } | undefined;
-  const durableContext = cachedMarker?.revision === durableHead.revision && fileSignature
-    && sameSessionFileSignature(cachedHandle?.sessionFileSignature ?? null, fileSignature)
-    ? durableHead
-    : await hydrateContextImages(await loadRuntimeContext({ spaceId: input.spaceId, sessionId: input.sessionId, beforeSequence: input.beforeTurnSequence ?? undefined }), readPublicAssetImageUrl);
-
   const spaceInfo = await getSpace({ spaceId: input.spaceId }).catch((error: unknown) => {
     logger.warn(`[Agent] Failed to load space info for ${input.spaceId}; falling back to platform config`, error);
     return null;
   });
   const spaceOwnerUserId = spaceInfo?.space?.userUuid?.trim() || null;
+  const durableContext = cachedMarker?.revision === durableHead.revision && fileSignature
+    && sameSessionFileSignature(cachedHandle?.sessionFileSignature ?? null, fileSignature)
+    ? durableHead
+    : await hydrateContextImages(await loadRuntimeContext({ spaceId: input.spaceId, sessionId: input.sessionId, beforeSequence: input.beforeTurnSequence ?? undefined }), readPublicAssetImageUrl, { userId: input.userId?.trim() || spaceOwnerUserId });
 
   const existing = input.sessionHandles.get(sessionKey);
   if (existing) {
