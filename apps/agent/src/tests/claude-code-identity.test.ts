@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import { applyRequestProfile } from "@cohub/model-runtime/request-profile";
+import {
+  Type,
+  createAssistantMessageEventStream,
+  normalizeContext,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type Model,
+  type ProviderStreams,
+  type ToolCall,
+} from "@earendil-works/pi-ai";
+import { applyRequestProfile, withRequestProfiles } from "@cohub/model-runtime/request-profile";
 import {
   CLAUDE_CODE_BETA,
   CLAUDE_CODE_SYSTEM_IDENTITY,
   CLAUDE_CODE_VERSION,
+  restoreToolName,
   withClaudeCodePayload,
 } from "@cohub/model-runtime/request-profile/claude-code";
 
@@ -68,4 +79,64 @@ test("the caller's payload hook runs first", async () => {
   const next = await overrides.onPayload?.(payload, model("claude-opus-5-5"));
   assert.deepEqual((next as { metadata: unknown }).metadata, { user_id: "u" });
   assert.equal((next as { system: Array<{ text: string }> }).system[0]?.text, CLAUDE_CODE_SYSTEM_IDENTITY);
+});
+
+test("tool names are restored to the declared casing, case-insensitively", () => {
+  const declared = ["read", "ls", "find", "Custom"];
+  assert.equal(restoreToolName("Read", declared), "read");
+  assert.equal(restoreToolName("LS", declared), "ls");
+  assert.equal(restoreToolName("find", declared), "find");
+  assert.equal(restoreToolName("custom", declared), "Custom");
+  assert.equal(restoreToolName("WebSearch", declared), "WebSearch");
+});
+
+const declaredTools = ["read", "ls", "find"].map((name) => ({ name, description: name, parameters: Type.Object({}) }));
+
+/** Replays an upstream that recased declared tools, sharing one mutable message across events like pi's providers. */
+function recasingUpstream(names: string[]): ProviderStreams {
+  const stream: ProviderStreams["stream"] = (streamModel) => {
+    const output = { role: "assistant", content: [], api: streamModel.api, provider: streamModel.provider, model: streamModel.id, stopReason: "toolUse", timestamp: 0 } as unknown as AssistantMessage;
+    const events = createAssistantMessageEventStream();
+    queueMicrotask(() => {
+      events.push({ type: "start", partial: output });
+      names.forEach((name, index) => {
+        const block: ToolCall = { type: "toolCall", id: `call-${index}`, name, arguments: {} };
+        output.content.push(block);
+        events.push({ type: "toolcall_start", contentIndex: index, partial: output });
+        events.push({ type: "toolcall_delta", contentIndex: index, delta: "{}", partial: output });
+        events.push({ type: "toolcall_end", contentIndex: index, toolCall: { ...block, name }, partial: output });
+      });
+      events.push({ type: "done", reason: "toolUse", message: output });
+    });
+    return events;
+  };
+  return { stream, streamSimple: stream };
+}
+
+function toolCallNames(message: AssistantMessage): string[] {
+  return message.content.flatMap((block) => (block.type === "toolCall" ? [block.name] : []));
+}
+
+test("claude-code profile streams return tool calls under the declared names", async () => {
+  const upstream = recasingUpstream(["Read", "LS", "find", "WebSearch"]);
+  const context = normalizeContext({ messages: [], tools: declaredTools });
+  const events: AssistantMessageEvent[] = [];
+  const started: string[] = [];
+  const stream = withRequestProfiles(upstream).streamSimple(model("claude-opus-5-5-m"), context);
+  for await (const event of stream) {
+    events.push(event);
+    const block = event.type === "toolcall_start" ? event.partial.content[event.contentIndex] : undefined;
+    if (block?.type === "toolCall") started.push(block.name);
+  }
+
+  assert.deepEqual(started, ["read", "ls", "find", "WebSearch"]);
+  const ended = events.flatMap((event) => (event.type === "toolcall_end" ? [event.toolCall.name] : []));
+  assert.deepEqual(ended, ["read", "ls", "find", "WebSearch"]);
+  assert.deepEqual(toolCallNames(await stream.result()), ["read", "ls", "find", "WebSearch"]);
+});
+
+test("models without the claude-code profile keep the upstream's tool names", async () => {
+  const upstream = recasingUpstream(["Read"]);
+  const stream = withRequestProfiles(upstream).stream(unprofiledModel("claude-opus-5-5"), normalizeContext({ messages: [], tools: declaredTools }));
+  assert.deepEqual(toolCallNames(await stream.result()), ["Read"]);
 });

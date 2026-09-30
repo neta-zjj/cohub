@@ -1,6 +1,13 @@
-import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  getCurrentTools,
+  type Api,
+  type AssistantMessage,
+  type Model,
+  type ProviderHeaders,
+} from "@earendil-works/pi-ai";
 import { mergeHeaders } from "@cohub/infra/config-runtime/models";
-import type { RequestProfile } from "./index.js";
+import type { RequestProfile, ResponseProfile } from "./index.js";
 
 /** Kept in step with pi's Anthropic OAuth identity; upstreams gate newer Claude models on it. */
 export const CLAUDE_CODE_VERSION = "2.1.280";
@@ -52,4 +59,44 @@ export const claudeCodeOverrides: RequestProfile = (model: Model<Api>, options) 
       return withClaudeCodePayload(next, { beta });
     },
   };
+};
+
+/** The declared tool whose name matches case-insensitively, or `name` unchanged. */
+export function restoreToolName(name: string, declared: readonly string[]): string {
+  if (declared.includes(name)) return name;
+  const expected = name.toLowerCase();
+  return declared.find((candidate) => candidate.toLowerCase() === expected) ?? name;
+}
+
+function restoreMessageToolNames(message: AssistantMessage, declared: readonly string[]): void {
+  for (const block of message.content) {
+    if (block.type === "toolCall") block.name = restoreToolName(block.name, declared);
+  }
+}
+
+/**
+ * Upstreams that accept the Claude Code identity recase declared tools to Claude Code's names
+ * (`read` → `Read`, `ls` → `LS`) and return calls under those names. Map them back so the agent
+ * can dispatch them, as pi does for its own OAuth renaming.
+ */
+export const restoreClaudeCodeToolNames: ResponseProfile = (model, context, source) => {
+  if (model.api !== "anthropic-messages") return source;
+  const declared = getCurrentTools(context.messages).map((tool) => tool.name);
+  if (declared.length === 0) return source;
+
+  const restored = createAssistantMessageEventStream();
+  void (async () => {
+    for await (const event of source) {
+      // Events share one mutable message, so fixing each block when it appears covers later deltas.
+      if (event.type === "toolcall_start") restoreMessageToolNames(event.partial, declared);
+      else if (event.type === "toolcall_end") {
+        event.toolCall.name = restoreToolName(event.toolCall.name, declared);
+        restoreMessageToolNames(event.partial, declared);
+      } else if (event.type === "done") restoreMessageToolNames(event.message, declared);
+      else if (event.type === "error") restoreMessageToolNames(event.error, declared);
+      restored.push(event);
+    }
+    restored.end();
+  })();
+  return restored;
 };
