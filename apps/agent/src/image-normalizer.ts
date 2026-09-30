@@ -10,6 +10,21 @@ export const AGENT_IMAGE_MAX_INPUT_BYTES = 32 * 1024 * 1024;
 export const AGENT_IMAGE_MAX_INPUT_PIXELS = 64_000_000;
 export const AGENT_IMAGE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Largest original image we hand to the provider by URL instead of re-encoding to base64.
+ * 5 MB matches the tighter of Anthropic's per-image caps (Bedrock/Vertex enforce 5 MB; the
+ * direct Messages API documents 10 MB). Images above it keep the existing normalize-and-inline
+ * path, so an oversized original never reaches the provider unchecked.
+ */
+export const AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Largest edge we pass through by URL. Anthropic tightens the per-image dimension cap to 2000px
+ * once a request carries more than 20 image blocks, and pi cannot know that count at ingestion,
+ * so we hold every passthrough under the strict limit.
+ */
+export const AGENT_IMAGE_URL_PASSTHROUGH_MAX_EDGE = 2000;
+
 const IMAGE_NORMALIZE_CONCURRENCY = 2;
 const IMAGE_NORMALIZE_ATTEMPTS = [
   { edge: AGENT_IMAGE_MAX_EDGE, quality: AGENT_IMAGE_WEBP_QUALITY },
@@ -45,6 +60,23 @@ type NormalizedImage = {
 
 function imageSha256(data: Buffer) {
   return createHash("sha256").update(data).digest("hex");
+}
+
+/**
+ * Width/height of an image we intend to pass through by URL, or null when we cannot prove it is
+ * within the provider's dimension caps. Failing closed keeps unreadable or exotic files on the
+ * existing normalize-and-inline path.
+ */
+async function readPassthroughDimensions(data: Buffer): Promise<{ width: number; height: number } | null> {
+  try {
+    const metadata = await sharp(data, { animated: false, limitInputPixels: AGENT_IMAGE_MAX_INPUT_PIXELS }).metadata();
+    const width = metadata.width ?? 0;
+    const height = metadata.height ?? 0;
+    if (width <= 0 || height <= 0) return null;
+    return { width, height };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeBase64Data(data: string) {
@@ -115,6 +147,9 @@ export async function normalizeAgentImage(input: NormalizeImageInput): Promise<N
 
 export async function normalizeImageContentBlock(block: Extract<ContentBlock, { type: "image" }>, options?: { readUrlImage?: ReadUrlImage }): Promise<ContentBlock> {
   if (block.source.type === "url") {
+    // A URL block we already cleared for passthrough must not be re-downloaded on later passes.
+    if (block._meta?.imageUrlPassthrough === true) return block;
+
     const publicAsset = await options?.readUrlImage?.(block.source.url).catch(() => null);
     if (!publicAsset) {
       return {
@@ -128,6 +163,29 @@ export async function normalizeImageContentBlock(block: Extract<ContentBlock, { 
           originalUrl: block.source.url,
         },
       };
+    }
+
+    // Hand the provider the original URL when it is provably within its per-image caps. The
+    // bytes never leave Cohub, and every later turn resends a short URL instead of the whole
+    // re-encoded image.
+    if (publicAsset.data.byteLength <= AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES) {
+      const dimensions = await readPassthroughDimensions(publicAsset.data);
+      if (dimensions && dimensions.width <= AGENT_IMAGE_URL_PASSTHROUGH_MAX_EDGE && dimensions.height <= AGENT_IMAGE_URL_PASSTHROUGH_MAX_EDGE) {
+        return {
+          type: "image",
+          source: { type: "url", url: block.source.url },
+          _meta: {
+            ...(block._meta ?? {}),
+            imageUrlPassthrough: true,
+            originalSource: "url",
+            originalUrl: block.source.url,
+            originalMimeType: publicAsset.mimeType || null,
+            originalSizeBytes: publicAsset.data.byteLength,
+            originalWidth: dimensions.width,
+            originalHeight: dimensions.height,
+          },
+        };
+      }
     }
 
     const normalized = await normalizeAgentImage({

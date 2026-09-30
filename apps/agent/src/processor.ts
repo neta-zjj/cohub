@@ -5,6 +5,7 @@ import { ModelUnavailableError } from "@cohub/core/sessions";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { readPublicAssetImageUrl } from "./public-asset-storage.js";
 import { imageOmittedText, normalizeAgentImage, normalizeContentBlocksImages } from "./image-normalizer.js";
+import { urlToPiImage } from "@cohub/model-runtime/image-content";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { context, trace } from "@opentelemetry/api";
 import { getActiveTraceIdentifiers, getOrCreateRequestId, setRequestContextAttributes } from "@cohub/infra/tracing";
@@ -162,6 +163,9 @@ async function fetchUrlImageContent(url: string): Promise<ImageContent | null> {
 async function contentBlockToImageContent(block: ContentBlock): Promise<ImageContent | null> {
   if (block.type !== "image") return null;
   if (block.source.type === "base64") return contentBlockToBase64ImageContent(block);
+  // The normalizer already cleared this URL for passthrough; carry it as a marker image so the
+  // provider receives the remote URL itself instead of bytes we would otherwise fetch and inline.
+  if (block._meta?.imageUrlPassthrough === true) return urlToPiImage(block.source.url);
   return fetchUrlImageContent(block.source.url).catch(() => null);
 }
 

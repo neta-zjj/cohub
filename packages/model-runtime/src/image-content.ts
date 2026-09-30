@@ -2,8 +2,22 @@ import type { ContentBlock } from "@cohub/protocol/core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 
 /** Marker mime used to carry remote image URLs through pi-ai's base64-only image shape. */
-const URL_IMAGE_MIME = "application/x-cohub-image-url";
+export const URL_IMAGE_MIME = "application/x-cohub-image-url";
 const URL_IMAGE_DATA_PREFIX = `data:${URL_IMAGE_MIME};base64,`;
+
+/** True when pi-ai's base64-only image shape is standing in for a remote URL rather than bytes. */
+export function isUrlMarkerImage(mimeType: string | null | undefined): boolean {
+  return mimeType === URL_IMAGE_MIME;
+}
+
+/** Encode a remote image URL into pi-ai's base64-only image shape. */
+export function urlToPiImage(url: string): ImageContent {
+  return {
+    type: "image",
+    mimeType: URL_IMAGE_MIME,
+    data: Buffer.from(url, "utf8").toString("base64"),
+  };
+}
 
 export function contentBlockToPiImage(block: Extract<ContentBlock, { type: "image" }>): ImageContent | null {
   if (block.source.type === "base64") {
@@ -15,11 +29,7 @@ export function contentBlockToPiImage(block: Extract<ContentBlock, { type: "imag
   }
   const url = block.source.url.trim();
   if (!url) return null;
-  return {
-    type: "image",
-    mimeType: URL_IMAGE_MIME,
-    data: Buffer.from(url, "utf8").toString("base64"),
-  };
+  return urlToPiImage(url);
 }
 
 function decodeImageUrlData(data: string): string | null {

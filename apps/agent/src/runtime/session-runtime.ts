@@ -8,6 +8,7 @@ import type { SessionManager } from "./local-session-manager.js";
 import type { CohubModel, CohubModelRegistry } from "./model-registry.js";
 import { normalizeThinkingLevel, resolveInitialThinkingLevel, resolveThinkingLevelForModel } from "./thinking-level.js";
 import { createModelsFromRegistry, streamSimpleWithModels } from "./pi-models-adapter.js";
+import { isUrlMarkerImage, restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
 import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
 import { getCurrentToolExecutionContext, runWithToolExecutionContext, type ToolExecutionContext } from "../tool-context.js";
@@ -254,7 +255,8 @@ const SUPPORTED_LLM_IMAGE_MIME_TYPES = new Set([
 ]);
 
 function isSupportedLlmImageMimeType(mimeType: string | null | undefined): boolean {
-  return mimeType != null && SUPPORTED_LLM_IMAGE_MIME_TYPES.has(mimeType);
+  // Marker images carry a remote URL, not bytes; `onPayload` swaps them back before the request.
+  return mimeType != null && (SUPPORTED_LLM_IMAGE_MIME_TYPES.has(mimeType) || isUrlMarkerImage(mimeType));
 }
 
 function estimateLlmPayloadBytes(value: unknown): number {
@@ -347,6 +349,12 @@ function toLlmImageContent(block: Record<string, unknown>): ImageContent | null 
   const source = block.source && typeof block.source === "object" && !Array.isArray(block.source)
     ? block.source as Record<string, unknown>
     : null;
+
+  // A remote URL the normalizer cleared for passthrough: carry the URL itself rather than bytes.
+  // `onPayload` restores it to the provider-native remote form at the last hop.
+  if (source?.type === "url" && typeof source.url === "string" && source.url.trim()) {
+    return urlToPiImage(source.url);
+  }
 
   if (source?.type !== "base64" || typeof source.data !== "string" || !source.data.trim()) {
     return null;
@@ -654,6 +662,9 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
                 }),
               })
             : streamHeaders,
+          // pi-ai models images as base64 only. Rewrite URL markers back to remote URLs so the
+          // provider fetches them and Cohub neither downloads nor resends the bytes.
+          onPayload: (payload: unknown) => restoreRemoteImageUrls(payload),
         };
         const stream = streamSimpleWithModels(models, model, requestContext, requestOptions);
 

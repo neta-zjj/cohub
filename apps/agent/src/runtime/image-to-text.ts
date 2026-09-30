@@ -10,6 +10,7 @@ import type {
   Model,
   ThinkingLevel,
 } from "@earendil-works/pi-ai";
+import { isUrlMarkerImage } from "@cohub/model-runtime/image-content";
 import {
   loadTurnImageDescriptions,
   persistTurnImageDescription,
@@ -179,7 +180,10 @@ function readCustomDescriptions(sessionManager: SessionManager): Map<string, Sto
 
 function isImage(value: unknown): value is ImageContent {
   const record = asRecord(value);
-  return record?.type === "image" && typeof record.data === "string" && typeof record.mimeType === "string";
+  if (record?.type !== "image" || typeof record.data !== "string" || typeof record.mimeType !== "string") return false;
+  // URL markers hold a URL, not bytes; there is nothing to describe and downloading one here
+  // would defeat the passthrough. Only real images need a text fallback for non-vision models.
+  return !isUrlMarkerImage(record.mimeType);
 }
 
 function imageDescriptionText(text: string) {
