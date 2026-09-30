@@ -10,7 +10,7 @@ import type {
   Model,
   ThinkingLevel,
 } from "@earendil-works/pi-ai";
-import { isUrlMarkerImage } from "@cohub/model-runtime/image-content";
+import { restoreRemoteImageUrls } from "@cohub/model-runtime/image-content";
 import {
   loadTurnImageDescriptions,
   persistTurnImageDescription,
@@ -19,6 +19,7 @@ import {
 import { logger } from "../logger.js";
 import type { SessionManager } from "./local-session-manager.js";
 import { createModelsFromRegistry } from "./pi-models-adapter.js";
+import { prepareRemoteImagesForModel } from "./image-transport.js";
 
 const CUSTOM_TYPE = "image_description.v1";
 const DESCRIPTION_CONCURRENCY = 2;
@@ -120,20 +121,26 @@ async function describeImage(input: {
   const reasoning = input.config.model.reasoning
     ? input.config.model.defaultThinkingLevel as ThinkingLevel | undefined
     : undefined;
-  const response = await models.completeSimple(model, {
+  const context = await prepareRemoteImagesForModel({
     systemPrompt: input.config.prompt,
     messages: [{
       role: "user",
       content: [{ type: "text", text: "Describe this image." }, input.image],
       timestamp: Date.now(),
     }],
-  }, {
+  }, model);
+  const content = context.messages[0]?.content;
+  if (!Array.isArray(content) || !content.some((block) => block.type === "image")) {
+    throw new Error("Image could not be loaded for description");
+  }
+  const response = await models.completeSimple(model, context, {
     apiKey: registry.getApiKey(model.provider),
     headers: model.headers,
     maxTokens: 1_200,
     reasoning,
     timeoutMs: 30_000,
     signal: input.signal,
+    onPayload: restoreRemoteImageUrls,
   });
   if (response.stopReason === "error" || response.stopReason === "aborted") {
     throw new Error(response.errorMessage?.trim() || "Image description request failed");
@@ -180,10 +187,7 @@ function readCustomDescriptions(sessionManager: SessionManager): Map<string, Sto
 
 function isImage(value: unknown): value is ImageContent {
   const record = asRecord(value);
-  if (record?.type !== "image" || typeof record.data !== "string" || typeof record.mimeType !== "string") return false;
-  // URL markers hold a URL, not bytes; there is nothing to describe and downloading one here
-  // would defeat the passthrough. Only real images need a text fallback for non-vision models.
-  return !isUrlMarkerImage(record.mimeType);
+  return record?.type === "image" && typeof record.data === "string" && typeof record.mimeType === "string";
 }
 
 function imageDescriptionText(text: string) {

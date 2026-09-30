@@ -9,6 +9,7 @@ import type { CohubModel, CohubModelRegistry } from "./model-registry.js";
 import { normalizeThinkingLevel, resolveInitialThinkingLevel, resolveThinkingLevelForModel } from "./thinking-level.js";
 import { createModelsFromRegistry, streamSimpleWithModels } from "./pi-models-adapter.js";
 import { isUrlMarkerImage, restoreRemoteImageUrls, urlToPiImage } from "@cohub/model-runtime/image-content";
+import { prepareRemoteImagesForModel } from "./image-transport.js";
 import { buildCohubSystemPrompt } from "./system-prompt-builder.js";
 import { recordLlmUsage, startLlmRoundSpan, getAgentTracer } from "@cohub/infra/tracing/agent";
 import { getCurrentToolExecutionContext, runWithToolExecutionContext, type ToolExecutionContext } from "../tool-context.js";
@@ -621,9 +622,10 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
           logger.warn("[ImageToText] context preparation failed; continuing with original images", error);
           return { context: ctx, calls: [] };
         });
+        const imageContext = await prepareRemoteImagesForModel(prepared.context, model, { cacheKey: runtime.sessionManager });
         const requestContext: Context = {
-          ...prepared.context,
-          messages: applyLlmRequestSizeGuard(structuredClone(prepared.context.messages)) as Context["messages"],
+          ...imageContext,
+          messages: applyLlmRequestSizeGuard(structuredClone(imageContext.messages)) as Context["messages"],
         };
         const streamHeaders = mergeHeaders(
           runtime.modelRegistry.getHeaders(model.provider, model.id),
@@ -663,8 +665,8 @@ function createStreamFn(getRuntime: () => StreamRuntime): StreamFn {
               })
             : streamHeaders,
           // pi-ai models images as base64 only. Rewrite URL markers back to remote URLs so the
-          // provider fetches them and Cohub neither downloads nor resends the bytes.
-          onPayload: (payload: unknown) => restoreRemoteImageUrls(payload),
+          // provider fetches them. Byte-only APIs were resolved before pi serialized the context.
+          onPayload: async (payload: unknown) => restoreRemoteImageUrls(await options?.onPayload?.(payload, model) ?? payload),
         };
         const stream = streamSimpleWithModels(models, model, requestContext, requestOptions);
 

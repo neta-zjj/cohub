@@ -84,3 +84,20 @@ test("restoreRemoteImageUrls leaves real base64 images untouched", () => {
   };
   assert.deepEqual(restoreRemoteImageUrls(payload), payload);
 });
+
+test("Responses image URLs remain strings, including nested tool outputs, and retain detail", () => {
+  const marker = urlToPiImage(sampleUrl);
+  const remote = { type: "input_image", image_url: `data:${marker.mimeType};base64,${marker.data}`, detail: "auto" };
+  const payload = { input: [
+    { role: "user", content: [remote] },
+    { type: "function_call_output", call_id: "tool", output: [remote] },
+    { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "high" }] },
+  ] };
+  const original = structuredClone(payload);
+  assert.deepEqual(restoreRemoteImageUrls(payload), { input: [
+    { role: "user", content: [{ ...remote, image_url: sampleUrl }] },
+    { type: "function_call_output", call_id: "tool", output: [{ ...remote, image_url: sampleUrl }] },
+    payload.input[2],
+  ] });
+  assert.deepEqual(payload, original);
+});

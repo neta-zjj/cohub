@@ -70,6 +70,7 @@ function imageSha256(data: Buffer) {
 async function readPassthroughDimensions(data: Buffer): Promise<{ width: number; height: number } | null> {
   try {
     const metadata = await sharp(data, { animated: false, limitInputPixels: AGENT_IMAGE_MAX_INPUT_PIXELS }).metadata();
+    if (!metadata.format || !["jpeg", "png", "gif", "webp"].includes(metadata.format)) return null;
     const width = metadata.width ?? 0;
     const height = metadata.height ?? 0;
     if (width <= 0 || height <= 0) return null;

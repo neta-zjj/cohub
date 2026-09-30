@@ -21,7 +21,7 @@ async function png(width: number, height: number): Promise<Buffer> {
 }
 
 function urlBlock(url = sampleUrl): Extract<ContentBlock, { type: "image" }> {
-  return { type: "image", source: { type: "url", url } } as Extract<ContentBlock, { type: "image" }>;
+  return { type: "image", source: { type: "url", url } };
 }
 
 test("a URL image within the size and dimension caps stays a URL block", async () => {
@@ -44,7 +44,7 @@ test("an already-approved passthrough block is not re-downloaded", async () => {
   const read = async () => { reads += 1; return { data: bytes, mimeType: "image/png" }; };
   const first = await normalizeImageContentBlock(urlBlock(), { readUrlImage: read });
   assert.equal(first.type, "image");
-  const second = await normalizeImageContentBlock(first as Extract<ContentBlock, { type: "image" }>, { readUrlImage: read });
+  const second = await normalizeImageContentBlock(first, { readUrlImage: read });
 
   assert.equal(reads, 1);
   assert.deepEqual(second, first);
@@ -74,6 +74,25 @@ test("a URL image that fails to load becomes omitted text", async () => {
   assert.equal(block._meta?.reason, "load_failed");
 });
 
+test("an original exceeding the URL byte limit is normalized even when its dimensions fit", async () => {
+  const data = Buffer.concat([await png(20, 20), Buffer.alloc(AGENT_IMAGE_URL_PASSTHROUGH_MAX_BYTES)]);
+  const block = await normalizeImageContentBlock(urlBlock(), { readUrlImage: async () => ({ data, mimeType: "image/png" }) });
+  assert.equal(block.type, "image");
+  assert.equal(block.source.type, "base64");
+  assert.equal(block.source.media_type, "image/webp");
+});
+
 test("passthrough dimension cap is at or below the provider's many-image limit", () => {
   assert.ok(AGENT_IMAGE_URL_PASSTHROUGH_MAX_EDGE <= 2000);
+});
+
+test("small SVG and TIFF originals are normalized instead of sent as unsupported remote images", async () => {
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="red"/></svg>');
+  const tiff = await sharp(await png(20, 20)).tiff().toBuffer();
+  for (const [data, mimeType] of [[svg, "image/svg+xml"], [tiff, "image/tiff"]] as const) {
+    const block = await normalizeImageContentBlock(urlBlock(), { readUrlImage: async () => ({ data, mimeType }) });
+    assert.equal(block.type, "image");
+    assert.equal(block.source.type, "base64");
+    assert.equal(block.source.media_type, "image/webp");
+  }
 });
