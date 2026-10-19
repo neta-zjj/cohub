@@ -1,6 +1,6 @@
 import { imageVariantUrl, mediaPreviewCandidates } from "@neta-art/cohub/media";
 import DOMPurify from "isomorphic-dompurify";
-import { marked, type Token, type Tokens } from "marked";
+import { marked, type Token, Tokenizer, type Tokens } from "marked";
 import remend from "remend";
 import {
 	createHighlighterCore,
@@ -291,6 +291,40 @@ function renderMediaPreviewHtml(input: {
 		: `preload="metadata"`;
 	return `<figure class="markdown-media markdown-video"><video controls playsinline ${frame} src="${src}" aria-label="${ariaLabel}"${title}></video>${caption}</figure>`;
 }
+
+const MARKDOWN_URL_PROSE_PUNCTUATION =
+	/[，。、；：？！…—～·「」『』【】《》〈〉（）［］｛｝〔〕〖〗〘〙〚〛﹏]/u;
+const markedUrlTokenizer = Tokenizer.prototype.url;
+
+// GFM autolinks run to the next whitespace, so a URL followed directly by a
+// Chinese sentence keeps the sentence in the link. Stop the match at CJK
+// punctuation; Chinese text without punctuation stays part of the URL.
+function tokenizeMarkdownUrl(this: Tokenizer, src: string) {
+	const token = markedUrlTokenizer.call(this, src);
+	if (token?.type !== "link") return token;
+
+	const punctuationIndex = token.raw.search(MARKDOWN_URL_PROSE_PUNCTUATION);
+	if (punctuationIndex === -1) return token;
+
+	const raw = token.raw.slice(0, punctuationIndex);
+	const href = token.href.slice(
+		0,
+		token.href.length - (token.raw.length - punctuationIndex),
+	);
+	return {
+		...token,
+		raw,
+		text: raw,
+		href,
+		tokens: [{ type: "text" as const, raw, text: raw }],
+	};
+}
+
+marked.use({
+	tokenizer: {
+		url: tokenizeMarkdownUrl,
+	},
+});
 
 // CDN images render as width-bounded WebP; the original stays reachable for
 // the viewer and downloads through `data-original-src`.
@@ -719,9 +753,7 @@ async function renderMarkdownHtml(
 	source: string,
 	options?: { highlight?: boolean; streamingSafe?: boolean },
 ) {
-	const tokens = marked.lexer(normalizeNestedMarkdownCodeFences(source), {
-		gfm: true,
-	});
+	const tokens = marked.lexer(normalizeNestedMarkdownCodeFences(source));
 	// During streaming, incomplete source tags stay visible as text. Completed
 	// renders accept a small document-oriented HTML subset before Cohub adds its
 	// own generated HTML; the combined output is sanitized again below.
