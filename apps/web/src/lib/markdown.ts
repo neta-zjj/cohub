@@ -293,38 +293,39 @@ function renderMediaPreviewHtml(input: {
 }
 
 const MARKDOWN_URL_PROSE_PUNCTUATION =
-	/[，。、；：？！…—～·「」『』【】《》〈〉（）［］｛｝〔〕〖〗〘〙〚〛﹏]/u;
+	/[，。、；：？！…—～·「」『』【】《》〈〉（）［］｛｝〔〕〖〗〘〙〚〛﹏“”‘’]/u;
 const markedUrlTokenizer = Tokenizer.prototype.url;
 
-// GFM autolinks run to the next whitespace, so a URL followed directly by a
-// Chinese sentence keeps the sentence in the link. Stop the match at CJK
-// punctuation; Chinese text without punctuation stays part of the URL.
-function tokenizeMarkdownUrl(this: Tokenizer, src: string) {
-	const token = markedUrlTokenizer.call(this, src);
-	if (token?.type !== "link") return token;
+class MarkdownUrlTokenizer extends Tokenizer {
+	override url(src: string) {
+		const token = markedUrlTokenizer.call(this, src);
+		if (token?.type !== "link") return token;
 
-	const punctuationIndex = token.raw.search(MARKDOWN_URL_PROSE_PUNCTUATION);
-	if (punctuationIndex === -1) return token;
+		const punctuationIndex = token.raw.search(MARKDOWN_URL_PROSE_PUNCTUATION);
+		if (punctuationIndex === -1) return token;
 
-	const raw = token.raw.slice(0, punctuationIndex);
-	const href = token.href.slice(
-		0,
-		token.href.length - (token.raw.length - punctuationIndex),
-	);
-	return {
-		...token,
-		raw,
-		text: raw,
-		href,
-		tokens: [{ type: "text" as const, raw, text: raw }],
-	};
+		const raw = token.raw.slice(0, punctuationIndex);
+		const prefix = token.href.slice(0, token.href.length - token.raw.length);
+		const href = `${prefix}${raw}`;
+		return {
+			...token,
+			raw,
+			text: raw,
+			href,
+			tokens: [{ type: "text" as const, raw, text: raw }],
+		};
+	}
 }
 
-marked.use({
-	tokenizer: {
-		url: tokenizeMarkdownUrl,
-	},
-});
+const markdownUrlTokenizer = new MarkdownUrlTokenizer();
+
+function markdownOptions() {
+	return {
+		...marked.defaults,
+		gfm: true,
+		tokenizer: markdownUrlTokenizer,
+	};
+}
 
 // CDN images render as width-bounded WebP; the original stays reachable for
 // the viewer and downloads through `data-original-src`.
@@ -753,7 +754,11 @@ async function renderMarkdownHtml(
 	source: string,
 	options?: { highlight?: boolean; streamingSafe?: boolean },
 ) {
-	const tokens = marked.lexer(normalizeNestedMarkdownCodeFences(source));
+	const markedOptions = markdownOptions();
+	const tokens = marked.lexer(
+		normalizeNestedMarkdownCodeFences(source),
+		markedOptions,
+	);
 	// During streaming, incomplete source tags stay visible as text. Completed
 	// renders accept a small document-oriented HTML subset before Cohub adds its
 	// own generated HTML; the combined output is sanitized again below.
@@ -764,7 +769,7 @@ async function renderMarkdownHtml(
 		enhanceMermaidTokens(tokens);
 	}
 	if (options?.highlight !== false) await highlightCodeTokens(tokens);
-	return marked.parser(tokens);
+	return marked.parser(tokens, markedOptions);
 }
 
 const EXTERNAL_LINK_PROTOCOLS = new Set(["http:", "https:"]);
