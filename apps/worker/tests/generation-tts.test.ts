@@ -15,7 +15,7 @@ function generationClient(model: string) {
 }
 
 test("validates the documented Qwen voice design request", () => {
-  const { client, declaration } = generationClient("qwen-audio-3.0-tts-plus");
+  const { client, declaration } = generationClient("qwen-audio-3.1-tts-flash");
   const resolved = client.validate({
     model: declaration.model,
     content: [{ type: "text", text: "Welcome to Cohub. This voice was created from a description." }],
@@ -26,7 +26,7 @@ test("validates the documented Qwen voice design request", () => {
 });
 
 test("validates the documented Qwen public URL clone request", () => {
-  const { client, declaration } = generationClient("qwen-audio-3.0-tts-plus");
+  const { client, declaration } = generationClient("qwen-audio-3.1-tts-flash");
   const resolved = client.validate({
     model: declaration.model,
     content: [
