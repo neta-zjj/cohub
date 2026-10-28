@@ -1,4 +1,4 @@
-import { createGenerationClient, GenerationValidationError, type GenerateRequest, type GenerationModelDeclaration } from "@neta-art/generation";
+import { createGenerationClient, type GenerateRequest, type GenerationModelDeclaration } from "@neta-art/generation";
 import { z } from "zod";
 
 const metaSchema = z.record(z.string(), z.unknown());
@@ -37,9 +37,6 @@ export function resolveGenerationRequestParameters(
   declaration: GenerationModelDeclaration,
   request: Pick<GenerateRequest, "model" | "content" | "parameters" | "meta">,
 ): Record<string, unknown> | undefined {
-  if (declaration.parameters?.duration && request.parameters?.duration === undefined) {
-    throw new GenerationValidationError("Missing required parameter: duration");
-  }
   return createGenerationClient({ models: [declaration], includeBuiltinModels: false }).validate({
     model: request.model,
     content: request.content,

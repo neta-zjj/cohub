@@ -58,23 +58,3 @@ test("rejects a Meshy retexture without the model to texture", () => {
   const parsed = createGenerationTaskRequestSchema.parse(request([{ type: "text", text: "polished bronze" }]));
   assert.throws(() => resolveGenerationRequestParameters(meshy(), parsed), GenerationValidationError);
 });
-
-test("requires duration even when the declaration provides a default", () => {
-  const declaration = getBuiltinGenerationModel("seedance-2-0");
-  assert.ok(declaration, "the Generation SDK declares seedance-2-0");
-  const withDefault = structuredClone(declaration);
-  withDefault.parameters = {
-    ...withDefault.parameters,
-    duration: { type: "integer", optional: true, default: 5, min: 4, max: 15 },
-  };
-
-  assert.throws(
-    () =>
-      resolveGenerationRequestParameters(withDefault, {
-        model: "seedance-2-0",
-        content: [{ type: "text", text: "a slow push in" }],
-        parameters: {},
-      }),
-    /Missing required parameter: duration/,
-  );
-});
